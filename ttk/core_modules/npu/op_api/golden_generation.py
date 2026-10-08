@@ -255,6 +255,10 @@ class GoldenGenerator:
 
         ctx.tensors may be numpy or torch (decided by input_generation) — promoted in-place
         via .to() (torch) or .astype() (numpy), type preserved.
+        Strided torch views (storage larger than the logical view, non-zero offset or
+        non-contiguous — e.g. FRACTAL_NZ logical views over ceil-aligned fractal storage)
+        are promoted whole-storage elementwise with the original view geometry rebuilt,
+        so bytes beyond the logical view (fractal tail padding) survive the cast.
         If source dtype is non-torch-native but target is (cross-boundary), raises
         NotImplementedError (numpy<->torch conversion not yet implemented).
         Bare generator (no @contextlib.contextmanager) — _golden_mode uses yield from."""
@@ -286,7 +290,21 @@ class GoldenGenerator:
             for i, t in enumerate(flat_t):
                 if t_need[i] and t is not None:
                     tgt = DTYPE_PROMOTE_MAP[t_dtypes[i]]
-                    flat_t[i] = t.to(str_to_torch_dtype(tgt)) if isinstance(t, torch.Tensor) else t.astype(tgt)
+                    if isinstance(t, torch.Tensor):
+                        tgt_dt = str_to_torch_dtype(tgt)
+                        storage_numel = t.untyped_storage().nbytes() // t.element_size()
+                        if storage_numel > t.numel() or t.storage_offset() != 0 or not t.is_contiguous():
+                            # Strided view (e.g. a FRACTAL_NZ logical view over a larger
+                            # physical storage): promote the WHOLE storage elementwise and
+                            # rebuild the same view geometry, so bytes beyond the logical
+                            # view (fractal tail padding) survive the cast.
+                            whole = t.as_strided((storage_numel,), (1,), 0)
+                            promoted = whole.to(tgt_dt)
+                            flat_t[i] = promoted.as_strided(tuple(t.shape), t.stride(), t.storage_offset())
+                        else:
+                            flat_t[i] = t.to(tgt_dt)
+                    else:
+                        flat_t[i] = t.astype(tgt)
                     new_t_dtypes[i] = tgt
             dist = ctx.tensor_list_dist
             ctx.tensors = tuple(apply_as_list(flat_t, dist))
