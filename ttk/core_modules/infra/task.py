@@ -15,14 +15,10 @@ __all__ = ["TaskType", "TaskA", "TaskKeeper"]
 
 
 # Standard Packages
+from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
-
-try:
-    from collections.abc import Callable
-except ImportError:
-    from collections.abc import Callable
-from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 
 # Third-Party Packages
@@ -77,7 +73,4 @@ class TaskKeeper:
     def empty(self) -> bool:
         if not self._tasks:
             return True
-        for t in self._tasks.keys():
-            if self._tasks[t]:
-                return False
-        return True
+        return all(not self._tasks[t] for t in self._tasks)

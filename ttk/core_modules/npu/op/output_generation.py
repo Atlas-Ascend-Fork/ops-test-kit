@@ -16,14 +16,10 @@ import contextlib
 import gc
 import inspect
 import logging
+from collections.abc import Callable
 from typing import List, Optional, Sequence, Union
 
 import numpy
-
-try:
-    from collections.abc import Callable
-except ImportError:
-    from collections.abc import Callable
 
 # Third-party Packages
 from ....utilities import (

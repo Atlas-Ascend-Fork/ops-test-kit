@@ -19,14 +19,10 @@ import contextlib
 import copy
 import gc
 import logging
+from collections.abc import Callable
 from typing import Sequence
 
 import numpy
-
-try:
-    from collections.abc import Callable
-except ImportError:
-    from collections.abc import Callable
 
 # Third-party Packages
 from ....utilities import (

@@ -21,16 +21,12 @@ import json
 import logging
 import os
 import time
+from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import contextmanager
+from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy
-
-try:
-    from collections.abc import Callable
-except ImportError:
-    from collections.abc import Callable
-from collections import OrderedDict
-from typing import Any, Optional, Sequence, Tuple, Union
 
 from ...utilities import (
     BinaryCompilationResult,
@@ -551,11 +547,9 @@ class OperatorInterface(metaclass=Singleton):
                 else:
                     op_param_distribution[param] = "UNKNOWN"
                 param_idx += 1
-        param_idx = 0
-        for param in dynamic_shape_func_parameters:
+        for param_idx, param in enumerate(dynamic_shape_func_parameters):
             if param_idx < len(tensor_list_list):
                 op_param_distribution[param] = tensor_list_list[param_idx]
-            param_idx += 1
         param_print = ["***Params***"]
         for param, param_value in op_param_distribution.items():
             param_print.append(f"{param} {str(type(param_value))}:\n{str(param_value)}")

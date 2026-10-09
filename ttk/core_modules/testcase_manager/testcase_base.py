@@ -13,16 +13,11 @@ testcase base class
 __all__ = ["TestcaseBase"]
 
 
-from abc import ABCMeta
-from typing import Any, Dict, Optional, Tuple
-
-try:
-    from collections.abc import Callable
-except ImportError:
-    from collections.abc import Callable
-
 import logging
+from abc import ABCMeta
+from collections.abc import Callable
 from functools import partial
+from typing import Any, Dict, Optional, Tuple
 
 from ...utilities import get_global_storage
 from .field_parser import (
@@ -175,7 +170,7 @@ class TestcaseBase(metaclass=ABCMeta):  # noqa: B024
     def has_equivalent_header(cls, header_name: str) -> bool:
         if not cls.is_legit_header(header_name):
             raise ValueError(f"Could not find header {header_name}")
-        return True if cls.complete_headers[header_name][1] else False
+        return bool(cls.complete_headers[header_name][1])
 
     @classmethod
     def get_equivalent_headers(cls, header_name: str) -> Optional[tuple]:
@@ -256,13 +251,13 @@ class TestcaseBase(metaclass=ABCMeta):  # noqa: B024
             elif isinstance(r, (tuple, list)) and len(r) > 0 and isinstance(r[0], (tuple, list)):
                 result.append(TestcaseBase._normalize_range_recursive(r))
             else:
-                r = tuple(r)
-                if len(r) >= 2:
-                    result.append(r)
-                elif len(r) == 0:
+                item = tuple(r)
+                if len(item) >= 2:
+                    result.append(item)
+                elif len(item) == 0:
                     result.append((None, None))
                 else:
-                    result.append((r[0], r[0]))
+                    result.append((item[0], item[0]))
         return tuple(result)
 
     @classmethod
@@ -455,10 +450,8 @@ class TestcaseBase(metaclass=ABCMeta):  # noqa: B024
     def _flatten_by_distribution(values, distribution):
         """Flatten a distribution-aligned field to one-value-per-tensor."""
         result = []
-        vi = 0
-        for num in distribution:
+        for vi, num in enumerate(distribution):
             val = values[vi]
-            vi += 1
             if num > 0:
                 if isinstance(val, (tuple, list)):
                     if len(val) == num:

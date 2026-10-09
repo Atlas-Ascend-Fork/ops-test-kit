@@ -17,14 +17,10 @@ __all__ = ["TestcaseOp"]
 # Standard Packages
 import ast
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple, Union
 
 import numpy
-
-try:
-    from collections.abc import Callable
-except ImportError:
-    from collections.abc import Callable
 
 # Third-Party Packages
 from ...utilities import (
