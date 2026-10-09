@@ -241,6 +241,16 @@ def apply_e2e_args(sw, args):
         sw.fullgraph = args.fullgraph
     if getattr(args, "aclgraph", False):
         sw.aclgraph_enabled = True
+    if getattr(args, "binary", None) is not None:
+        binary = args.binary
+        if isinstance(binary, str):
+            binary = binary.lower() not in ("false", "0", "no", "off")
+        if binary:
+            if not sw.aclgraph_enabled:
+                raise ValueError("--binary requires --aclgraph in e2e mode")
+            if getattr(args, "super_kernel", False):
+                raise ValueError("--binary cannot be combined with --super-kernel")
+        sw.aclgraph_online_compile = not binary
     if hasattr(args, "core_limit") and args.core_limit is not None:
         sw.core_limit = _parse_core_limit(args.core_limit)
     if getattr(args, "super_kernel", False):

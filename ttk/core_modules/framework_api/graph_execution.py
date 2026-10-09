@@ -47,7 +47,7 @@ _ACLGRAPH_SUPER_KERNEL_OPTIONS = {
 
 
 @contextmanager
-def _require_super_kernel_compile(enabled):
+def _require_kernel_compile(enabled):
     """Track this worker's compiler calls, including failures followed by fallback.
 
     The backend catches CalledProcessError and may return valid binary outputs.
@@ -65,7 +65,6 @@ def _require_super_kernel_compile(enabled):
         command = args[0] if args else kwargs.get("args", ())
         parts = shlex.split(command) if isinstance(command, str) else command
         tracked = bool(parts) and os.path.basename(os.fsdecode(parts[0])) == "op_compiler"
-        tracked = tracked and "--enable_super_kernel" in parts
         if not tracked:
             return original_run(*args, **kwargs)
         output_dir = parts[parts.index("-o") + 1] if "-o" in parts else "(not specified)"
@@ -82,7 +81,7 @@ def _require_super_kernel_compile(enabled):
     with patch.object(subprocess, "run", checked_run):
         yield
     if failures:
-        raise RuntimeError("SUPER_KERNEL_COMPILE_FAILURE: " + "; ".join(failures))
+        raise RuntimeError("KERNEL_COMPILE_FAILURE: " + "; ".join(failures))
 
 
 @functools.lru_cache(maxsize=1)
@@ -151,15 +150,15 @@ def _compile_model(model, backend, dynamic, fullgraph):
     return compiled
 
 
-def _compile_model_aclgraph(model, backend, fullgraph, super_kernel=False):
+def _compile_model_aclgraph(model, backend, fullgraph, super_kernel=False, online_compile=True):
     """以 aclgraph 模式编译模型"""
-    compile_kwargs = {"options": _ACLGRAPH_SUPER_KERNEL_OPTIONS} if super_kernel else {}
+    options = _ACLGRAPH_SUPER_KERNEL_OPTIONS if super_kernel else {"static_kernel_compile": online_compile}
     compiled = torch.compile(
         model,
         fullgraph=fullgraph,
         backend=backend,
         dynamic=False,
-        **compile_kwargs,
+        options=options,
     )
     return compiled
 
@@ -454,21 +453,23 @@ def _execute_graph(
 
     use_fullgraph = bool(switches.fullgraph)
     try:
-        if switches.super_kernel_enabled:
-            logging.info("SuperKernel enabled: mode=%s scope=%s", mode_str, testcase.api_name)
-            model = _SuperKernelScopeModel(model, testcase.api_name, is_aclgraph=is_aclgraph)
-        if is_aclgraph and switches.core_limit:
-            logging.info(
-                "ACLGraph core limit enabled: aicore=%s vectorcore=%s",
-                switches.core_limit[0] or "physical",
-                switches.core_limit[1] or "physical",
-            )
-            model = _AclGraphCoreLimitModel(model, switches.core_limit, dev_id)
-        if is_aclgraph:
-            compiled = _compile_model_aclgraph(model, npu_backend, use_fullgraph, switches.super_kernel_enabled)
-        else:
-            compiled = _compile_model(model, npu_backend, dynamic, use_fullgraph)
-        with _require_super_kernel_compile(switches.super_kernel_enabled):
+        with _require_kernel_compile(True):
+            if switches.super_kernel_enabled:
+                logging.info("SuperKernel enabled: mode=%s scope=%s", mode_str, testcase.api_name)
+                model = _SuperKernelScopeModel(model, testcase.api_name, is_aclgraph=is_aclgraph)
+            if is_aclgraph and switches.core_limit:
+                logging.info(
+                    "ACLGraph core limit enabled: aicore=%s vectorcore=%s",
+                    switches.core_limit[0] or "physical",
+                    switches.core_limit[1] or "physical",
+                )
+                model = _AclGraphCoreLimitModel(model, switches.core_limit, dev_id)
+            if is_aclgraph:
+                compiled = _compile_model_aclgraph(
+                    model, npu_backend, use_fullgraph, switches.super_kernel_enabled, switches.aclgraph_online_compile
+                )
+            else:
+                compiled = _compile_model(model, npu_backend, dynamic, use_fullgraph)
             result_nps, perf, det_status = _run_compiled(
                 compiled,
                 run_args,

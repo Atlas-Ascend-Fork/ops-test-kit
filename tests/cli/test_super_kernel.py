@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from ttk.core_modules.framework_api.graph_execution import _require_super_kernel_compile
+from ttk.core_modules.framework_api.graph_execution import _require_kernel_compile
 
 
 def _args(**kwargs):
@@ -114,14 +114,20 @@ def test_compile_model_aclgraph_passes_super_kernel_options(monkeypatch):
     assert captured["kwargs"]["options"]["super_kernel_debug_options"] == {"debug_per_op_max_core_num": 1}
 
     graph_execution._compile_model_aclgraph(m, "npugraph_ex", 0, False)
-    assert "options" not in captured["kwargs"]
+    assert captured["kwargs"]["options"]["static_kernel_compile"] is True
+    assert not captured["kwargs"]["options"].get("super_kernel_optimize", False)
+    assert not captured["kwargs"]["options"].get("disable_static_kernel_compile_cache", False)
+
+    graph_execution._compile_model_aclgraph(m, "npugraph_ex", 0, online_compile=False)
+    assert captured["kwargs"]["options"]["static_kernel_compile"] is False
 
 
 _SUPER_KERNEL_COMMAND = ["op_compiler", "-p", "/case", "--enable_super_kernel", "-o", "/compile-output"]
 
 
 @pytest.mark.parametrize("raises", [True, False])
-def test_compiler_failure_cannot_be_hidden_by_successful_fallback(monkeypatch, raises):
+@pytest.mark.parametrize("super_kernel", [True, False])
+def test_compiler_failure_cannot_be_hidden_by_successful_fallback(monkeypatch, raises, super_kernel):
     def run(command, **kwargs):
         if raises:
             raise subprocess.CalledProcessError(1, command)
@@ -130,10 +136,11 @@ def test_compiler_failure_cannot_be_hidden_by_successful_fallback(monkeypatch, r
     monkeypatch.setattr(subprocess, "run", run)
 
     def execute_with_fallback():
-        with _require_super_kernel_compile(True), suppress(subprocess.CalledProcessError):
-            subprocess.run(_SUPER_KERNEL_COMMAND, check=raises)
+        command = _SUPER_KERNEL_COMMAND if super_kernel else ["op_compiler", "-p", "/case", "-o", "/compile-output"]
+        with _require_kernel_compile(True), suppress(subprocess.CalledProcessError):
+            subprocess.run(command, check=raises)
 
-    with pytest.raises(RuntimeError, match="SUPER_KERNEL_COMPILE_FAILURE.*compile-output"):
+    with pytest.raises(RuntimeError, match="KERNEL_COMPILE_FAILURE.*compile-output"):
         execute_with_fallback()
     assert subprocess.run is run
 
@@ -143,10 +150,10 @@ def test_success_cache_and_unrelated_commands_are_allowed(monkeypatch):
         return subprocess.CompletedProcess(command, 0 if command == _SUPER_KERNEL_COMMAND else 1)
 
     monkeypatch.setattr(subprocess, "run", run)
-    with _require_super_kernel_compile(True):
+    with _require_kernel_compile(True):
         subprocess.run(_SUPER_KERNEL_COMMAND, check=False)
         subprocess.run(["other-tool"], check=False)
-    with _require_super_kernel_compile(True):
+    with _require_kernel_compile(True):
         pass  # Existing compiled cache: no new invocation.
     assert subprocess.run is run
 
@@ -156,6 +163,6 @@ def test_disabled_guard_preserves_existing_behavior(monkeypatch):
         return subprocess.CompletedProcess(command, 1)
 
     monkeypatch.setattr(subprocess, "run", run)
-    with _require_super_kernel_compile(False):
+    with _require_kernel_compile(False):
         assert subprocess.run(_SUPER_KERNEL_COMMAND, check=False).returncode == 1
     assert subprocess.run is run

@@ -130,9 +130,24 @@ python3 -m ttk e2e -i torch_ops.csv --run=5
 |------|------|--------|
 | `--run` | 执行次数 | 板端3次 |
 | `--warmup` | Profiling前预热 | 开启 |
+| `--aclgraph` | 启用 ACLGraph，默认开启算子在线编译，允许复用编译缓存 | 关闭 |
+| `-b` / `--binary` | `--aclgraph -b` 或 `--aclgraph -b=release` 复用已有算子二进制，关闭算子在线编译并保留图捕获和重放；`-b=false` 恢复在线编译。启用时需搭配 `--aclgraph`，不能与 `--super-kernel` 同用 | 关闭 |
 | `--no-prof` | 禁用Profiling采集 | 关闭 |
-| `--core-limit` | 限制核数上限：`N` 仅限 AI 核，`a,v` 分别限制（如 `2,32`）。图模式映射 `ge.aicoreNum`（未设置的一侧回落物理核数）；aclgraph 模式经 `torch.npu.set_device_limit` 下发（每进程仅首次生效）；eager 不支持 | 无 |
+| `--core-limit` | 限制核数上限：`N` 仅限 AI 核，`a,v` 分别限制（如 `2,32`），未设置的一侧回落物理核数。GE 图模式映射 `ge.aicoreNum`；ACLGraph 模式通过 `scope.limit_core_num` 限制捕获前的预处理算子，并在每次图捕获中记录核数限制；eager 不支持 | 无 |
 | `--super-kernel` | 被测算子走 SuperKernel 编译流程（功能验证）：以 api_name 为 scope 标定，GE 图模式（-c/-d）与 aclgraph 模式均适用。需搭配 -c/-d/--aclgraph，不支持 --cpu | 关闭 |
+
+```shell
+# ACLGraph 默认开启算子在线编译
+python3 -m ttk e2e -i torch_ops.csv --aclgraph
+
+# 复用已有算子二进制，保留 ACLGraph 捕获和重放
+python3 -m ttk e2e -i torch_ops.csv --aclgraph -b
+# 等价写法：--aclgraph -b=release 或 --aclgraph --binary
+```
+
+`-b` 在 E2E 中仅控制 ACLGraph 的算子在线编译；`--fullgraph` 仍独立控制整图捕获。
+普通 GE 图模式（`-c`/`-d`）未指定 `--aclgraph` 时不能启用此选项。
+任何实际触发的算子在线编译一旦失败，即使后端回退产生了输出，结果仍记为 FAIL。
 
 # 多卡并行
 

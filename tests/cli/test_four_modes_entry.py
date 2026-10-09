@@ -160,6 +160,34 @@ class TestE2eMode:
         """--aclgraph 启用 aclgraph reduce-overhead 模式。"""
         sw = _run(["e2e", "-i", "x.csv", "--aclgraph"], captured)
         assert sw.aclgraph_enabled is True
+        assert sw.aclgraph_online_compile is True
+
+    @pytest.mark.parametrize(
+        "binary_args", [["-b"], ["-b=release"], ["-b", "release"], ["--binary"], ["--binary=true"]]
+    )
+    def test_aclgraph_can_disable_online_compile(self, captured, binary_args):
+        sw = _run(["e2e", "-i", "x.csv", "--aclgraph", *binary_args], captured)
+        assert sw.aclgraph_enabled is True
+        assert sw.aclgraph_online_compile is False
+
+    @pytest.mark.parametrize("value", ["false", "0", "no", "off"])
+    def test_binary_false_keeps_online_compile(self, captured, value):
+        sw = _run(["e2e", "-i", "x.csv", "--aclgraph", f"-b={value}"], captured)
+        assert sw.aclgraph_online_compile is True
+
+    @pytest.mark.parametrize("extra", [[], ["-c"], ["--aclgraph", "--super-kernel"]])
+    def test_binary_rejects_invalid_combinations(self, captured, extra):
+        with pytest.raises(ValueError, match="--binary"):
+            _run(["e2e", "-i", "x.csv", "-b", *extra], captured)
+
+    def test_binary_false_allows_super_kernel(self, captured):
+        sw = _run(["e2e", "-i", "x.csv", "--aclgraph", "--super-kernel", "-b=false"], captured)
+        assert sw.aclgraph_online_compile is True
+        assert sw.super_kernel_enabled is True
+
+    def test_binary_rejects_invalid_value(self, captured):
+        with pytest.raises(SystemExit):
+            _run(["e2e", "-i", "x.csv", "--aclgraph", "-b=invalid"], captured)
 
 
 # -- run_with_switches 分派 --------------------------------------------------

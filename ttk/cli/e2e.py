@@ -49,7 +49,17 @@ def _add_e2e_args(parser):
         "--aclgraph",
         action="store_true",
         default=False,
-        help="Enable aclgraph mode (reduce-overhead) via torch.compile",
+        help="Enable aclgraph mode via torch.compile with online kernel compilation by default",
+    )
+    parser.add_argument(
+        "-b",
+        "--binary",
+        nargs="?",
+        const="release",
+        default=None,
+        choices=("release", "true", "false", "1", "0", "yes", "no", "on", "off"),
+        help="Reuse binary kernels for --aclgraph without online kernel compilation; "
+        "-b or -b=release enables reuse, -b=false restores online compilation; incompatible with --super-kernel",
     )
     parser.add_argument(
         "--fullgraph",

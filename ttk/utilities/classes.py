@@ -176,6 +176,7 @@ class SWITCHES:
         "force_cpu",
         "fullgraph",
         "aclgraph_enabled",
+        "aclgraph_online_compile",
         "validate_only",
         "manual_data_mode",
         "manual_data_dirs",
@@ -328,6 +329,7 @@ class SWITCHES:
         self.force_cpu: bool = False
         self.fullgraph: int = 0
         self.aclgraph_enabled: bool = False
+        self.aclgraph_online_compile: bool = True
         self.validate_only: bool = False
         self.manual_data_mode: Optional[str] = None
         self.manual_data_dirs: Tuple[str, ...] = ()
