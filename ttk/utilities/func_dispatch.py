@@ -59,6 +59,10 @@ def bind_by_name(func, pool: dict) -> Tuple[list, dict]:
     - ``**kwargs`` absorbs leftover pool entries (excluding ``self``).
     - A parameter name present in the signature but missing from pool
       (and not self/*args/**kwargs) → ``UnknownParamError``.
+    - An optional param missing from pool uses its default: pre-star params
+      get the default appended positionally to hold the slot (skipping it
+      would shift every later value one param to the left); post-star
+      params are skipped (Python applies the default).
 
     ``self`` is skipped by name; callers should pass a bound method
     (``inst.__call__``) so ``self`` is auto-stripped by Python.
@@ -97,7 +101,12 @@ def bind_by_name(func, pool: dict) -> Tuple[list, dict]:
             raise UnknownParamError(
                 f"parameter '{name}' of {getattr(func, '__qualname__', func)} is not a known input or attribute name"
             )
-        # has a default: leave it to Python (skip, use the default)
+        elif not seen_star:
+            # Pre-star optional param missing from pool: append the default to
+            # hold the positional slot — skipping it would shift every later
+            # value one param to the left (e.g. alpha's value landing on gamma).
+            args.append(p.default)
+        # Post-star optional param: leave it to Python (skip, use the default)
     leftover = [(k, v) for k, v in pool.items() if k not in consumed]
     if has_var_pos:
         args.extend(v for _, v in leftover)

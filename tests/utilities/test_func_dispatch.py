@@ -1,12 +1,12 @@
-# ----------------------------------------------------------------------------
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS FILE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-# ----------------------------------------------------------------------------
 """func_dispatch 测试：framework_of 框架识别、bind_by_name 按名绑定参数、resolve_callable_str 字符串解析。"""
 
 import numpy
@@ -57,7 +57,21 @@ def test_bind_by_name_partial_split_init_and_call():
     inst = G(*ia, **ik)
     ca, ck = bind_by_name(inst.__call__, pool)
     assert inst(*ca, **ck) == [12]
-    assert inst.x == 1 and inst.axis == 9
+    assert inst.x == 1
+    assert inst.axis == 9
+
+
+def test_bind_by_name_omitted_earlier_optional_keeps_slot_alignment():
+    """省略前序可选属性时，后面的值按名落位不得左移错位（类形式 golden 绑定场景）。"""
+
+    class G:
+        def __init__(self, gamma=2.0, alpha=0.25, reduction="mean", **kwargs):
+            self.gamma, self.alpha, self.reduction = gamma, alpha, reduction
+
+    pool = {"alpha": -1.6e38, "reduction": "none", "pred": "P", "target": "T"}
+    ia, ik = bind_by_name(G.__init__, pool)
+    inst = G(*ia, **ik)
+    assert (inst.gamma, inst.alpha, inst.reduction) == (2.0, -1.6e38, "none")
 
 
 def test_resolve_callable_str_from_dotted_path():

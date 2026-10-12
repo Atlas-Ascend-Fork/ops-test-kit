@@ -52,7 +52,10 @@ def bind_params(func, name_to_value: dict, device: Optional[str] = None, warn_le
     Returns ``(args, kwargs)``. Each declared param (except self / VAR) is resolved by:
       * name in ``name_to_value`` -> take value (positional before ``*``, keyword after);
       * framework-reserved name (``device``) -> inject ``device`` (when not None);
-      * has a default -> use the default (skip, no error);
+      * has a default -> use the default: pre-star params get the default appended
+        positionally so later values stay in their declared slots (skipping the
+        slot would shift every later value one param to the left); post-star
+        params are simply skipped (Python applies the default);
       * otherwise -> :class:`UnknownParamError` (neither input/attr nor defaulted).
     ``*args`` collects unconsumed entries (in insertion order) as positional args.
     ``**kwargs`` absorbs leftover entries (excluding ``self``); otherwise
@@ -103,7 +106,12 @@ def bind_params(func, name_to_value: dict, device: Optional[str] = None, warn_le
             # loudly instead of silently binding the wrong value.
             qual = getattr(func, "__qualname__", getattr(func, "__name__", func))
             raise UnknownParamError(f"parameter '{name}' of {qual} is not a known input or attribute name")
-        # has a default: leave it to Python (skip, use the default)
+        elif not seen_star:
+            # Pre-star optional param missing from the pool: append the default
+            # to hold the positional slot — skipping it would shift every later
+            # value one param to the left (e.g. alpha's value landing on gamma).
+            args.append(param.default)
+        # Post-star optional param: leave it to Python (skip, use the default)
     leftover = {k: v for k, v in name_to_value.items() if k not in consumed}
     if has_var_positional:
         args.extend(leftover.values())
