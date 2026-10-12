@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""Tests for GEIR 4-bit input packing (issue #179).
+"""Tests for GEIR 4-bit input packing.
 
 NumPy 4-bit dtypes are unpacked (1 byte/element) while the generated C++
 program reads the device packed representation ((num_elements + 1) / 2 bytes,
@@ -17,7 +17,7 @@ two 4-bit elements per byte) — see LoadInputFromFile in geir_op_template.cpp.j
 import numpy as np
 import pytest
 
-from ttk.core_modules.geir.profiling import _write_input_bin
+from ttk.core_modules.geir.execute import _write_input_bin
 from ttk.utilities import is_4bit_dtype, unpack_4bits
 from ttk.utilities.dtypes import numpy_float4_e2m1, numpy_int4
 

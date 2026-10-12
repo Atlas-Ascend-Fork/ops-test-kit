@@ -1,3 +1,0 @@
-testcase_name,op_name,input_dtypes,attributes,input_shapes,output_dtypes,output_shapes,input_formats,output_formats
-reduce_min_00,reduce_min,"('int32',)","{'axes': [0], 'keepdims': False}","((512,),(1,))","('int32',)","((1,),)","('ND',)","('ND',)"
-reduce_min_01,reduce_min,"('float32', 'int32')","{'axes': [0], 'keepdims': False}","((1,),(1,))","('float32',)","((1,),)","('ND',)","('ND',)"

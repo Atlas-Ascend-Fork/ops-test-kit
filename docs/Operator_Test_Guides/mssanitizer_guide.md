@@ -46,13 +46,13 @@ source /usr/local/Ascend/cann/set_env.sh
 
 ```shell
 # Kernel 模式（动态 shape 编译）
-mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/add.csv --warmup=false --task-prof=false
+mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast --warmup=false --task-prof=false
 
 # Kernel 模式（二进制）
-mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/add.csv -b=release --warmup=false --task-prof=false
+mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast -b=release --warmup=false --task-prof=false
 
 # ACLNN 模式
-mssanitizer --tool=memcheck -- python3 -m ttk aclnn -i examples/case_store/aclnn/aclnn_add.csv --warmup=false --task-prof=false
+mssanitizer --tool=memcheck -- python3 -m ttk aclnn -i examples/case_store/aclnn/cases.csv -t add_fp16_broadcast --warmup=false --task-prof=false
 ```
 
 > 注：`--tool=memcheck` 为默认值，可省略。上例中显式写出便于理解。
@@ -63,7 +63,7 @@ mssanitizer 包裹的 TTK 命令可以使用 TTK 自带的用例筛选与编译�
 
 ```shell
 # 按索引范围运行
-mssanitizer --tool=memcheck -- python3 -m ttk kernel -i cases.csv --warmup=false --task-prof=false --ti=1-10
+mssanitizer --tool=memcheck -- python3 -m ttk kernel -i cases.csv --warmup=false --task-prof=false --ti=0-9
 
 # 按算子名筛选
 mssanitizer --tool=memcheck -- python3 -m ttk kernel -i cases.csv --warmup=false --task-prof=false --op add,mat_mul_v3
@@ -75,10 +75,10 @@ mssanitizer --tool=memcheck -- python3 -m ttk kernel -i cases.csv --warmup=false
 mssanitizer --tool=memcheck -- python3 -m ttk kernel -i cases.csv --warmup=false --task-prof=false --tc=10
 
 # 运行Add算子（动态 shape 编译）
-mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/add.csv -d --warmup=false --task-prof=false
+mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast -d --warmup=false --task-prof=false
 
 # 运行Add算子（二进制）
-mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/add.csv --binary --warmup=false --task-prof=false
+mssanitizer --tool=memcheck -- python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast --binary --warmup=false --task-prof=false
 ```
 
 ## 切换检测子工具

@@ -1,0 +1,14 @@
+testcase_name,api_name,tensor_view_shapes,tensor_dtypes,tensor_formats,attributes,output_tensor_indexes,input_data_ranges,precision_tolerances,absolute_precision,remark
+tf_add_f32,tf.raw_ops.Add,"((2,3),(2,3))","('float32','float32')",,,,,,,raw_ops 基础链路：f32 双输入基线精度
+tf_add_f16,tf.raw_ops.Add,"((128,256),(128,256))","('float16','float16')",,,,,,,dtype 覆盖：float16
+tf_add_bf16,tf.raw_ops.Add,"((64,32),(64,32))","('bfloat16','bfloat16')",,,,,,,dtype 覆盖：bfloat16
+tf_add_int32,tf.raw_ops.Add,"((8,),(8,))","('int32','int32')",,,,,,,dtype 覆盖：int32（整型 binary_equal 精确比对）
+tf_add_broadcast,tf.raw_ops.Add,"((4,1,3),(1,5,3))","('float32','float32')",,,,,,,"广播语义：输出 shape 自动推导（(4,5,3)）"
+tf_relu_f32,tf.nn.relu,"((64,128),)","('float32',)",,,,,,,公共 API：tf.nn 命名空间
+tf_relu_f16,tf.nn.relu,"((32,64),)","('float16',)",,,,,,,公共 API + f16 低精度容差档
+tf_math_add,tf.math.add,"((2,3),(2,3))","('float32','float32')",,,,,,,公共 API：tf.math 命名空间（与 raw_ops.Add 同源算子）
+tf_abs,tf.math.abs,"((2,3,4),)","('float32',)",,,,,,,单输入、无属性算子
+tf_matmul,tf.linalg.matmul,"((2,3),(3,4))","('float16','float16')",,,,,,,linalg API + dtype 覆盖 float16（NPU f16 matmul 原生计算；f32 变体经 GE 立方指令含 fp16 量化、默认 mix 判据数据相关不稳，如需 f32 用例须 --compare close 配 CSV 容差列）
+tf_scatter_div_stateful,tf.compat.v1.scatter_div,"((6,),(3,),(3,))","('float32','int32','float32')",,{'use_locking':False},,"((1,10),(0,5),(2,5))",,,Resource* 有状态算子：mutable ref 槽自动 tf.Variable 化 + 更新值回读；bool 属性 use_locking 下发
+tf_dequantize_scaled,tf.quantization.dequantize,"((2,2),(),())","('quint8','float32','float32')",,{'mode':'SCALED'},,"((0,255),(0.5,0.5),(1.5,1.5))",,,量化 dtype quint8（numpy 存储别名 uint8）+ 字符串属性 mode 原值透传；golden 须 --compare close（mixed 会 Promote float32 标量参数触发该算子 fp32 强校验报错）
+tf_range_valuedepend,tf.raw_ops.Range,"((),(),())","('int32','int32','int32')",,,,"((0,0),(8,10),(3,3))",,,0-D value-depend 输入：以 Python 值折叠 Const 供 GE infershape；输出 shape 数据相关（0/3/6/9 序列）

@@ -7,16 +7,21 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
+from .bridge import _split_csv
+
+
 def register_list_command(subparsers):
     parser = subparsers.add_parser("list", help="List test cases from a test case file (csv/xlsx)")
     parser.add_argument("-i", "--input", required=True, help="Test case file (csv/xlsx)")
     parser.add_argument("--sheet", default=None, help="Excel worksheet name (default: first worksheet)")
     parser.add_argument("--op", "--operator", dest="operator", help="Filter by operator name")
     parser.set_defaults(handler=_handle_list)
+    return parser
 
 
 def _handle_list(args):
-    from ttk.utilities.table_reader import read_table
+    from ttk.core_modules.common.testcase import read_table
 
     header, rows = read_table(args.input, args.sheet)
 
@@ -43,10 +48,7 @@ def _handle_list(args):
         names, rows = [n for n, _ in kept], [r for _, r in kept]
 
     if args.operator:
-        # Accept the spaces users commonly add after commas in a shell list.
-        # Empty entries are ignored so a trailing comma does not filter out
-        # every case unexpectedly.
-        op_filter = [item.strip() for item in args.operator.split(",") if item.strip()]
+        op_filter = _split_csv(args.operator)
         if "op_name" in header:
             op_idx = header.index("op_name")
         elif "api_name" in header:

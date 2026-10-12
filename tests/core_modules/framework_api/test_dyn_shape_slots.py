@@ -14,17 +14,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from ttk.core_modules.framework_api.input_generation import generate_np_storages
-from ttk.core_modules.npu_preprocess import (
+from ttk.core_modules.aclnn.api_param import AclnnParamPlan
+from ttk.core_modules.aclnn.testcase import TestcaseAclnn
+from ttk.core_modules.common.invoke import (
+    Invoke,
     apply_aclnn_npu_preprocess_result,
     apply_npu_preprocess_result,
-    invoke_npu_preprocess,
 )
-from ttk.core_modules.testcase_manager.field_types import FIELD_TYPES
-from ttk.core_modules.testcase_manager.param_plan import ParamPlan
-from ttk.core_modules.testcase_manager.testcase_aclnn import AclnnParamPlan, TestcaseAclnn
-from ttk.core_modules.testcase_manager.testcase_e2e import TestcaseE2e
-from ttk.utilities.simple_param_extractor import ParamInfo
+from ttk.core_modules.common.testcase.field_types import FIELD_TYPES
+from ttk.core_modules.common.testcase.input_data import generate_np_storages
+from ttk.core_modules.framework_api.api_model import ParamInfo
+from ttk.core_modules.framework_api.api_param import ParamPlan
+from ttk.core_modules.framework_api.testcase import TestcaseE2e
 
 
 class FakeTensor:
@@ -110,7 +111,8 @@ def test_dynamic_slot_respects_compressed_storage_broadcast(kind, compressed):
 def test_dynamic_storage_is_deferred():
     case = make_case(((2,), (-1,)), ("float32", "int32"))
     switches = SimpleNamespace(input_distribution="uniform", random_seed=None)
-    generate_np_storages(case, switches)
+    storages, _ = generate_np_storages(case, switches)
+    case.np_storages = storages
     assert case.np_storages[0].shape == (2,)
     assert case.np_storages[1] is None
 
@@ -129,7 +131,7 @@ def test_dynamic_storage_is_deferred():
 def test_dynamic_slot_requires_usable_golden_source(
     monkeypatch, golden_mode, golden_api, manual_has_goldens, has_plugin, expected
 ):
-    from ttk.core_modules.framework_api import profiling
+    from ttk.core_modules.framework_api import compare as profiling
 
     case = make_case()
     case.golden_api = golden_api
@@ -137,11 +139,11 @@ def test_dynamic_slot_requires_usable_golden_source(
     manual_case = SimpleNamespace(has_goldens=manual_has_goldens) if manual_has_goldens else None
     monkeypatch.setattr(profiling, "get_plugin_function", lambda *_args: object() if has_plugin else None)
 
-    assert profiling._has_dynamic_golden_source(case, switches, manual_case) is expected
+    assert profiling.has_dynamic_golden_source(case, switches, manual_case) is expected
 
 
 def test_manual_replay_treats_dynamic_slot_as_none_marker():
-    from ttk.core_modules.manual_data import _input_specs
+    from ttk.core_modules.common.dump.manual_data import _input_specs
 
     case = make_case(((-1,), (4,)), ("int32", "float32"))
     assert _input_specs(case, "e2e") == [None, ("float32", (4,))]
@@ -211,30 +213,36 @@ def test_apply_result_rejects_contract_violations(returned, message):
 
 
 def test_invoke_accepts_dict_and_rejects_non_tensor_values():
+    """invoke 是纯执行器：dict 形态校验后原样返回（落地由通路 absorb 负责）。"""
     case = make_case()
-    plan = make_plan([ParamInfo(name="metadata", type="Tensor")])
     switches = SimpleNamespace(short_soc_version="Ascend950", plugin_path=None)
     generated = FakeTensor((32,))
 
-    result = invoke_npu_preprocess(
+    result = Invoke.npu_preprocess(
         case,
+        lambda metadata, **kwargs: {"metadata": generated},
         switches,
-        plan,
-        [None],
-        {},
-        func=lambda metadata, **kwargs: {"metadata": generated},
+        device_args=([None], {}),
     )
     assert result == {"metadata": generated}
 
     with pytest.raises(RuntimeError, match="not a tensor"):
-        invoke_npu_preprocess(
+        Invoke.npu_preprocess(
             case,
+            lambda metadata, **kwargs: {"metadata": (32,)},
             switches,
-            plan,
-            [None],
-            {},
-            func=lambda metadata, **kwargs: {"metadata": (32,)},
+            device_args=([None], {}),
         )
+
+
+def test_absorb_rejects_dict_without_dynamic_slot_declaration():
+    """无 -1 声明却落地物化 dict → apply 逐名声明校验拒绝。"""
+    case = make_case(((8,),), ("float32",))  # 无 -1 槽
+    plan = make_plan([ParamInfo(name="x", type="Tensor")])
+    args, kwargs = [FakeTensor((8,))], {}
+
+    with pytest.raises(RuntimeError, match="not declared as a supported -1 slot"):
+        case.absorb_preprocess({"metadata": FakeTensor((32,))}, plan, args, kwargs)
 
 
 def make_aclnn_case(metadata_shape=(-1,), metadata_dtype="int32"):
@@ -273,7 +281,7 @@ def make_aclnn_plan():
 
 
 def test_aclnn_dynamic_header_and_storage_are_deferred():
-    from ttk.core_modules.npu.op_api.input_generation import InputGenerator
+    from ttk.core_modules.aclnn.input_generate import InputGenerator
 
     assert TestcaseAclnn.tensor_property_headers["tensor_view_shapes"][0] is FIELD_TYPES.SHAPELIKE_DYN_NESTED
     case = make_aclnn_case()
@@ -301,7 +309,7 @@ def test_aclnn_dynamic_slot_validation(case, reason):
 
 
 def test_aclnn_manual_replay_treats_dynamic_slot_as_none_marker():
-    from ttk.core_modules.manual_data import _input_specs
+    from ttk.core_modules.common.dump.manual_data import _input_specs
 
     assert _input_specs(make_aclnn_case(), "aclnn")[1] is None
 
@@ -315,7 +323,7 @@ def test_apply_aclnn_result_materializes_host_input_without_changing_csv_shape()
     patched = apply_aclnn_npu_preprocess_result(case, make_aclnn_plan(), {"metadataOptional": generated})
 
     assert patched[0][:2] == (1, "metadataOptional")
-    assert case.flatten_tensors[1] is None
+    assert case.flat_tensors[1] is None
     assert case.np_storages[1] is None
     assert tuple(case._aclnn_dynamic_tensors[1].shape) == (12,)
     assert case.tensor_view_shapes[1] == (-1,)
@@ -324,7 +332,7 @@ def test_apply_aclnn_result_materializes_host_input_without_changing_csv_shape()
 def test_aclnn_phase1_uses_materialized_shape_for_dynamic_slot():
     import torch
 
-    from ttk.core_modules.npu.op_api.profiling import Phase1ParamBuilder
+    from ttk.core_modules.aclnn.execute import Phase1ParamBuilder
 
     class FakeDevice:
         def __init__(self):
@@ -384,7 +392,7 @@ def test_apply_aclnn_result_uses_actual_shape_and_rejects_dtype_mismatch():
 
 
 def test_tf_graph_rejects_preprocess_tensor_materialization(monkeypatch, caplog):
-    from ttk.core_modules.framework_api import tf_graph_execution
+    from ttk.core_modules.framework_api.tf import graph_runner as tf_graph_execution
 
     case = make_case(((4,),), ("float32",), api_name="tf.fake")
     backend = SimpleNamespace(is_npu=lambda: True, device_scope=lambda _dev_id: None)
@@ -392,15 +400,15 @@ def test_tf_graph_rejects_preprocess_tensor_materialization(monkeypatch, caplog)
     monkeypatch.setattr(tf_graph_execution, "prepare_device_args", lambda *_args: ([generated], {}))
     monkeypatch.setattr(
         tf_graph_execution,
-        "invoke_npu_preprocess",
-        lambda *_args, **_kwargs: {"input": generated},
+        "Invoke",
+        SimpleNamespace(npu_preprocess=lambda *_args, **_kwargs: {"input": generated}),
     )
 
-    result = tf_graph_execution._execute_tf_graph(
+    result = tf_graph_execution.execute_tf_graph(
         case,
         backend,
         0,
-        SimpleNamespace(),
+        SimpleNamespace(plugin_path=None),
         object(),
         lambda value: value,
         False,
@@ -411,3 +419,78 @@ def test_tf_graph_rejects_preprocess_tensor_materialization(monkeypatch, caplog)
 
     assert result == ([], None, None)
     assert "TF graph mode does not support npu_preprocess tensor materialization" in caplog.text
+
+
+# ── absorb 协议（npu_preprocess 结果落地）─────────────────────────────
+
+
+def test_absorb_none_without_declaration_is_noop():
+    """无 -1 声明 × None 返回 → 基类默认 no-op（纯副作用）。"""
+    case = make_case(((8,),), ("float32",))
+    assert case.absorb_preprocess(None, None) is None
+
+
+def test_absorb_none_with_declaration_requires_slot_refresh():
+    """有 -1 声明 × None 返回 × 槽位未反刷 → 契约失败（提示双通道）。"""
+    case = make_case()  # ((-1,),)
+    with pytest.raises(RuntimeError, match="not materialized.*dict return or slot-table write"):
+        case.absorb_preprocess(None, None)
+
+
+def test_absorb_none_with_slot_refresh_passes_aclnn_implicit_channel():
+    """有 -1 声明 × None 返回 × 槽位已反刷 → 隐式通道核验放行。"""
+    case = make_case()
+    materialized = FakeTensor((32,))
+    case.set_flat_tensor(0, materialized)
+    assert case.absorb_preprocess(None, None) is None  # E2E：批 2 前无补丁，核验放行
+
+
+def test_absorb_e2e_dict_patches_args():
+    """E2E 显式通道：dict → apply 回填 args，返回原 dict。"""
+    case = make_case()
+    case._param_plan_cache = make_plan([ParamInfo(name="metadata", type="Tensor")])
+    plan = case._param_plan_cache
+    args, kwargs = [None], {}
+    generated = FakeTensor((32,))
+
+    result = case.absorb_preprocess({"metadata": generated}, plan, args, kwargs)
+
+    assert result == {"metadata": generated}
+    assert args == [generated]
+
+
+def test_absorb_aclnn_dict_writes_dynamic_tensors():
+    """ACLNN 显式通道：dict → 主机副本写 _aclnn_dynamic_tensors，返回 True。"""
+    import torch
+
+    case = make_aclnn_case()
+    plan = make_aclnn_plan()
+    generated = torch.zeros(32, dtype=torch.int32)
+
+    result = case.absorb_preprocess({"metadataOptional": generated}, plan)
+
+    assert result is True
+    assert 1 in case._aclnn_dynamic_tensors
+    host = case._aclnn_dynamic_tensors[1]
+    assert host.dtype == torch.int32
+    assert host.device.type == "cpu"
+
+
+def test_absorb_base_rejects_dict_on_unsupported_pathway():
+    """未实现 absorb 覆写的通路子类：基类默认对 dict 拒绝（NotImplementedError）。"""
+    from ttk.core_modules.common.testcase.api_base import ApiTestcaseBase
+
+    class _Bare(ApiTestcaseBase):
+        pass
+
+    bare = _Bare.__new__(_Bare)
+    with pytest.raises(NotImplementedError):
+        bare.absorb_preprocess({"x": FakeTensor((2,))}, None)
+
+
+def test_failure_prefix_matches_invoke_constant():
+    """api_base 侧前缀字面量与 Invoke.NPU_PREPROCESS_FAILURE 同值（防漂移）。"""
+    from ttk.core_modules.common.invoke import Invoke
+    from ttk.core_modules.common.testcase.api_base import _NPU_PREPROCESS_FAILURE_PREFIX
+
+    assert _NPU_PREPROCESS_FAILURE_PREFIX == Invoke.NPU_PREPROCESS_FAILURE

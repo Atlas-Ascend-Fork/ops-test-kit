@@ -7,9 +7,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""三方腿连续失败熔断器。
+"""三方采集连续失败熔断器。
 
-背景：三方腿失败是被设计成"降级不致命"的，对偶发抖动是对的；但对配置性不
+背景：三方采集失败是被设计成"降级不致命"的，对偶发抖动是对的；但对配置性不
 兼容（免传输打到旧服务端、端点整段不可用、服务端缺 golden）每一例都会失败，
 降级就变成了跑满全程产出空数据。熔断器只管后者：连续失败到阈值就中止跑批。
 """

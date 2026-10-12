@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ttk.core_modules.framework_api import profiling as e2e_profiling
+from ttk.core_modules.framework_api import execute as e2e_profiling
 from ttk.core_modules.framework_api.result import FrameworkApiReturnStructure
 
 

@@ -9,10 +9,40 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """
 ttk entry point
+
+懒加载门面：import ttk 不拉起 core_modules，属性按名转发。
+属性按名转发。TTK_LOAD_TF=1 的 eager tensorflow 钩子保持原行为。
 """
 
-# Import all modules
-# noinspection PyBroadException
+import importlib
+
+_SUBPACKAGES = ("core_modules", "remote", "utilities")
+
+# 名 → import 语句映射（延迟执行）
+_LAZY_IMPORTS = {
+    "runtime": "from ttk.core_modules.kernel import runtime",
+    "RTSInterface": "from ttk.core_modules.kernel.runtime import RTSInterface",
+    "TestcaseAclnn": "from ttk.core_modules.aclnn.testcase import TestcaseAclnn",
+    "TestcaseKernel": "from ttk.core_modules.kernel.testcase import TestcaseKernel",
+}
+
+
+def __getattr__(name):
+    if name in _SUBPACKAGES:
+        return importlib.import_module(f"ttk.{name}")
+    stmt = _LAZY_IMPORTS.get(name)
+    if stmt is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    namespace = {}
+    exec(stmt, namespace)  # noqa: S102 固定映射表内的 import 语句
+    return namespace[name]
+
+
+def __dir__():
+    return sorted(list(_SUBPACKAGES) + list(_LAZY_IMPORTS))
+
+
+# TTK_LOAD_TF=1 时 eager 加载 tensorflow（原行为保留：发生在任何懒属性之前）
 try:
     import os
 
@@ -21,9 +51,3 @@ try:
         __import__("tensorflow")
 except Exception:
     print("Tensorflow load failed")
-from . import core_modules as core_modules  # noqa: F401
-from . import utilities as utilities
-from .core_modules import runtime as runtime  # noqa: F401
-from .core_modules.runtime import RTSInterface as RTSInterface  # noqa: F401
-from .core_modules.testcase_manager import TestcaseAclnn as TestcaseAclnn  # noqa: F401
-from .core_modules.testcase_manager import TestcaseOp as TestcaseOp

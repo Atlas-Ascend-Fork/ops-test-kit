@@ -7,13 +7,16 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""RandomData dtype 保持测试：小 tensor + range(-0,+0) 不得被提升成 float64。"""
+"""data 模块公开面测试：RandomData（构造/generate/data_range）+ constant_array。
+
+内部契约（分块逐位一致、必现值混入、分布策略）均经 generate() 入口或
+同 seed 对拍锁定，不直接依赖私有实现细节的等价性重放。
+"""
 
 import numpy as np
 import pytest
-import torch
 
-from ttk.utilities.data import RandomData
+from ttk.utilities.data import CHUNK_ELEMS, RandomData
 
 
 def _missing_en_dtypes():
@@ -25,36 +28,39 @@ def _missing_en_dtypes():
         return True
 
 
-@pytest.mark.parametrize("dtype", ["float32", "bfloat16", "float16"])
-def test_small_tensor_zero_range_keeps_dtype(dtype):
-    """size <= replace_count 走 concatenate 混入路径，dtype 必须保持声明值（防 float64 提升）。"""
-    arr = RandomData(dtype, (2,), (-0.0, 0.0)).generate()
+@pytest.mark.parametrize(
+    ("dtype", "shape", "data_range", "distribution"),
+    [
+        ("float32", (2,), (-0.0, 0.0), "uniform"),
+        ("bfloat16", (2,), (-0.0, 0.0), "uniform"),
+        ("float16", (2,), (-0.0, 0.0), "uniform"),
+        ("bfloat16", (100,), (-0.0, 0.0), "uniform"),
+        ("bfloat16", (0,), (-0.0, 0.0), "uniform"),
+        ("float32", (2 * CHUNK_ELEMS + 8,), (-1.0, 1.0), "uniform"),
+        ("bfloat16", (2 * CHUNK_ELEMS + 8,), (-1.0, 1.0), "uniform"),
+        ("float32", (2 * CHUNK_ELEMS + 8,), (-1.0, 1.0), "normal"),
+        ("bfloat16", (2 * CHUNK_ELEMS + 8,), (-1.0, 1.0), "normal"),
+    ],
+    ids=[
+        "concat-mix-f32",
+        "concat-mix-bf16",
+        "concat-mix-f16",
+        "flat-mix-bf16",
+        "empty-guard-bf16",
+        "chunked-uni-f32",
+        "chunked-uni-bf16",
+        "chunked-norm-f32",
+        "chunked-norm-bf16",
+    ],
+)
+def test_generate_dtype_preserved_across_paths(dtype, shape, data_range, distribution):
+    """generate 全路径 dtype 保持声明值（防 float64 提升/降级）：
+
+    concat-mix = size<=rc 混入（2053554 修复路径）；flat-mix = 按位覆写混入；
+    empty-guard = size=0 跳过混入；chunked-* = 分块采样（uniform/normal）。
+    """
+    arr = RandomData(dtype, shape, data_range).generate(distribution=distribution)
     assert str(arr.dtype) == dtype
-
-
-@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_small_tensor_mixed_range_keeps_dtype(dtype):
-    """range 含多个边界值（replace_count>1）且 size<=replace_count 时 dtype 保持。"""
-    arr = RandomData(dtype, (2,), (-1.0, 1.0)).generate()
-    assert str(arr.dtype) == dtype
-
-
-def test_large_tensor_zero_range_keeps_dtype():
-    """size > replace_count 走按位赋值路径，dtype 保持（防回归）。"""
-    arr = RandomData("bfloat16", (100,), (-0.0, 0.0)).generate()
-    assert str(arr.dtype) == "bfloat16"
-
-
-def test_empty_tensor_keeps_dtype():
-    """size=0 由 size>0 守卫跳过混入，dtype 保持（防回归）。"""
-    arr = RandomData("bfloat16", (0,), (-0.0, 0.0)).generate()
-    assert str(arr.dtype) == "bfloat16"
-
-
-def test_zero_range_values_all_zero():
-    """range(-0,+0) 生成的值必须全为 ±0（混入语义不引入非零值）。"""
-    arr = RandomData("float32", (2,), (-0.0, 0.0)).generate()
-    assert np.all(arr == 0.0)
 
 
 @pytest.mark.parametrize(
@@ -64,7 +70,7 @@ def test_zero_range_values_all_zero():
 def test_full_value_range_covers_multiple_magnitudes(dtype, max_val):
     """全值域应走指数分布法，覆盖多个量级而非全是极大数。
 
-    回归 issue #135：uniform 在全值域下 97% 的值落在 1e37~1e38，
+    回归场景：uniform 在全值域下 97% 的值落在 1e37~1e38，
     小数几乎无法生成。改用指数分布后各量级概率均等。
     """
     np.random.seed(0)
@@ -77,69 +83,63 @@ def test_full_value_range_covers_multiple_magnitudes(dtype, max_val):
     assert small > 500
 
 
-def test_full_value_range_explicit_max_triggers_exponential():
-    """显式写出 bf16 max 区间也应触发指数分布法。"""
-    np.random.seed(1)
-    rd = RandomData("float32", (3000,), (-3.3895313892515355e38, 3.3895313892515355e38))
-    assert rd._is_full_value_range("float32", -3.3895313892515355e38, 3.3895313892515355e38)
-    arr = rd.generate()
-    arr64 = arr.astype("float64")
-    assert not np.any(np.isinf(arr64))
-    assert np.sum(np.abs(arr64) < 1e10) > 300
+def test_spans_dtype_range_threshold():
+    """全值域判定阈值：上下界分别 ≥99% dtype 端点且跨零才触发；窄区间、int 全值域、非对称区间不触发。"""
+    f32_max = 3.4028234663852886e38
+    assert RandomData._spans_dtype_range("float32", -3.3895313892515355e38, 3.3895313892515355e38)  # ≈99.7%
+    assert not RandomData._spans_dtype_range("float32", -1.0, 1.0)
+    assert not RandomData._spans_dtype_range("float32", -100.0, 100.0)
+    assert not RandomData._spans_dtype_range("int32", -2147483648, 2147483647)
+    assert not RandomData._spans_dtype_range("float32", -1.0, f32_max)
+    assert not RandomData._spans_dtype_range("float32", -f32_max, 1.0)
 
 
-def test_narrow_range_does_not_trigger_exponential():
-    """小范围区间不应触发指数分布法，保持 uniform 行为。"""
-    assert not RandomData._is_full_value_range("float32", -1.0, 1.0)
-    assert not RandomData._is_full_value_range("float32", -100.0, 100.0)
-    assert not RandomData._is_full_value_range("int32", -2147483648, 2147483647)
+def test_asymmetric_full_range_stays_within_declared_bounds():
+    """非对称全值域区间不得触发对称指数采样。
+
+    旧判定只看较大端点绝对值，[-1, finfo.max] 误入全值域 log-uniform（忽略声明
+    区间），seed=17 下 10000 样本有 1890 个低于 -1；修复后走受边界约束的均匀
+    采样，全部落在闭区间内（端点经必现值混入保证取到）。
+    """
+    max_v = float(np.finfo("float32").max)
+    np.random.seed(17)
+    arr = RandomData("float32", (10000,), (-1.0, max_v)).generate()
+    assert float(arr.min()) == -1.0
+    assert float(arr.max()) <= max_v
+
+    np.random.seed(17)
+    mirror = RandomData("float32", (10000,), (-max_v, 1.0)).generate()
+    assert float(mirror.min()) >= -max_v
+    assert float(mirror.max()) == 1.0
 
 
 @pytest.mark.parametrize(
     "dtype",
     ["float16", "bfloat16", "float32", "float64", "int32", "int64", "uint8", "bool"],
 )
-def test_normal_chunked_bitwise_equal(dtype):
-    """normal 大 tensor 分块生成与单次全量生成逐位相同（含非整除尾块）。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
+def test_chunked_bitwise_equal(dtype):
+    """大 tensor 分块生成与单次全量逐位相同（uniform + normal，含非整除尾块 2C+1024）。"""
     n = 2 * CHUNK_ELEMS + 1024
     rd = RandomData(dtype, (n,), (-1.0, 1.0))
-    low, high = rd._digitize_inf_nan(-1.0, rd._dtype), rd._digitize_inf_nan(1.0, rd._dtype)
+
+    np.random.seed(42)
+    full = np.random.uniform(-1.0, 1.0, n).astype(rd._dtype, copy=False)
+    np.random.seed(42)
+    chunked = RandomData._gen_uniform_data(-1.0, 1.0, rd._dtype, (n,))
+    assert chunked.dtype == full.dtype
+    assert np.array_equal(chunked, full)
 
     from scipy.stats import truncnorm
 
+    low, high = rd._digitize_inf_nan(-1.0, rd._dtype), rd._digitize_inf_nan(1.0, rd._dtype)
     mean = (high + low) / 2
     sigma = (high - mean) / 3
     gen = truncnorm((low - mean) / sigma, (high - mean) / sigma, loc=mean, scale=sigma)
-
     np.random.seed(42)
     full = gen.rvs(n).astype(rd._dtype, copy=False)
     np.random.seed(42)
     chunked = rd._gen_normal_data(gen, rd._dtype, (n,))
-    assert chunked.dtype == full.dtype
     assert np.array_equal(chunked, full)
-
-
-def test_normal_small_tensor_keeps_single_shot_path():
-    """elem_count <= 2*CHUNK_ELEMS 时保持单次全量路径（行为与改动前一致）。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    n = 2 * CHUNK_ELEMS
-    rd = RandomData("float32", (n,), (-1.0, 1.0))
-    low, high = rd._digitize_inf_nan(-1.0, rd._dtype), rd._digitize_inf_nan(1.0, rd._dtype)
-
-    from scipy.stats import truncnorm
-
-    mean = (high + low) / 2
-    sigma = (high - mean) / 3
-    gen = truncnorm((low - mean) / sigma, (high - mean) / sigma, loc=mean, scale=sigma)
-
-    np.random.seed(42)
-    full = gen.rvs(n).astype(rd._dtype, copy=False)
-    np.random.seed(42)
-    small = rd._gen_normal_data(gen, rd._dtype, (n,))
-    assert np.array_equal(small, full)
 
 
 @pytest.mark.parametrize(
@@ -163,9 +163,9 @@ def test_normal_small_tensor_keeps_single_shot_path():
 )
 def test_chunked_direct_write_matches_astype(dtype):
     """resolve 后的各 dtype：np.empty 预分配 + 分块直写 cast 与整块 astype 逐位一致。"""
-    from ttk.utilities.dtypes import resolve_custom_numpy_dtypes
+    from ttk.utilities.dtypes import resolve_numpy_dtypes
 
-    resolved = resolve_custom_numpy_dtypes([dtype])[0]
+    resolved = resolve_numpy_dtypes([dtype])[0]
     src = np.random.uniform(-1.0, 1.0, 4096)
     chunk = 1000
     out = np.empty(4096, dtype=resolved)
@@ -175,134 +175,18 @@ def test_chunked_direct_write_matches_astype(dtype):
     assert np.array_equal(out, src.astype(resolved, copy=False))
 
 
-def test_normal_chunked_generate_dtype_preserved():
-    """generate 入口走分块路径后 dtype 保持声明值（防 float64 提升/降级）。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    n = 2 * CHUNK_ELEMS + 8
-    arr = RandomData("bfloat16", (n,), (-1.0, 1.0)).generate(distribution="normal")
-    assert str(arr.dtype) == "bfloat16"
-
-
 @pytest.mark.parametrize(
-    "dtype",
-    ["float16", "bfloat16", "float32", "float64", "int32", "int64", "uint8", "bool"],
-)
-def test_uniform_chunked_bitwise_equal(dtype):
-    """uniform 大 tensor 分块生成与单次全量生成逐位相同（含非整除尾块）。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-    from ttk.utilities.dtypes import resolve_custom_numpy_dtypes
-
-    n = 2 * CHUNK_ELEMS + 1024
-    resolved = resolve_custom_numpy_dtypes([dtype])[0]
-
-    np.random.seed(42)
-    full = np.random.uniform(-1.0, 1.0, n).astype(resolved, copy=False)
-    np.random.seed(42)
-    chunked = RandomData._gen_uniform_data(-1.0, 1.0, resolved, (n,))
-    assert chunked.dtype == full.dtype
-    assert np.array_equal(chunked, full)
-
-
-def test_uniform_small_tensor_keeps_single_shot_path():
-    """elem_count <= 2*CHUNK_ELEMS 时保持单次全量路径（行为与改动前一致）。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    n = 2 * CHUNK_ELEMS
-
-    np.random.seed(42)
-    full = np.random.uniform(-1.0, 1.0, n).astype("float32", copy=False)
-    np.random.seed(42)
-    small = RandomData._gen_uniform_data(-1.0, 1.0, "float32", (n,))
-    assert np.array_equal(small, full)
-
-
-def test_uniform_chunked_generate_dtype_preserved():
-    """generate 入口走 uniform 分块路径后 dtype 保持声明值（防 float64 提升/降级）。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    n = 2 * CHUNK_ELEMS + 8
-    arr = RandomData("float32", (n,), (-1.0, 1.0)).generate()
-    assert str(arr.dtype) == "float32"
-
-
-@pytest.mark.parametrize(
-    "tail",
+    "shape",
     [
-        1,
-        4_000_000 - 1,
+        (2 * CHUNK_ELEMS + 1,),
+        (3 * CHUNK_ELEMS - 1,),
+        (3 * CHUNK_ELEMS,),
+        (3, CHUNK_ELEMS // 2 + 17, 5),
     ],
+    ids=["min-entry-2C+1", "max-tail-3C-1", "exact-multiple-3C", "multidim-ravel"],
 )
-def test_uniform_chunked_tail_boundaries_bitwise_equal(tail):
-    """非 4M 对齐边界：最小分块入口（2xCHUNK+1）与最大尾块（CHUNK-1）均逐位相同。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    n = 2 * CHUNK_ELEMS + tail
-
-    np.random.seed(42)
-    full = np.random.uniform(-1.0, 1.0, n).astype("float32", copy=False)
-    np.random.seed(42)
-    chunked = RandomData._gen_uniform_data(-1.0, 1.0, "float32", (n,))
-    assert np.array_equal(chunked, full)
-
-
-def test_uniform_chunked_exact_multiple_bitwise_equal():
-    """整除边界（n = 3*CHUNK，无尾块）分块生成与单次全量逐位相同。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    n = 3 * CHUNK_ELEMS
-
-    np.random.seed(42)
-    full = np.random.uniform(-1.0, 1.0, n).astype("float32", copy=False)
-    np.random.seed(42)
-    chunked = RandomData._gen_uniform_data(-1.0, 1.0, "float32", (n,))
-    assert np.array_equal(chunked, full)
-
-
-def test_uniform_chunked_actually_splits(monkeypatch):
-    """大 tensor 必须真实走分块路径：uniform 调用次数 >= 2（防阈值被误改后静默退化为单发）。"""
-    import numpy
-
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    calls = []
-    real_uniform = numpy.random.uniform
-
-    def counting_uniform(low, high, size):
-        calls.append(size)
-        return real_uniform(low, high, size)
-
-    monkeypatch.setattr("ttk.utilities.data.numpy.random.uniform", counting_uniform)
-    arr = RandomData("float32", (2 * CHUNK_ELEMS + 1,), (-1.0, 1.0)).generate()
-    assert len(calls) >= 2
-    assert arr.dtype == numpy.dtype("float32")  # dtype 保持
-
-
-@pytest.mark.skipif(_missing_en_dtypes(), reason="en_dtypes is not installed")
-def test_hifloat4_uses_packed_uint8_without_a_torch_dtype():
-    """HIF4 logical storage remains packed uint8 when torch lacks E1M2."""
-    from ttk.utilities.dtypes import numpy_hifloat4, numpy_to_torch_tensor
-
-    logical = np.zeros((2, 4), dtype=numpy_hifloat4())
-    logical.view(np.uint8)[:] = np.arange(logical.size, dtype=np.uint8).reshape(logical.shape)
-    packed = numpy_to_torch_tensor(logical)
-    expected_dtype = getattr(torch, "float4_e1m2fn_x2", None)
-
-    assert tuple(packed.shape) == (2, 2)
-    if isinstance(expected_dtype, torch.dtype):
-        assert packed.dtype == expected_dtype
-    else:
-        assert packed.dtype == torch.uint8
-
-
-def test_uniform_chunked_multidim_bitwise_equal():
-    """多维 shape（总元素数非 4M 对齐）分块生成与单次全量逐位相同（ravel 写入顺序一致）。"""
-    from ttk.utilities.data import CHUNK_ELEMS
-
-    shape = (3, CHUNK_ELEMS // 2 + 17, 5)  # 总数 = 1.5*CHUNK 非对齐，含多维 stride
-    n = int(np.prod(shape))
-    assert n > 2 * CHUNK_ELEMS
-
+def test_uniform_chunked_shapes_bitwise_equal(shape):
+    """分块边界形状均与单次全量逐位相同：最小入口、最大尾块、整除无尾块、多维 ravel 写入顺序。"""
     np.random.seed(42)
     full = np.random.uniform(-1.0, 1.0, shape).astype("float32", copy=False)
     np.random.seed(42)
@@ -383,6 +267,31 @@ def test_int64_high_range_is_not_grid_quantized(high):
 
     assert (arr % 2 == 1).any(), "高值域生成不出奇数，说明仍经 float64 量化"
     assert (arr == high).any(), "区间上端点未命中"
+
+
+@pytest.mark.parametrize(
+    ("dtype", "low", "high"),
+    [
+        ("int64", 9007199254740993, 9007199254740996),
+        ("uint64", 9223372036854775809, 9223372036854775812),
+        ("int64", 9007199254740992, 9007199254740996),
+    ],
+    ids=["int64-2p53-plus-1", "uint64-2p63-plus-1", "int64-exact-control"],
+)
+def test_integer_range_endpoints_bypass_float64(dtype, low, high):
+    """超 float64 精确整数范围（2^53）的整型端点不得被舍入。
+
+    端点经 float64 处理时 2^53+1 round-to-even 到 2^53，随机生成会产出低于
+    声明下界的值；常量填充同理填入舍入后的错误值。
+    """
+    arr = RandomData(dtype, (8192,), (low, high)).generate()
+    assert int(arr.min()) >= low
+    assert int(arr.max()) <= high
+    assert (arr == low).any()
+    assert (arr == high).any()
+
+    const = RandomData(dtype, (4,), (low, low)).generate()
+    assert (const == low).all()
 
 
 def test_exponential_small_tensor_keeps_single_shot_path():

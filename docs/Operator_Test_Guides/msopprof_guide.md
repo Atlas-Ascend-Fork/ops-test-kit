@@ -22,12 +22,12 @@ TTK 内部自带 Profiling 采集流程，与 msopprof 的数据采集存在冲�
 
 ## 安装 MindStudio 算子工具
 
-下载与目标平台架构匹配的 MindStudio RUN包（建议使用 7 月以后的RUN包，之前的包可能存在适配问题）。将下方命令中的 `${arch}` 替换为下载包的架构标识（如 `x86` 或 `aarch64`）：
+下载与目标平台架构匹配的 MindStudio RUN包（建议使用较新的 RUN 包，旧版包可能存在适配问题）。将下方命令中的 `${arch}` 替换为下载包的架构标识（如 `x86` 或 `aarch64`）：
 
 安装命令：
 
 ```shell
-bash ascend-mindstudio-operator-tools_26.2.0_${arch}.run --install-path=/home/xxx/Ascend/cann-9.1.0/ --run
+bash ascend-mindstudio-operator-tools_26.2.0_${arch}.run --install-path=<install_path> --run
 ```
 
 设置环境变量：
@@ -45,7 +45,7 @@ source Ascend/cann/set_env.sh
 使用 `msopprof` 包裹 `ttk kernel` 命令，并务必添加 `--task-prof=false --warmup=false` 关闭 TTK 内部 Profiling：
 
 ```shell
-msopprof python3 -m ttk kernel -i examples/case_store/kernel/add.csv --task-prof=false --warmup=false
+msopprof python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast --task-prof=false --warmup=false
 ```
 
 ## 结合 TTK 筛选参数
@@ -54,7 +54,7 @@ msopprof 包裹的 TTK 命令可以使用 TTK 自带的用例筛选与编译参�
 
 ```shell
 # 按索引范围运行
-msopprof python3 -m ttk kernel -i cases.csv --task-prof=false --warmup=false --ti=1-10
+msopprof python3 -m ttk kernel -i cases.csv --task-prof=false --warmup=false --ti=0-9
 
 # 按算子名筛选
 msopprof python3 -m ttk kernel -i cases.csv --task-prof=false --warmup=false --op add,mat_mul_v3
@@ -66,10 +66,10 @@ msopprof python3 -m ttk kernel -i cases.csv --task-prof=false --warmup=false --p
 msopprof python3 -m ttk kernel -i cases.csv --task-prof=false --warmup=false --tc=10
 
 # 运行Add算子（动态 shape 编译）
-msopprof python3 -m ttk kernel -i examples/case_store/kernel/add.csv -d --task-prof=false --warmup=false
+msopprof python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast -d --task-prof=false --warmup=false
 
 # 运行Add算子（二进制）
-msopprof python3 -m ttk kernel -i examples/case_store/kernel/add.csv --binary --task-prof=false --warmup=false
+msopprof python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast --binary --task-prof=false --warmup=false
 ```
 
 ## 附加 msopprof 参数
@@ -78,7 +78,7 @@ msopprof python3 -m ttk kernel -i examples/case_store/kernel/add.csv --binary --
 
 ```shell
 # 时序命令
-msopprof --aic-metrics=pipetimeline/instrtimeline python3 -m ttk kernel -i cases.csv --task-prof=false --warmup=false
+msopprof --aic-metrics=TimelineDetail python3 -m ttk kernel -i cases.csv --task-prof=false --warmup=false
 ```
 
 更多 msopprof 参数详见：[msopprof 用户指南](https://gitcode.com/Ascend/msopprof/blob/master/docs/zh/user_guide/msopprof_user_guide.md)

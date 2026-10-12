@@ -11,7 +11,7 @@
 
 ## 一、贡献测试用例
 
-TTK 是昇腾 NPU 算子测试框架，欢迎贡献各模式的测试用例（Kernel/ACLNN/E2E）。
+TTK 是昇腾 NPU 算子测试框架，欢迎贡献各模式的测试用例（Kernel/GEIR/ACLNN/E2E）。
 
 ### 1. 创建Issue需求
 
@@ -31,19 +31,22 @@ Sig组将指派Committer对您提交的Issue进行评审并反馈修改意见。
 examples/case_store/
 ├── kernel/                    # Kernel模式用例
 │   └── ${op_name}.csv         # 测试用例CSV
+├── geir/                      # GEIR模式用例（字段同Kernel，另支持dyn_input_shapes）
+│   └── ${op_name}.csv|.xlsx
 ├── aclnn/                     # ACLNN模式用例
 │   └── aclnn_${op_name}.csv
 └── e2e/                       # E2E模式用例
-    └── torch_${op_name}.csv
+    └── torch_${op_name}.csv   # tf_${op_name}.csv 为 TensorFlow 用例
 ```
 
-若算子需要自定义Golden或输入生成逻辑，需提供插件文件：
+若算子需要自定义Golden或输入生成逻辑，需提供插件文件，与本仓库示例放置方式一致（如 `examples/case_store/kernel/golden.py`）：
 
 ```text
-tests/assets/
-├── golden.py                  # 自定义Golden实现
-└── input.py                   # 自定义输入生成
+examples/case_store/${mode}/
+└── golden.py                  # TestSpec（golden/customize_inputs/tolerance 等）
 ```
+
+> 外部算子仓库贡献用例时，插件文件按该仓库约定放于 `tests/assets/`（`golden.py` / `input.py`），详见 `.claude/skills/ttk-how-write-plugin/SKILL.md`。
 
 PR上库要求：
 

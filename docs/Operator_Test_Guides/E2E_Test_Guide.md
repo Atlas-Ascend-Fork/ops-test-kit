@@ -72,7 +72,7 @@ CSV 字段说明详见 [E2E 用例编写](./E2E_Case_Writing.md)。
 
 ```csv
 testcase_name,api_name,tensor_view_shapes,tensor_dtypes,attributes
-add_f32_01,torch.add,"((2,3,4),(2,3,4))","('float32','float32')",{'alpha':1.0}
+add_f32_alpha,torch.add,"((2,3,4),(2,3,4))","('float32','float32')",{'alpha':1.0}
 ```
 
 更多示例参考 `examples/case_store/e2e/`。
@@ -81,22 +81,22 @@ add_f32_01,torch.add,"((2,3,4),(2,3,4))","('float32','float32')",{'alpha':1.0}
 
 ## 后端选择
 
-E2E 模式由统一的 Backend 抽象层（`ttk.core_modules.framework_api.backends`）驱动 NPU/MLU/CPU 等后端，各后端共享同一套用例解析、输入生成与精度比对逻辑。CPU 后端通常用作 Golden 计算源。后端按配置 hardware segment（`yaml` 的 `frameworks.torch.<seg>`）自动选择可用后端，`--cpu` 强制 CPU 后端。
+E2E 模式由统一的 Backend 抽象层（`ttk.core_modules.common.backend`）驱动 NPU/CPU 后端，各后端共享同一套用例解析、输入生成与精度比对逻辑。CPU 后端通常用作 Golden 计算源。torch 用例按 `torch_npu` 可用性探测选择 NPU/CPU（探测失败回落 CPU 并告警）；TF 用例按 `npu_device` 是否存在选择 NPU/CPU。`--backend cpu` 强制 CPU 后端；三方标杆采集（`--golden-mode XPU` / `--xpu-perf`）仅经远端 endpoints，无本机执行后端。
 
 | 后端 | 依赖 |
 |------|------|
-| NPU | torch + torch_npu |
-| MLU | torch (MLU) |
-| CPU | torch |
+| NPU | torch 用例：torch + torch_npu；TF 用例：tensorflow + npu_device |
+| NPUSim | `--backend npusim` 仿真执行（camodel，详见 [NPUSim 仿真测试](../NPUSim/npusim_usage.md)） |
+| CPU | torch 用例：torch；TF 用例：tensorflow（`--backend cpu` 强制） |
 
 ## 执行命令
 
 ```shell
-# 自动按配置 hardware segment 选择可用后端
-python3 -m ttk e2e -i torch_ops.csv
+# 自动探测可用后端（NPU 优先，失败回落 CPU）
+python3 -m ttk e2e -i torch_cases.csv
 
 # 强制 CPU 后端（常用于Golden生成；选 CPU 可跑的用例）
-python3 -m ttk e2e -i torch_ops.csv -t add_f32_01 --cpu
+python3 -m ttk e2e -i torch_cases.csv -t add_f32_alpha --backend cpu
 ```
 
 ## 执行流程
@@ -104,8 +104,10 @@ python3 -m ttk e2e -i torch_ops.csv -t add_f32_01 --cpu
 E2E模式的执行流程如下：
 
 ```
-读取CSV → 生成输入张量 → 在待测后端调用API → 在CPU调用Golden API → 精度比对 → 输出结果
+读取CSV → 生成输入张量 → 在CPU生成Golden → 在待测后端调用API → 精度比对 → 输出结果
 ```
+
+> Golden 先于设备执行生成（单卡静态用例）；动态 shape（`-1` 槽位）用例与 `--golden-mode XPU` 的 Golden 延迟到执行后装载。
 
 > 精度比对方法详见[精度比对方法](../Precision_Comparison.md)，Dump 调试详见[Dump 数据调试](../Dump_Debug.md)。
 
@@ -115,13 +117,13 @@ E2E 模式默认会采集Profiling性能数据：
 
 ```shell
 # 默认执行（含Profiling）
-python3 -m ttk e2e -i torch_ops.csv
+python3 -m ttk e2e -i torch_cases.csv
 
-# 禁用Profiling
-python3 -m ttk e2e -i torch_ops.csv --no-prof
+# 关闭任务级Profiling采集（仍执行被测算子）
+python3 -m ttk e2e -i torch_cases.csv --task-prof=false
 
 # 设置执行次数（默认板端3次）
-python3 -m ttk e2e -i torch_ops.csv --run=5
+python3 -m ttk e2e -i torch_cases.csv --run=5
 ```
 
 ## 性能相关参数
@@ -130,52 +132,54 @@ python3 -m ttk e2e -i torch_ops.csv --run=5
 |------|------|--------|
 | `--run` | 执行次数 | 板端3次 |
 | `--warmup` | Profiling前预热 | 开启 |
-| `--aclgraph` | 启用 ACLGraph，默认开启算子在线编译，允许复用编译缓存 | 关闭 |
-| `-b` / `--binary` | `--aclgraph -b` 或 `--aclgraph -b=release` 复用已有算子二进制，关闭算子在线编译并保留图捕获和重放；`-b=false` 恢复在线编译。启用时需搭配 `--aclgraph`，不能与 `--super-kernel` 同用 | 关闭 |
-| `--no-prof` | 禁用Profiling采集 | 关闭 |
-| `--core-limit` | 限制核数上限：`N` 仅限 AI 核，`a,v` 分别限制（如 `2,32`），未设置的一侧回落物理核数。GE 图模式映射 `ge.aicoreNum`；ACLGraph 模式通过 `scope.limit_core_num` 限制捕获前的预处理算子，并在每次图捕获中记录核数限制；eager 不支持 | 无 |
-| `--super-kernel` | 被测算子走 SuperKernel 编译流程（功能验证）：以 api_name 为 scope 标定，GE 图模式（-c/-d）与 aclgraph 模式均适用。需搭配 -c/-d/--aclgraph，不支持 --cpu | 关闭 |
-
+| `--task-prof` | 任务级Profiling采集开关 | 开启 |
+| `--aclgraph` | 启用 ACLGraph（`torch.compile(dynamic=False)` + npugraph_ex backend），算子编译模式随 `-b` | 关闭 |
+| `-b` / `--binary` | 二进制复用（默认开启，三种执行模式全生效）：eager 模式 `jitCompile=disable` 复用预编译 host 代码；`-c`/`-d` GE 图 `ge.jit_compile=0` 复用预编译 kernel；aclgraph 模式 `static_kernel_compile=False` 保留图捕获重放。`-b=false` 恢复在线编译。不能与 `--super-kernel` 显式同用；`--backend npusim` 下强制在线 | 开启 |
+| `--no-prof` | 不执行被测通路，只生成输入/Golden 并落盘手动数据（离线数据准备，需搭配 `--dump in`） | 关闭 |
+| `--core-limit` | 限制核数上限：`N` 仅限 AI 核，`a,v` 分别限制（如 `2,32`），未设置的一侧回落物理核数。GE 图模式映射 `ge.aicoreNum`；ACLGraph 模式经 `torch_npu.npu.npugraph_ex.scope.limit_core_num` 下发（每次图捕获均生效）；eager 不支持 | 无 |
+| `--super-kernel` | 被测算子走 SuperKernel 编译流程（功能验证）：以 api_name 为 scope 标定，GE 图模式（-c/-d）与 aclgraph 模式均适用。需搭配 -c/-d/--aclgraph，不支持 --backend cpu | 关闭 |
 ```shell
-# ACLGraph 默认开启算子在线编译
-python3 -m ttk e2e -i torch_ops.csv --aclgraph
+# 默认（二进制复用）：eager/图/aclgraph 三种模式均复用预编译产物
+python3 -m ttk e2e -i torch_cases.csv --aclgraph
 
-# 复用已有算子二进制，保留 ACLGraph 捕获和重放
-python3 -m ttk e2e -i torch_ops.csv --aclgraph -b
-# 等价写法：--aclgraph -b=release 或 --aclgraph --binary
+# 恢复算子在线编译
+python3 -m ttk e2e -i torch_cases.csv --aclgraph -b=false
+# 等价写法：-b=no / -b=off / --binary=false
 ```
 
-`-b` 在 E2E 中仅控制 ACLGraph 的算子在线编译；`--fullgraph` 仍独立控制整图捕获。
-普通 GE 图模式（`-c`/`-d`）未指定 `--aclgraph` 时不能启用此选项。
+`-b` 在 E2E 中控制三种执行模式的算子编译（默认二进制复用）；`--fullgraph` 独立控制整图捕获。
+`--super-kernel` 要求在线编译：显式 `-b --super-kernel` 报错，隐式默认二进制时自动回退在线编译并告警。
 任何实际触发的算子在线编译一旦失败，即使后端回退产生了输出，结果仍记为 FAIL。
+
+> 注意：`--no-prof` 不是性能参数：只生成输入和 Golden、不执行被测通路，适用于离线数据准备，详见[离线数据准备与导入](../Offline_Data_Prepare_and_Import.md)。
 
 # 多卡并行
 
 ```shell
 # 使用全部可用NPU卡
-python3 -m ttk e2e -i torch_ops.csv
+python3 -m ttk e2e -i torch_cases.csv
 
 # 使用2张卡
-python3 -m ttk e2e -i torch_ops.csv --dev=2
+python3 -m ttk e2e -i torch_cases.csv --dev=2
 
 # 每张卡2个进程
-python3 -m ttk e2e -i torch_ops.csv --pc=2
+python3 -m ttk e2e -i torch_cases.csv --pc=2
 
 # 指定使用卡0
-python3 -m ttk e2e -i torch_ops.csv --device-whitelist=0
+python3 -m ttk e2e -i torch_cases.csv --devices=0
 ```
 
 # 调试
 
 ```shell
-# 调试单个用例
-python3 -m ttk e2e -i torch_ops.csv -t add_f32_01 --single-log
+# 调试单个用例（单用例独立日志目录自动生成，无需参数）
+python3 -m ttk e2e -i torch_cases.csv -t add_f32_alpha
 
 # 固定随机种子（可复现）
-python3 -m ttk e2e -i torch_ops.csv --seed 42
+python3 -m ttk e2e -i torch_cases.csv --seed 42
 
 # 仅校验CSV用例格式（不下设备）
-python3 -m ttk e2e -i torch_ops.csv --validate
+python3 -m ttk e2e -i torch_cases.csv --validate
 ```
 
 Dump 调试详见[Dump 数据调试](../Dump_Debug.md)。
@@ -184,20 +188,16 @@ Dump 调试详见[Dump 数据调试](../Dump_Debug.md)。
 
 ```shell
 # torch.add 基础测试（自动选择可用后端）
-python3 -m ttk e2e -i examples/case_store/e2e/torch_ops.csv -t add_f32_01
+python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv -t add_f32_alpha
 
-# torch_npu.npu_conv2d（使用golden_api，需设备支持该算子）
-python3 -m ttk e2e -i examples/case_store/e2e/torch_ops.csv -t npu_conv2d_f16
+# torch_npu.npu_gelu（使用 golden_api，CPU golden 用 F.gelu）
+python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv -t npu_gelu_f16
 
 # 强制 CPU 后端（选 CPU 可跑的用例）
-python3 -m ttk e2e -i examples/case_store/e2e/torch_ops.csv -t add_f32_01 --cpu
+python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv -t add_f32_alpha --backend cpu
 
 # 输出结果
-python3 -m ttk e2e -i torch_ops.csv -o results.csv
-
-# Excel 多 sheet 用例（默认首个工作表；--sheet 指定工作表）
-python3 -m ttk e2e -i examples/case_store/e2e/torch_add.xlsx
-python3 -m ttk e2e -i examples/case_store/e2e/torch_add.xlsx --sheet T2
+python3 -m ttk e2e -i torch_cases.csv -o results.csv
 ```
 
 > 通用参数（用例筛选/设备并行/精度控制/调试/结果输出）见[任务执行](../Task_Execution.md)

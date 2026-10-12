@@ -14,9 +14,9 @@ Module-level so it is picklable for multiprocessing. execute_request returns an
 envelope dict and never raises for 400/424/500; only a hard crash (segfault/OOM)
 kills the child, which the parent sees as a nonzero exitcode -> 500.
 
-Deployment constraint: MUST NOT import outside ttk.remote.server (no
-ttk.core_modules, no ttk.remote) — the server deploys standalone on the XPU box.
-Only stdlib + numpy + sibling server modules + lazy torch.
+整仓部署：契约代码（bind_params/UnknownParamError）与 XPU profiler 共享引擎
+经 ttk.core_modules.common.* 同源消费（单份实现，client/server 不漂移）；
+三方依赖仅 numpy + 框架（torch/tensorflow 懒加载）。
 """
 
 import importlib
@@ -29,22 +29,87 @@ from functools import partial
 
 import numpy as np
 
-try:
-    from . import execution_container as _ec
-except ImportError:
-    # Container entrypoint imports executor as a top-level module (no parent
-    # package); fall back to absolute (execution_container is standalone).
-    import execution_container as _ec
+# bind_params/UnknownParamError 与 client 同源（ttk.core_modules.common.xpu 单份）；
+# has_data/has_perf/format_device/match_params_v1/resolve_callable 留驻本文件（server 专属语义）
+from ttk.core_modules.common.xpu import UnknownParamError, bind_params  # noqa: F401
 
-(UnknownParamError, bind_params, format_device, has_data, has_perf, match_params_v1, resolve_callable) = (
-    _ec.UnknownParamError,
-    _ec.bind_params,
-    _ec.format_device,
-    _ec.has_data,
-    _ec.has_perf,
-    _ec.match_params_v1,
-    _ec.resolve_callable,
-)
+_FRAMEWORK_RESERVED = {"device"}
+_PROVIDER_MODULE_ALIASES = {"tf": "tensorflow"}
+
+DATA = 0b01  # return device outputs
+PERF = 0b10  # collect performance
+
+
+# ── server 专属符号 ──
+
+
+def has_data(mode: int) -> bool:
+    return bool(mode & DATA)
+
+
+def has_perf(mode: int) -> bool:
+    return bool(mode & PERF)
+
+
+def format_device(provider, profile, device_id):
+    """Build the framework device spec. cpu short-circuits
+    before reading profile; otherwise the lib/type comes from profile."""
+    if str(device_id) == "cpu":
+        return "cpu"
+    if provider == "torch":
+        return f"{profile['torch_lib']}:{device_id}"
+    if provider == "tf":
+        tf_type = profile.get("tf_device_type")
+        if tf_type is None:
+            raise ValueError("hardware has no tf_device_type, tf provider unavailable")
+        return f"/device:{tf_type}:{device_id}"
+    raise ValueError(f"unknown provider: {provider}")
+
+
+def resolve_callable(api_str: str):
+    """Resolve a dotted ``module.attr.sub`` string to a callable (api mode).
+
+    Rejects classes: api mode is defined for stateless functions;
+    a class (e.g. ``torch.nn.Softmax``) is a misuse -> ValueError.
+
+    Raises:
+        ValueError: if the string has no dot, or resolves to a class.
+        ImportError/AttributeError: if the module/attr does not exist
+            (propagated; the executor maps these to the appropriate status).
+    """
+    parts = api_str.split(".")
+    if len(parts) < 2:
+        raise ValueError(f"api '{api_str}' must be a dotted 'module.attr' path")
+    # Map short names (e.g. "tf") to real package names (e.g. "tensorflow")
+    if parts[0] in _PROVIDER_MODULE_ALIASES:
+        parts[0] = _PROVIDER_MODULE_ALIASES[parts[0]]
+    obj = importlib.import_module(parts[0])
+    for attr in parts[1:]:
+        obj = getattr(obj, attr)
+    if inspect.isclass(obj):
+        raise ValueError(f"api mode requires a function, got a class: {api_str}")
+    return obj
+
+
+def match_params_v1(schema: list, flat_arrays: list) -> dict:
+    """Restore named inputs from X-Input-Schema and flat arrays.
+
+    Args:
+        schema: List of {"name": str, "index"|"indices"|None}
+        flat_arrays: Flat list of numpy arrays (no None gaps)
+
+    Returns:
+        Dict mapping name to value (single ndarray, list of ndarrays, or None)
+    """
+    result = {}
+    for entry in schema:
+        name = entry["name"]
+        if "indices" in entry:
+            result[name] = [flat_arrays[i] for i in entry["indices"]]
+        elif "index" in entry:
+            idx = entry["index"]
+            result[name] = flat_arrays[idx] if idx is not None else None
+    return result
 
 
 class _MissingSpecDependency(ImportError):
@@ -59,9 +124,9 @@ class _MissingSpecDependency(ImportError):
 # repeating `getattr(torch, profile["torch_lib"])`.
 _TORCH_DEV_MODULE = None
 
-# third_party key aliases — mirrors client-side aliases (profiling.py) so spec
-# writers can use "tensorflow"/"np"; server is standalone (no ttk import) so
-# duplicated here. Keep in sync with the client copy.
+# third_party key aliases — mirrors client-side aliases (client.py) so spec
+# writers can use "tensorflow"/"np"; two-token dict, duplicated here.
+# Keep in sync with the client copy.
 _TP_ALIASES = {"tensorflow": "tf", "np": "numpy"}
 
 
@@ -126,23 +191,23 @@ def _resolve_attr_path(module, dotted):
     return obj
 
 
-# --- KERNEL api resolve: faithful port of backup get_torch_func / get_tf_func ---
-# Dict literals copied VERBATIM (KERNEL-proven); they reference torch/tf symbols,
-# so they are built inside each resolver where the lazy import has run. Do not
-# paraphrase or trim entries.
-# ACLNN branch (aclnn-prefixed names); this section covers only
-# the torch/tf dual-form KERNEL port.
+# --- KERNEL api resolve: 算子名（snake/Camel 双形式）→ framework callable ---
+# Special-case dict literals reference torch/tf symbols, so they are built
+# inside each resolver where the lazy import has run. Proven mappings —
+# do not paraphrase or trim entries.
+# aclnn-prefixed names take the ACLNN branch; this section covers the
+# torch/tf dual-form KERNEL path only.
 
 
 def _torch_resolve(name):
-    """Port of backup get_torch_func. Single snake-form arg.
+    """Resolve a snake-form op name to a torch callable.
 
     Only invoked when provider == 'torch' (gated by _resolve_3party_api's
     dispatch); a TF request never reaches this import.
     """
     import torch
 
-    # === VERBATIM torch_funcs dict (backup __init__.py:2808-2824) ===
+    # === special-case mapping (proven — do not trim entries) ===
     torch_funcs = {
         "kl_div": torch.nn.functional.kl_div,
         "ctc_loss_v2": torch.nn.functional.ctc_loss,
@@ -186,15 +251,15 @@ def _torch_resolve(name):
     if candidates:
         return candidates[0]
     result = None
-    # suffix stripping — faithful to backup (serial-if, NOT elif). The bare `if`
+    # suffix stripping (serial-if, NOT elif). The bare `if`
     # chain does last-match-wins: each matching suffix UNCONDITIONALLY reassigns
     # `result`, so a later matching suffix overwrites an earlier one. In practice
     # a name ends in exactly ONE of _d/_grad/_v2 (they are mutually exclusive
     # endings), so last-match-wins == short-circuit return — behaviorally
     # equivalent. EXCEPTION: a name like `xxx_d_v2` matches BOTH `_d` (step 1,
     # result=resolve(xxx_v2)) AND `_v2` (step 3, result=resolve(xxx_d)); the `_v2`
-    # step runs last and wins, so `xxx_d_v2` resolves via the `_v2` path. We
-    # mirror backup's verbatim structure (don't second-guess KERNEL-proven code).
+    # step runs last and wins, so `xxx_d_v2` resolves via the `_v2` path. The
+    # if-chain structure is kept verbatim (proven behavior; don't second-guess).
     if name.endswith("_d"):
         result = _torch_resolve(name[:-2])
     if name.endswith("_grad"):
@@ -205,7 +270,7 @@ def _torch_resolve(name):
 
 
 def _tf_resolve(name):
-    """Port of backup get_tf_func. Single Camel-form arg."""
+    """Resolve a Camel-form op name to a tf callable."""
     import tensorflow as tf
     from tensorflow import raw_ops
     from tensorflow.python.ops import (
@@ -218,7 +283,7 @@ def _tf_resolve(name):
         nn_impl,
     )
 
-    # === VERBATIM tf_func_map dict (backup platform.py:87-91) ===
+    # === special-case mapping (proven — do not trim entries) ===
     tf_func_map = {
         "batch_norm_v3": nn_impl.fused_batch_norm,
         "spence": tf.math.special.spence,
@@ -258,7 +323,7 @@ def _tf_resolve(name):
         result = getattr(source, name, None)
         if result is not None:
             return result
-    # suffix stripping (faithful: backup's replace-based logic, kept verbatim)
+    # suffix stripping (replace-based; order matters)
     if "_d" in name:
         r = _tf_resolve(name.replace("_d", ""))
         if r is not None:
@@ -294,20 +359,18 @@ def _tf_resolve(name):
     return None
 
 
-# --- ACLNN api resolve: verbatim port of golden_generation's torch-search ----
-# segment. Source: ttk/utilities/string_utils.py:70 (camel_to_snake)
-#         (_find_torch_api / _auto_import_from_torch as methods on GoldenGeneration).
-# Deployment constraint: MUST NOT import outside ttk.remote.server — these helpers
-# are COPIED here (de-methodized: drop self; module-level functions). golden_generation
-# also does a plugin lookup before the torch fallback; that lookup is not portable
-# (needs plugin_path / OpApiInfoKeeper), so only the torch-search segment is ported.
-# Lazy torch import inside function bodies is permitted by the constraint.
+# --- ACLNN api resolve: aclnn 前缀算子名的 torch 搜索段 ---
+# camel_to_snake duplicates ttk/utilities/string.py (kept in sync with it);
+# _find_torch_api / _auto_import_from_torch search torch / torch.nn.functional /
+# torch.ops.aten with suffix stripping. The plugin lookup that precedes the
+# torch fallback in TTK's golden chain is not portable (needs plugin_path /
+# OpApiInfoKeeper), so only the torch-search segment lives here.
 
 
 def camel_to_snake(camel_name: str) -> str:
     """
     Operator Registered Camel name convert to snake name.
-    Verbatim copy from ttk/utilities/string_utils.py:70 (do NOT import ttk.*).
+    Duplicates ttk/utilities/string.py (kept in sync with it).
     """
     snake_name = ""
     sub_head = False
@@ -331,9 +394,7 @@ def camel_to_snake(camel_name: str) -> str:
 
 
 def _find_torch_api(torch_module, snake_name: str):
-    # find torch.snake_name. Verbatim port of golden_generation._find_torch_api
-    # (de-methodized: self dropped, explicit torch_module/snake_name args).
-    # The logging.debug call from the original is dropped (no self._ctx here).
+    # find torch.snake_name (getattr + suffix stripping recursion below).
     try:
         torch_api = getattr(torch_module, snake_name, None)
     except RuntimeError:
@@ -361,7 +422,7 @@ def _auto_import_from_torch(snake_name: str):
     """Search torch / torch.nn.functional / torch.ops.aten.
 
     ACLNN-only path (provider=='torch'): sole caller is _aclnn_resolve; a TF
-    request never reaches here. Verbatim port of golden_generation.
+    request never reaches here.
     """
     import torch
 
@@ -381,10 +442,6 @@ def _aclnn_resolve(api_name):
     Returns (callable, name) | (None, None). name = strip+snake 后的实际搜索 key
     （如 aclnnAdd → add），供 _resolve_callable 拼 provider.name（如 torch.add）——
     X-API 回传的是 server 实际执行的 API，不是请求的原始 op_name。
-
-    Port of golden_generation._import_golden_funcs's torch-search segment (NOT
-    the plugin lookup — that's not portable). The original returns (func, src);
-    here we return func plus the resolved snake key.
     """
     if not api_name or not api_name.startswith("aclnn"):
         return None, None
@@ -742,56 +799,6 @@ def device_available(provider, profile) -> bool:
     return False
 
 
-def _device_time(evt, device) -> float:
-    """server inline 2-candidate self_ time. is not None guard
-    (not truthiness) so a genuine 0.0 on candidate1 is NOT skipped."""
-    v = getattr(evt, "self_device_time_total", None)  # candidate1: torch 2.7+
-    if v is not None:
-        return v
-    return getattr(evt, f"self_{device}_time_total", 0.0)  # candidate2: <2.7 (self_<lib>)
-
-
-def _is_device_kernel(evt) -> bool:
-    """只保留真实 设备 内核条目，供 device_us 求和使用。
-
-    key_averages() 是把 profiler 的**事件树拍平**后的列表。树上同一段 设备 时间会以
-    三种不同身份各出现一次，若不加区分地全部相加，等于把它重复计入：
-
-        key_averages()
-        │
-        ├─ ProfilerStep*        容器 span（schedule() 每轮自动插入，覆盖整轮）
-        │                       含义：这一轮的【时间跨度】——从首个内核开始到末个内核结束，
-        │                             其间 设备 等待 CPU 下发下一个 kernel 的空闲也计入
-        │                       剔除：① 量纲不同，它是"经过了多久"而非"设备忙了多久"；
-        │                             ② 它在层级上已经包住下面两类，留下即整轮再加一遍。
-        │                             对 launch-bound 负载（算子多、单个数据量小，设备 大
-        │                             部分时间在等下发），跨度远大于忙碌时间，会使结果
-        │                             整体虚高一个数量级
-        │
-        ├─ aten::xxx            CPU 侧算子（算子调用的主机端记录）
-        │                       含义：其 self device time 挂的是【该算子所启动内核的耗时】
-        │                       剔除：与下面的内核条目是同一段时间的两种视角（主机端视角
-        │                             vs 设备端视角），两者数值成对相同，同留即翻倍
-        │
-        └─ void ...kernel<>     真实 设备 内核（设备上实际执行的那段时间）
-                                含义：设备真正忙碌的时间
-                                保留：彼此互不重叠，相加即为本轮 设备 忙碌总时间
-
-    过滤条件两条缺一不可：ProfilerStep* 自身的 device_type 也被标为设备类型，只看
-    device_type 滤不掉它；而 aten:: 条目是 CPU 类型，只按 key 前缀又滤不干净。
-    """
-    if str(getattr(evt, "key", "")).startswith("ProfilerStep"):
-        return False
-    dev_t = getattr(evt, "device_type", None)
-    if dev_t is None:  # 无该字段的 torch 版本：不过滤，退回旧行为
-        return True
-    try:
-        from torch.autograd import DeviceType
-    except ImportError:
-        return True
-    return dev_t != DeviceType.CPU
-
-
 def _run_perf(callable_fn, named, attrs, provider, device_id, use_device, profile=None, runtime=3, param_order=None):
     """PERF timing via profiler (torch: Self device time; TF: xplane.pb device plane).
 
@@ -866,163 +873,89 @@ def _run_perf(callable_fn, named, attrs, provider, device_id, use_device, profil
 def _torch_profiler_pass(
     callable_fn, named, attrs, provider, device_id, use_device, profile, runtime, param_order=None
 ):
-    """torch.profiler Self device time. Returns (outputs, device_us).
+    """pass 结构映射本包 xpu_profiler.torch_xpu_profiler_pass。"""
+    from .xpu_profiler import torch_xpu_profiler_pass
 
-    device_us = per-iteration average (sum of self_device_time_total over the
-    active window / runtime), 仅累加真实 设备 内核条目——ProfilerStep* 容器 span 与
-    CPU 侧 aten:: 条目会让同一段时间被重复计入，详见 _is_device_kernel。
-    torch 2.7+ renamed self_cuda_time_total ->
-    self_device_time_total; the 2-candidate _device_time helper covers both.
-
-    Error policy: an OP execution failure PROPAGATES (-> execute_request FAIL) —
-    it must never be masked as device_us=NA + PASS. Only PROFILER machinery
-    (start / stop / key_averages readout) degrades to NA, and each such failure
-    is logged so it is debuggable server-side. A misconfigured profile (missing
-    torch_profiler/activities or an unknown activity enum) raises RuntimeError
-    OUTSIDE the try block (server config error -> 500, not an NA degrade).
-    """
-    # gated: only called when provider == "torch" and torch_dev (see _run_perf)
-    import torch
-
-    # device + activities resolved OUTSIDE the try block: a missing/unknown
-    # value is a server-side config error -> RuntimeError -> 500 (not an NA
-    # degrade). cpu path never reaches here (and-use_device short-circuit).
-    device = profile["torch_lib"]  # backend lib name, NOT the role
+    device = profile["torch_lib"]
     try:
         activities_cfg = profile["torch_profiler"]["activities"]
     except KeyError:
         raise RuntimeError("profile missing torch_profiler/activities") from None
-    activities = []
-    for name in activities_cfg:
-        try:
-            activities.append(getattr(torch.profiler.ProfilerActivity, name))
-        except AttributeError:
-            raise RuntimeError(f"unknown ProfilerActivity: {name}") from None
-    device_us = 0.0
-    outputs = None
-    # Manual ctx (not `with`): start needs its own try-scope (NA+log on failure)
-    # separate from the op loop below (whose errors must propagate, not NA).
-    try:
-        _ctx = torch.profiler.profile(
-            activities=activities, schedule=torch.profiler.schedule(wait=1, warmup=1, active=runtime, repeat=1)
+
+    def invoke():
+        return _invoke(
+            callable_fn, named, attrs, provider, device_id, use_device, profile=profile, param_order=param_order
         )
-        prof = _ctx.__enter__()
-    except Exception:
-        logging.exception("torch.profiler start failed; device_us=NA")
-        return outputs, device_us
-    # OP execution — errors propagate (-> FAIL).
-    try:
-        for _ in range(runtime + 2):
-            outputs = _invoke(
-                callable_fn, named, attrs, provider, device_id, use_device, profile=profile, param_order=param_order
-            )
-            prof.step()
-    finally:
-        try:
-            _ctx.__exit__(None, None, None)
-        except Exception:
-            logging.exception("torch.profiler stop failed")
-    # Profiler machinery — readout. Failure -> NA + log; outputs preserved.
-    try:
-        total = sum(_device_time(e, device) for e in prof.key_averages() if _is_device_kernel(e))
-        if runtime > 0:
-            total /= runtime
-        device_us = total
-    except Exception:
-        logging.exception("torch.profiler key_averages failed; device_us=NA")
-    return outputs, device_us
+
+    return torch_xpu_profiler_pass(invoke, runtime, device, activities_cfg)
 
 
 def _tf_profiler_pass(callable_fn, named, attrs, provider, device_id, use_device, profile, runtime, param_order=None):
-    """tf.profiler.experimental + xplane.pb. Returns (outputs, device_us).
+    """pass 结构映射本包 xpu_profiler.tf_xpu_profiler_pass。"""
+    from .xpu_profiler import tf_xpu_profiler_pass
 
-    device_us = per-iteration average (sum of ev.duration_ps/1e6 over the device
-    plane events / runtime). num_occurrences is NOT multiplied (proto3 unset = 0).
-    Two warmup invokes precede the profiled runtime invokes. logdir is removed in
-    a finally guard so a stop() crash still cleans up.
+    def invoke():
+        return _invoke(
+            callable_fn, named, attrs, provider, device_id, use_device, profile=profile, param_order=param_order
+        )
 
-    Error policy: an OP execution failure PROPAGATES (-> execute_request FAIL).
-    Only TF profiler machinery (start / stop / xplane parse) degrades to NA, and
-    each such failure is logged so it is debuggable server-side.
+    return tf_xpu_profiler_pass(invoke, runtime)
+
+
+def _ensure_torch_backend(provider, use_device, profile):
+    """按需导入 torch 后端扩展并缓存到 _TORCH_DEV_MODULE。
+
+    非默认后端是扩展包：import torch_{lib} 注册 device_available / 内存查询 /
+    ProfilerActivity 用到的 torch.<lib> 命名空间。默认后端内建（hasattr
+    True → 跳过）；扩展缺失 raise RuntimeError → 500。torch 专属（TF 请求
+    不触 torch 命名空间）；cpu 短路（use_device=False）。
     """
-    import shutil
-    import tempfile
-    from pathlib import Path
+    if not (use_device and provider == "torch" and profile):
+        return
+    lib = profile.get("torch_lib")
+    if lib is None:
+        raise RuntimeError("profile missing torch_lib")
+    import torch
 
-    try:
-        from tensorflow.core.profiler.protobuf import xplane_pb2
-    except ImportError:
-        xplane_pb2 = None
-
-    device_us = 0.0
-    outputs = None
-
-    logdir = tempfile.mkdtemp(prefix="tfprof_")
-    try:
-        import tensorflow as tf
-
-        # OP warmup — errors propagate (-> FAIL).
-        for _ in range(2):  # warmup (dropped)
-            _invoke(
-                callable_fn, named, attrs, provider, device_id, use_device, profile=profile, param_order=param_order
-            )
-        # Profiler machinery — start. Failure -> NA + log.
+    if not hasattr(torch, lib):
         try:
-            tf.profiler.experimental.start(logdir)
-        except Exception:
-            logging.exception("tf.profiler start failed; device_us=NA")
-            return outputs, device_us
-        # OP active window — errors propagate; stop() always runs.
-        try:
-            for _ in range(runtime):
-                outputs = _invoke(
-                    callable_fn, named, attrs, provider, device_id, use_device, profile=profile, param_order=param_order
-                )
-        finally:
-            try:
-                tf.profiler.experimental.stop()
-            except Exception:
-                logging.exception("tf.profiler stop failed")
-        # Profiler machinery — parse. Failure -> NA + log; outputs preserved.
-        pb_path = next(Path(logdir).rglob("*.xplane.pb"), None)
-        if pb_path and xplane_pb2:
-            try:
-                xs = xplane_pb2.XSpace()
-                xs.ParseFromString(pb_path.read_bytes())
-                total = 0.0
-                # Safety cap: a pathological/malformed proto (or a huge trace) can
-                # blow up iteration time; cap device-plane event scanning and warn.
-                # 100000 comfortably exceeds real op-trace sizes.
-                _TF_XPLANE_EVENT_CAP = 100000
-                _seen = 0
-                _truncated = False
-                for plane in xs.planes:
-                    if plane.name.startswith("/device"):
-                        meta = {mid: m.name for mid, m in plane.event_metadata.items()}
-                        for line in plane.lines:
-                            for ev in line.events:
-                                if _seen >= _TF_XPLANE_EVENT_CAP:
-                                    _truncated = True
-                                    break
-                                ev_name = meta.get(ev.metadata_id, "").lower()
-                                if "copy" in ev_name or "memcpy" in ev_name:
-                                    continue
-                                total += ev.duration_ps / 1e6
-                                _seen += 1
-                            if _truncated:
-                                break
-                    if _truncated:
-                        break
-                if _truncated:
-                    logging.warning("TF xplane event count exceeded %d, truncating", _TF_XPLANE_EVENT_CAP)
-                if runtime > 0:
-                    total /= runtime
-                device_us = total
-            except Exception:
-                logging.exception("tf xplane parse failed; device_us=NA")
-    finally:
-        shutil.rmtree(logdir, ignore_errors=True)
-    return outputs, device_us
+            importlib.import_module(f"torch_{lib}")
+        except ModuleNotFoundError as e:
+            raise RuntimeError(f"torch backend '{lib}' unavailable: {e}") from e
+    # 一次性请求子进程内每请求写一次（见模块级 _TORCH_DEV_MODULE）
+    global _TORCH_DEV_MODULE
+    _TORCH_DEV_MODULE = getattr(torch, lib)
+
+
+def _load_named_inputs(input_schema, tmp_in_path, input_count, provider, device_str):
+    """npz 回解 → 按 X-Input-Schema 还原命名输入 → H2D 转框架 tensor。
+
+    dtype 用 schema 声明的物理 dtype（client 侧 numpy 认识真实 dtype，
+    server 侧可能不认识，如 bfloat16）；logical_dtype 为 CSV 声明值——
+    complex32 以 fp16+尾维[2] 到达，据此还原成 torch.complex32 逻辑形状。
+    """
+    if not (input_count and tmp_in_path):
+        return {}
+    npz = np.load(tmp_in_path)
+    flat = [npz[f"a{i}"] for i in range(input_count)]
+    named = match_params_v1(input_schema, flat)
+    dtypes = {e.get("name"): e.get("dtype") for e in (input_schema or [])}
+    logical = {e.get("name"): e.get("logical_dtype") for e in (input_schema or [])}
+    return {k: _to_vendor_tensor(v, provider, device_str, dtypes.get(k), logical.get(k)) for k, v in named.items()}
+
+
+def _compose_kwargs(attrs, input_schema, callable_fn):
+    """三方执行入参：attrs 原样；仅类形态实现（compose）注入 input_formats。
+
+    format 已内嵌在 X-Input-Schema 每个条目——api 模式函数（如 torch.asinh）
+    的形参与框架合成 kwargs 无关，注入会让 phase-2 变成
+    torch.asinh(t, input_formats=['ND']) → TypeError（绑定失败）。
+    """
+    compose_kwargs = dict(attrs or {})
+    schema_formats = [e.get("format") for e in (input_schema or []) if e.get("format")]
+    if schema_formats and inspect.isclass(callable_fn):
+        compose_kwargs["input_formats"] = schema_formats
+    return compose_kwargs
 
 
 def execute_request(
@@ -1046,8 +979,6 @@ def execute_request(
     op_type=None,
     runtime=3,
     param_order=None,
-    input_recipes=None,
-    input_digests=None,
     **_extra,
 ):
     """Run one request. Returns an envelope dict (never raises for 4xx/5xx)."""
@@ -1056,67 +987,13 @@ def execute_request(
             sys.path.insert(0, tenant_sync_dir)
         importlib.invalidate_caches()
 
-        # On-demand import of the torch backend extension. Non-
-        # default backends are extension packages; importing torch_{lib}
-        # registers the torch.<lib> namespace used by device_available /
-        # memory / ProfilerActivity below. The default backend is built in
-        # (already registered -> hasattr True -> skip); a missing extension
-        # raises RuntimeError -> 500. torch-only (TF never touches the torch
-        # namespace); cpu short-circuits (use_device=False).
-        if use_device and provider == "torch" and profile:
-            lib = profile.get("torch_lib")
-            if lib is None:
-                raise RuntimeError("profile missing torch_lib")
-            import torch
+        _ensure_torch_backend(provider, use_device, profile)
 
-            if not hasattr(torch, lib):
-                try:
-                    importlib.import_module(f"torch_{lib}")
-                except ModuleNotFoundError as e:
-                    raise RuntimeError(f"torch backend '{lib}' unavailable: {e}") from e
-            # Cache the resolved backend module (the getattr(torch, lib) object)
-            # for the rest of this request (see module-level _TORCH_DEV_MODULE).
-            # global statement: child process writes once per request.
-            global _TORCH_DEV_MODULE
-            _TORCH_DEV_MODULE = getattr(torch, lib)
-
-        named = {}
-        if input_count and input_recipes and not tmp_in_path:
-            # 免上传：客户端没发数据，只发了生成配方 + 每片叶子的内容指纹。
-            # 按配方重算后逐片核对摘要，对不上就回 409 让客户端整包重发
-            # —— 绝不在"两端数据可能不同"的前提下继续算。
-            try:
-                # ttk-free 部署（只 scp 了 server/ 目录）里没有 ttk 包，重算不可用：
-                # 这里连同 ImportError 一起吃掉，回 409 让客户端整包重发即可，
-                # 不能让免上传把这种部署直接打挂。
-                from ttk.remote.input_recipe import regenerate_and_verify
-
-                flat = regenerate_and_verify(input_recipes, input_digests or [])
-            except Exception as e:
-                return _err(409, f"zero-upload regeneration mismatch: {e}", api=api or spec_class)
-            named = match_params_v1(input_schema, flat)
-        elif input_count and tmp_in_path:
-            npz = np.load(tmp_in_path)
-            flat = [npz[f"a{i}"] for i in range(input_count)]
-            named = match_params_v1(input_schema, flat)
-        # Framework H2D: numpy inputs -> provider tensors on the target device.
-        # dtype is declared per-input in X-Input-Schema (the client's numpy knows
-        # the real dtype; the server's may not, e.g. bfloat16). logical_dtype is
-        # the CSV-declared dtype — complex32 arrives as fp16+尾维[2] and is
-        # reinterpreted into a torch.complex32 logical-shape tensor.
         device_str = format_device(provider, profile, "cpu" if not use_device else device_id)
-        _dtypes = {e.get("name"): e.get("dtype") for e in (input_schema or [])}
-        _logical = {e.get("name"): e.get("logical_dtype") for e in (input_schema or [])}
-        named = {
-            k: _to_vendor_tensor(v, provider, device_str, _dtypes.get(k), _logical.get(k)) for k, v in named.items()
-        }
+        named = _load_named_inputs(input_schema, tmp_in_path, input_count, provider, device_str)
 
         callable_fn, api_label = _resolve_callable(exec_type, provider, api, op_name, op_type, spec_module, spec_class)
-        # 输入 format 已内嵌在 X-Input-Schema 每个条目（name/index/dtype/format）
-        compose_kwargs = dict(attrs or {})
-        schema_formats = [e.get("format") for e in (input_schema or []) if e.get("format")]
-        if schema_formats and inspect.isclass(callable_fn):
-            compose_kwargs["input_formats"] = schema_formats
+        compose_kwargs = _compose_kwargs(attrs, input_schema, callable_fn)
         if has_perf(mode):
             raw_outputs, perf = _run_perf(
                 callable_fn,

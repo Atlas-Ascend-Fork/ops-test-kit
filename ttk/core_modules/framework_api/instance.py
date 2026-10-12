@@ -15,16 +15,26 @@ FrameworkApiInstance — InstanceBase implementation for framework_api tests.
 
 import logging
 import os
+from typing import Any, List
 
-from ttk.core_modules.infra.instance_base import InstanceBase
-from ttk.utilities.container_utils import get_global_storage
+from ttk.switches import get_global_storage
 
-from .backends import get_backend
-from .object import FrameworkApiProfileObject
+from ..common.backend import get_backend
+from ..common.comparison.compare_log import print_compare_log_failures, read_compare_log_failures
+from ..common.instance import InstanceBase, register_instance
+from ..common.logging import COMPARE_LOG_FILE_NAME, build_single_log_dir
+from ..common.process import SimpleCommandProcess, Task
+from .result import FrameworkApiReturnStructure
+from .testcase import TestcaseE2e
+from .worker import run
 
 
+@register_instance("framework-api")
 class FrameworkApiInstance(InstanceBase):
     """Entry instance for framework-level API testing."""
+
+    name = "framework-api"
+    testcase_class = TestcaseE2e
 
     def __init__(self):
         super().__init__()
@@ -49,7 +59,7 @@ class FrameworkApiInstance(InstanceBase):
         """
         if switches.force_cpu:
             raise ValueError("--cpu cannot be combined with --backend npusim")
-        from ttk.core_modules.simulator.config import resolve_camodel_lib_dir
+        from ..common.simulator.config import resolve_camodel_lib_dir
 
         camodel = resolve_camodel_lib_dir(switches.sim_soc_version)
         existing = os.environ.get("LD_LIBRARY_PATH", "")
@@ -64,507 +74,22 @@ class FrameworkApiInstance(InstanceBase):
         os.environ.setdefault("STARS_LOG_PATH", log_dir)
         logging.info("E2E npusim: camodel runtime injected from %s", camodel)
 
-    def env_prepare(self):
-        self._register_mc2_apis()
+    def prepare_env(self):
+        """环境前置检查（no-op）——hccl 手工表已改 param_extractor 惰性装载，
+        无需 eager 注册（基类抽象方法要求实现）。"""
 
-    @staticmethod
-    def _register_mc2_apis():
-        from ttk.utilities.simple_param_extractor import (
-            APIParamInfo,
-            OverloadInfo,
-            ParamInfo,
-            register_api_params,
-        )
-
-        mc2_apis = {
-            "torch_npu.npu_mm_all_reduce_base": APIParamInfo(
-                api_name="torch_npu.npu_mm_all_reduce_base",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x1", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(
-                                name="reduce_op", type="str", is_optional=True, default="sum", is_keyword_only=True
-                            ),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="anticipate_dequant_time", type="bool", is_optional=True, is_keyword_only=True
-                            ),
-                            ParamInfo(name="dequant_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x3", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="anticipate_return_dim", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="anticipate_comm_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="anticant_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="antiquant_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="antiquant_offset", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="antiquant_group_size", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_dtype", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_mode", type="str", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="stream_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_turn", type="int", is_optional=True, default=0, is_keyword_only=True),
-                        ],
-                        return_count=1,
-                    )
-                ],
-            ),
-            "torch_npu.npu_all_gather_quant_mm": APIParamInfo(
-                api_name="torch_npu.npu_all_gather_quant_mm",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x1", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="world_size", type="int", is_optional=True),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x1_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="quant_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="gather_index", type="int", is_optional=True, default=0, is_keyword_only=True
-                            ),
-                            ParamInfo(
-                                name="gather_output", type="bool", is_optional=True, default=True, is_keyword_only=True
-                            ),
-                            ParamInfo(name="comm_turn", type="int", is_optional=True, default=0, is_keyword_only=True),
-                            ParamInfo(name="group_size", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_mode", type="str", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="stream_mode", type="int", is_optional=True, is_keyword_only=True),
-                        ],
-                        return_count=3,
-                    )
-                ],
-            ),
-            "torch_npu.npu_quant_matmul_all_to_all": APIParamInfo(
-                api_name="torch_npu.npu_quant_matmul_all_to_all",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x1", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="world_size", type="int", is_optional=True),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x1_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="common_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x1_offset", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_offset", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x1_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="common_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="group_size", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="all2all_axes", type="int[]", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="y_dtype", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_mode", type="str", is_optional=True, is_keyword_only=True),
-                        ],
-                        return_count=1,
-                    )
-                ],
-            ),
-            "torch_npu.npu_quant_gmm_alltoallv": APIParamInfo(
-                api_name="torch_npu.npu_quant_gmm_alltoallv",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="gmm_x", type="Tensor"),
-                            ParamInfo(name="gmm_weight", type="Tensor"),
-                            ParamInfo(name="gmm_x_scale", type="Tensor"),
-                            ParamInfo(name="gmm_weight_scale", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="ep_world_size", type="int", is_optional=True),
-                            ParamInfo(name="send_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="recv_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="send_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="recv_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_x", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_weight", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_x_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_weight_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="trans_gmm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(
-                                name="trans_mm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(name="gmm_y_dtype", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_y_dtype", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="group_size", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_quant_dtype", type="int", is_optional=True, is_keyword_only=True),
-                        ],
-                        return_count=2,
-                    )
-                ],
-            ),
-            "torch_npu.npu_alltoallv_quant_gmm": APIParamInfo(
-                api_name="torch_npu.npu_alltoallv_quant_gmm",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="gmm_x", type="Tensor"),
-                            ParamInfo(name="gmm_weight", type="Tensor"),
-                            ParamInfo(name="gmm_x_scale", type="Tensor"),
-                            ParamInfo(name="gmm_weight_scale", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="ep_world_size", type="int", is_optional=True),
-                            ParamInfo(name="send_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="recv_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="send_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="recv_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_x", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_weight", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_x_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_weight_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="trans_gmm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(
-                                name="trans_mm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(
-                                name="permute_out_flag",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(name="gmm_y_dtype", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_y_dtype", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="group_size", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_quant_dtype", type="int", is_optional=True, is_keyword_only=True),
-                        ],
-                        return_count=3,
-                    )
-                ],
-            ),
-            "torch_npu.npu_all_gather_base_mm": APIParamInfo(
-                api_name="torch_npu.npu_all_gather_base_mm",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="input", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="world_size", type="int", is_optional=True),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="gather_index", type="int", is_optional=True, default=0, is_keyword_only=True
-                            ),
-                            ParamInfo(
-                                name="gather_output", type="bool", is_optional=True, default=True, is_keyword_only=True
-                            ),
-                            ParamInfo(name="comm_turn", type="int", is_optional=True, default=0, is_keyword_only=True),
-                        ],
-                        return_count=2,
-                    )
-                ],
-            ),
-            "torch_npu.npu_mm_reduce_scatter_base": APIParamInfo(
-                api_name="torch_npu.npu_mm_reduce_scatter_base",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="input", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="world_size", type="int", is_optional=True),
-                            ParamInfo(
-                                name="reduce_op", type="str", is_optional=True, default="sum", is_keyword_only=True
-                            ),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_turn", type="int", is_optional=True, default=0, is_keyword_only=True),
-                        ],
-                        return_count=1,
-                    )
-                ],
-            ),
-            "torch_npu.npu_matmul_all_to_all": APIParamInfo(
-                api_name="torch_npu.npu_matmul_all_to_all",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x1", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="world_size", type="int", is_optional=True),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True),
-                            ParamInfo(name="all2all_axes", type="int[]", is_optional=True),
-                            ParamInfo(name="comm_mode", type="str", is_optional=True),
-                        ],
-                        return_count=1,
-                    )
-                ],
-            ),
-            "torch_npu.npu_all_to_all_matmul": APIParamInfo(
-                api_name="torch_npu.npu_all_to_all_matmul",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x1", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="world_size", type="int", is_optional=True),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True),
-                            ParamInfo(name="all2all_axes", type="int[]", is_optional=True),
-                            ParamInfo(name="all2all_out_flag", type="bool", is_optional=True, default=True),
-                            ParamInfo(name="comm_mode", type="str", is_optional=True),
-                        ],
-                        return_count=2,
-                    )
-                ],
-            ),
-            "torch_npu.npu_all_to_all_quant_matmul": APIParamInfo(
-                api_name="torch_npu.npu_all_to_all_quant_matmul",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x1", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="world_size", type="int", is_optional=True),
-                            ParamInfo(
-                                name="all2all_out_flag",
-                                type="bool",
-                                is_optional=True,
-                                default=True,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x1_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="common_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x1_offset", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_offset", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x1_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="x2_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="common_quant_mode", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="group_sizes", type="int[]", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="all2all_axes", type="int[]", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="y_dtype", type="int", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="comm_mode", type="str", is_optional=True, is_keyword_only=True),
-                        ],
-                        return_count=2,
-                    )
-                ],
-            ),
-            "torch_npu.npu_gmm_alltoallv": APIParamInfo(
-                api_name="torch_npu.npu_gmm_alltoallv",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="gmm_x", type="Tensor"),
-                            ParamInfo(name="gmm_weight", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="ep_world_size", type="int", is_optional=True),
-                            ParamInfo(name="send_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="recv_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="send_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="recv_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_x", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_weight", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="trans_gmm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(
-                                name="trans_mm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                        ],
-                        return_count=2,
-                    )
-                ],
-            ),
-            "torch_npu.npu_alltoallv_gmm": APIParamInfo(
-                api_name="torch_npu.npu_alltoallv_gmm",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="gmm_x", type="Tensor"),
-                            ParamInfo(name="gmm_weight", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(name="ep_world_size", type="int", is_optional=True),
-                            ParamInfo(name="send_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="recv_counts", type="int[]", is_optional=True),
-                            ParamInfo(name="send_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="recv_counts_tensor", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_x", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="mm_weight", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="trans_gmm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(
-                                name="trans_mm_weight",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(
-                                name="permute_out_flag",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                        ],
-                        return_count=3,
-                    )
-                ],
-            ),
-            "mindspeed.npu_bmm_reducescatter_alltoall": APIParamInfo(
-                api_name="mindspeed.npu_bmm_reducescatter_alltoall",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x", type="Tensor"),
-                            ParamInfo(name="weight", type="Tensor"),
-                            ParamInfo(name="group_ep", type="str", is_optional=True),
-                            ParamInfo(name="group_ep_worldsize", type="int", is_optional=True),
-                            ParamInfo(name="group_tp", type="str", is_optional=True),
-                            ParamInfo(name="group_tp_worldsize", type="int", is_optional=True),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="shard_type", type="int", is_optional=True, default=0, is_keyword_only=True),
-                        ],
-                        return_count=1,
-                    )
-                ],
-            ),
-            "mindspeed.npu_alltoall_allgather_bmm": APIParamInfo(
-                api_name="mindspeed.npu_alltoall_allgather_bmm",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x", type="Tensor"),
-                            ParamInfo(name="weight", type="Tensor"),
-                            ParamInfo(name="group_ep", type="str", is_optional=True),
-                            ParamInfo(name="group_ep_worldsize", type="int", is_optional=True),
-                            ParamInfo(name="group_tp", type="str", is_optional=True),
-                            ParamInfo(name="group_tp_worldsize", type="int", is_optional=True),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="shard_type", type="int", is_optional=True, default=0, is_keyword_only=True),
-                            ParamInfo(name="act_type", type="str", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="need_allgather_out",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(
-                                name="need_activation_feature",
-                                type="bool",
-                                is_optional=True,
-                                default=False,
-                                is_keyword_only=True,
-                            ),
-                        ],
-                        return_count=3,
-                    )
-                ],
-            ),
-            "mindspeed.npu_mm_all_reduce_add_rms_norm": APIParamInfo(
-                api_name="mindspeed.npu_mm_all_reduce_add_rms_norm",
-                source="manual-mc2",
-                overloads=[
-                    OverloadInfo(
-                        params=[
-                            ParamInfo(name="x1", type="Tensor"),
-                            ParamInfo(name="x2", type="Tensor"),
-                            ParamInfo(name="residual", type="Tensor"),
-                            ParamInfo(name="gamma", type="Tensor"),
-                            ParamInfo(name="hcom", type="str", is_optional=True),
-                            ParamInfo(
-                                name="reduce_op", type="str", is_optional=True, default="sum", is_keyword_only=True
-                            ),
-                            ParamInfo(
-                                name="epsilon", type="float", is_optional=True, default=1e-6, is_keyword_only=True
-                            ),
-                            ParamInfo(name="bias", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="antiquant_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="antiquant_offset", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(name="dequant_scale", type="Tensor", is_optional=True, is_keyword_only=True),
-                            ParamInfo(
-                                name="antiquant_group_size",
-                                type="int",
-                                is_optional=True,
-                                default=0,
-                                is_keyword_only=True,
-                            ),
-                            ParamInfo(name="comm_turn", type="int", is_optional=True, default=0, is_keyword_only=True),
-                        ],
-                        return_count=2,
-                    )
-                ],
-            ),
-        }
-        for api_name, info in mc2_apis.items():
-            info.params = info.overloads[0].params
-            register_api_params(api_name, info.params, info.source)
-            from ttk.core_modules.framework_api.framework_api_info_keeper import FrameworkApiInfoKeeper
-
-            FrameworkApiInfoKeeper()._cache[api_name] = info
-        logging.info(f"Registered {len(mc2_apis)} mc2 torch_npu APIs")
-
-    def get_device_count(self):
+    def detect_device_count(self):
         switches = get_global_storage()
         if switches.device_count == -1:
             switches.device_count = self.backend.device_count()
-        logging.info(f"Device count: {switches.device_count}")
 
-    def get_device_platform(self):
+    def detect_platform(self):
         switches = get_global_storage()
         if switches.dev_plat == "AUTO":
             switches.dev_plat = self.backend.device_name()
         switches.short_soc_version = self.backend.soc_series()
-        logging.info(f"Device platform: {switches.dev_plat}")
         if switches.core_limit and self.backend.is_npu():
-            from ttk.utilities.platform import get_npu_hw_info, validate_core_limit
+            from ttk.core_modules.common.device import get_npu_hw_info, validate_core_limit
 
             try:
                 hw_info = get_npu_hw_info(switches.dev_plat)
@@ -573,8 +98,63 @@ class FrameworkApiInstance(InstanceBase):
             else:
                 validate_core_limit(switches.core_limit, hw_info)
 
-    def setup_profile_object(self):
-        self.profile_object = FrameworkApiProfileObject(self.task_keeper, self.mp_context, self.backend)
+    def setup(self):
+        pass
 
-    def device_info(self, dev_id: int) -> str:
+    def build_tasks(self, testcases: List[TestcaseE2e]) -> List[Task]:
+        grant_events = SimpleCommandProcess._device_grant_events
+        granted_indices = SimpleCommandProcess._device_granted_indices
+        sorted_cases = sorted(testcases, key=lambda t: getattr(t, "_csv_row_index", -1))
+        tasks = []
+        for testcase in sorted_cases:
+            # 单值 device_ids（CSV "3" 指定单卡）透传——dispatch 层 pin 路由
+            # 到指定设备组；多值经 _try_push_multi_device_task 交集解析。
+            device_ids = list(testcase.device_ids) if testcase.device_ids else None
+            tasks.append(
+                Task(
+                    testcase,
+                    run,
+                    (testcase, grant_events, granted_indices),
+                    task_type="profile",
+                    pool="profile",
+                    device_ids=device_ids,
+                )
+            )
+        return tasks
+
+    def handle_result(self, task: Task, result: Any) -> tuple:
+        self._print_new_compare_failures(task.testcase)
+        if isinstance(result, FrameworkApiReturnStructure):
+            return result.pick_data(self.result_titles())
+        # worker 结果类型异常 → 显式 FAIL 行（不静默降级为字符串行）
+        logging.error(
+            "[%s] INVALID_WORKER_RESULT: unexpected worker result type %s",
+            task.testcase.testcase_name,
+            type(result).__name__,
+        )
+        failure = FrameworkApiReturnStructure()
+        failure.construct("INVALID_WORKER_RESULT", "FAIL", None)
+        return failure.pick_data(self.result_titles())
+
+    def handle_error(self, task: Task, kind: str, detail):
+        if kind == "none" and not task.task_type.startswith("compile"):
+            # profile 任务无结果 → NO_WORKER_RESULT FAIL 行
+            logging.error("[%s] NO_WORKER_RESULT: worker returned no result", task.testcase.testcase_name)
+            failure = FrameworkApiReturnStructure()
+            failure.construct("NO_WORKER_RESULT", "FAIL", None)
+            return self._assemble_result_row(task, failure.pick_data(self.result_titles()))
+        return super().handle_error(task, kind, detail)
+
+    def result_titles(self) -> tuple:
+        return FrameworkApiReturnStructure.get_titles()
+
+    def get_device_info(self, dev_id: int) -> str:
         return f"{self.backend.device_type()}:{dev_id}"
+
+    def _print_new_compare_failures(self, testcase) -> None:
+        # COMPARE 级进单一 ttk.log（per-case 覆写）——按用例日志文件
+        # 读 Index/Diff 行，失败明细随结果打屏。
+        switches = get_global_storage()
+        log_dir = build_single_log_dir(switches.test_mode, testcase.testcase_name, switches.root_path)
+        diff_lines, _end = read_compare_log_failures(os.path.join(log_dir, COMPARE_LOG_FILE_NAME))
+        print_compare_log_failures(diff_lines, testcase.testcase_name)

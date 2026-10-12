@@ -36,7 +36,7 @@ def detect_cann_features():
     asc_path = _find_ascend_root()
     if not asc_path:
         return None
-    from ttk.utilities.platform import get_ascend_scene_info
+    from ttk.core_modules.common.device import get_ascend_scene_info
 
     scene_os, scene_arch = get_ascend_scene_info()
     arch_dir = f"{scene_arch}-{scene_os}" if scene_arch and scene_os else "x86_64-linux"
@@ -84,7 +84,7 @@ class GeirCompiler:
         if not asc_path:
             raise RuntimeError("Ascend installation not found. Please check Ascend installation.")
 
-        from ttk.utilities.platform import get_ascend_scene_info
+        from ttk.core_modules.common.device import get_ascend_scene_info
 
         scene_os, scene_arch = get_ascend_scene_info()
         arch_dir = f"{scene_arch}-{scene_os}" if scene_arch and scene_os else "x86_64-linux"
@@ -98,7 +98,7 @@ class GeirCompiler:
             os.path.join(asc_path, "opp", "built-in", "op_graph", "inc"),
         ]
 
-        from ttk.utilities.platform import get_opp_paths
+        from ttk.core_modules.common.device import get_opp_paths
 
         for copp in get_opp_paths("custom"):
             d = os.path.join(copp, "op_proto", "inc")

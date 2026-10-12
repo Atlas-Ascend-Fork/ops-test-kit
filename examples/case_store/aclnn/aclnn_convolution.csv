@@ -1,2 +1,0 @@
-testcase_name,api_name,tensor_view_shapes,tensor_dtypes,tensor_formats,attributes
-aclnnConvolution_00,aclnnConvolution,"((2, 2, 2, 2),(1, 2, 1, 1), None, (2, 1, 4, 4))","('float16', 'float16', None, 'float16')","('NCHW', 'NCHW', None, 'NCHW')","{'stride': [1, 1], 'padding': [1, 1], 'outputPadding': [0, 0], 'dilation': [1, 1],'transposed': False,'groups': 1,'cubeMathType':0}"

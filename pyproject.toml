@@ -56,9 +56,9 @@ all = [
 ttk = "ttk.cli:main"
 
 [project.urls]
-Homepage = "https://gitee.com/ascend/ttk"
-Documentation = "https://gitee.com/ascend/ttk/docs"
-Issues = "https://gitee.com/ascend/ttk/issues"
+Homepage = "https://gitcode.com/cann/ops-test-kit"
+Documentation = "https://gitcode.com/cann/ops-test-kit/tree/master/docs"
+Issues = "https://gitcode.com/cann/ops-test-kit/issues"
 
 [tool.setuptools]
 packages = { find = { include = ["ttk*"], exclude = ["tests*", "examples*"] } }
@@ -130,9 +130,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"ttk/utilities/__init__.py" = ["F401", "F403"]
 "ttk/core_modules/**/__init__.py" = ["F401", "F403"]
-"tests/**" = ["S101", "S108"]
+"tests/**" = ["S101", "S108", "S301", "PT014"]
 
 [tool.mypy]
 python_version = "3.8"

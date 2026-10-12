@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
+"""
+Regression test for the KERNEL builtin-golden dispatch path in
+output_generation.__generate_golden:
+
+    get_plugin_function(op, "golden", "kernel") -> None
+    -> KERNEL_GOLDEN[op] resolves (e.g. "neg" -> numpy.negative)
+    -> framework_of(numpy.negative) == "numpy"
+    -> __call_numpy_api
+    -> __invoke_golden returns numeric numpy arrays
+
+This guards the refactor that unified KERNEL dispatch through
+__invoke_golden + framework_of. If the dispatch regressed such that a
+builtin op fell through to "UNSUPPORTED" / "GOLDEN_FAILURE", the
+assertion that the first golden element is a numeric numpy.ndarray
+(not a sentinel string) would fail.
+"""
+
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
+
+from ttk.core_modules.kernel import golden as _mod
+from ttk.core_modules.kernel.testcase import TestcaseKernel
+
+# Access module-level private functions via getattr to dodge class-style name mangling.
+_generate_golden = getattr(_mod, "__generate_golden")
+KERNEL_GOLDEN = _mod.KERNEL_GOLDEN
+
+
+def _make_testcase(
+    op_name="neg", input_shapes=((4,),), input_dtypes=("float32",), output_shapes=((4,),), output_dtypes=("float32",)
+):
+    case = TestcaseKernel()
+    case.testcase_name = f"test_{op_name}_builtin_golden"
+    case.op_name = op_name
+    case.input_shapes = input_shapes
+    case.input_dtypes = input_dtypes
+    case.output_shapes = output_shapes
+    case.output_dtypes = output_dtypes
+    case.input_ori_shapes = input_shapes
+    case.output_ori_shapes = output_shapes
+    n_in = len(input_shapes)
+    n_out = len(output_shapes or ())
+    case.input_formats = ("ND",) * n_in
+    case.input_ori_formats = ("ND",) * n_in
+    case.output_formats = ("ND",) * n_out
+    case.output_ori_formats = ("ND",) * n_out
+    case.input_data_ranges = (None,) * n_in
+    case.attributes = {}
+    case.input_arrays = tuple(np.ones(s, dtype=d) for s, d in zip(input_shapes, input_dtypes))
+    case.original_input_arrays = None
+    return case
+
+
+def _mock_switches():
+    sw = MagicMock()
+    sw.dev_plat = "Ascend910B2"
+    sw.short_soc_version = "Ascend910B"
+    sw.golden_mode = "Enable"  # not Promote → __golden_mode is a no-op
+    sw.plugin_path = None
+    sw.overflow_mode = 0
+    return sw
+
+
+@pytest.fixture(autouse=True)
+def _mock_env(monkeypatch):
+    # Avoid real ASCEND toolkit lookups during construction/validate.
+    monkeypatch.delenv("ASCEND_HOME_PATH", raising=False)
+    monkeypatch.delenv("ASCEND_TOOLKIT_HOME", raising=False)
+    monkeypatch.delenv("ASCEND_OPP_PATH", raising=False)
+
+
+@patch("ttk.core_modules.kernel.golden.OpInfoKeeper")
+@patch("ttk.core_modules.kernel.golden.get_global_storage")
+@patch("ttk.core_modules.common.plugin.resolver.get_plugin_function")
+class TestKernelBuiltinGoldenDispatch:
+    """KERNEL_GOLDEN[op] → numpy ufunc → numeric result (not a sentinel)."""
+
+    def test_neg_resolves_and_returns_numeric_array(self, mock_get_plugin, mock_sw, mock_op_info):
+        """`neg` (numpy.negative, unary) end-to-end through __generate_golden."""
+        # 1. No custom plugin → forces KERNEL_GOLDEN fallback.
+        mock_get_plugin.return_value = None
+        mock_sw.return_value = _mock_switches()
+        mock_op_info.return_value.info_of.return_value = {"inputs": []}
+
+        case = _make_testcase(
+            op_name="neg",
+            input_shapes=((4,),),
+            input_dtypes=("float32",),
+            output_shapes=((4,),),
+            output_dtypes=("float32",),
+        )
+        # Sanity: pre-conditions for the path under test.
+        assert "neg" in KERNEL_GOLDEN
+        assert KERNEL_GOLDEN["neg"] is np.negative
+
+        out = np.array([1.0, -2.0, 3.0, -4.0], dtype="float32")
+        case.input_arrays = (out,)
+
+        golden = _generate_golden(case, ["float32"])
+
+        # The path must succeed (not "GOLDEN_FAILURE" / "UNSUPPORTED") and
+        # produce a numeric numpy array equal to -input.
+        assert len(golden) >= 1
+        assert isinstance(golden[0], np.ndarray), f"expected ndarray, got sentinel/string: {golden[0]!r}"
+        np.testing.assert_array_equal(golden[0], np.array([-1.0, 2.0, -3.0, 4.0], dtype="float32"))
+        # Confirm get_plugin_function was consulted (proves the None→KERNEL_GOLDEN branch ran).
+        mock_get_plugin.assert_called_once()
+
+
+@patch("ttk.core_modules.common.plugin.resolver.get_plugin_function")
+class TestKernelGoldenFallbackBranchCoverage:
+    """Lighter-weight unit on the fallback decision itself.
+
+    Even without a fully-validated TestcaseKernel we want to prove that, when
+    get_plugin_function yields None, KERNEL_GOLDEN still resolves the op
+    and the resolved callable is the documented numpy ufunc — i.e. the
+    regression surface (the dict + its wiring) is exercised directly.
+    """
+
+    def test_builtin_ufunc_routes_to_numpy(self, mock_get_plugin):
+        # framework_of classification is what steers numpy ufuncs into
+        # __call_numpy_api inside __invoke_golden.
+        from ttk.core_modules.common.invoke import _framework_of as framework_of
+
+        for op in ("neg", "acos", "floor_div"):
+            assert framework_of(KERNEL_GOLDEN[op]) == "numpy", f"{op} must classify as 'numpy' to hit the builtin path"

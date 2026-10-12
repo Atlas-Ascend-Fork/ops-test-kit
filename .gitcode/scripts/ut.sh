@@ -47,6 +47,6 @@ DP_ASSERT_EQUAL()
 }
 
 LOG_HEAD "Start run python testcase"
-cd ${WORKSPACE}/ || exit 1
+cd "${WORKSPACE:?}" || exit 1
 LOG_DO python3 -m pytest tests/ -v --tb=short
 DP_ASSERT_EQUAL "$?" "0" "Run UT TESTCASE"

@@ -18,7 +18,7 @@ export ASCEND_CUSTOM_PATH=/path/to/cann
 ```shell
 python3 -m ttk -v        # 版本检查
 python3 -m ttk info       # 设备信息（NPU卡数、CANN版本）
-python3 -m ttk list -i cases.csv  # 预览用例列表（仅列名，不校验）
+python3 -m ttk list -i cases.csv  # 预览用例列表（仅列用例名，要求 testcase_name 列存在且非空）
 python3 -m ttk list -i cases.csv --op add  # 按算子名筛选
 ```
 
@@ -35,7 +35,7 @@ python3 -m ttk list -i cases.csv --op add  # 按算子名筛选
 
 ## Step 3: 构造命令
 
-每次只能执行一条 `ttk` 命令，不支持在同一个目录下并发多条（如 `python3 -m ttk kernel -i a.csv &` 和 `python3 -m ttk kernel -i b.csv &`），因为进程间会冲突。多个同模式 CSV 可用逗号拼接：`-i a.csv,b.csv`，或逐个依次拉起。
+每次只能执行一条 `ttk` 命令，不支持在同一个目录下并发多条（如 `python3 -m ttk kernel -i a.csv &` 和 `python3 -m ttk kernel -i b.csv &`），因为进程间会冲突。多个同模式 CSV 可打包为 zip 后一次传入（`-i cases.zip`，逐 csv 成员展开），或逐个依次拉起。
 
 `-i` 指定 CSV 文件是唯一的必填参数。
 
@@ -61,7 +61,7 @@ GEIR 模式通过 GE 图编译+执行测试算子，复用 Kernel 模式的 CSV 
 python3 -m ttk aclnn -i cases.csv
 ```
 
-ACLNN 子命令复用全部通用参数，专属选项仅 `--no-prof`、`--xpu-perf`，详见 `references/aclnn-params.md`。
+ACLNN 子命令无模式专属选项（`--no-prof`、`--xpu-perf` 等均为四通路共享），详见 `references/aclnn-params.md`。
 
 ### E2E 模式
 
@@ -69,7 +69,7 @@ ACLNN 子命令复用全部通用参数，专属选项仅 `--no-prof`、`--xpu-p
 python3 -m ttk e2e -i cases.csv
 ```
 
-E2E 默认自动探测 NPU；`--cpu` 强制 CPU 执行。详见 `references/e2e-params.md`。
+E2E 默认自动探测 NPU；`--backend cpu` 强制 CPU 执行。详见 `references/e2e-params.md`。
 
 ### NPUSim 仿真模式（无卡跑算子）
 
@@ -78,11 +78,11 @@ kernel / aclnn / e2e 均可加 `--backend npusim`，把真机执行替换为 SoC
 ```shell
 python3 -m ttk kernel --backend npusim -i cases.csv
 python3 -m ttk aclnn  --backend npusim -i cases.csv --sim-cores 0
-python3 -m ttk e2e    --backend npusim -i cases.csv -t add_f32_01
+python3 -m ttk e2e    --backend npusim -i cases.csv -t add_f32_alpha
 ```
 
-- 参数：`--backend {npu,npusim}`（默认 `npu`）、`--sim-soc`（默认 `Ascend950`）、`--sim-output`（默认 `<root>/sim_output`）、`--sim-report`（出流水图 `trace_core*.json`）、`--sim-cores`、`--sim-obj`。
-- 约束：与 `--no-prof` **互斥**（仿真内部自动生成输入/golden）；**GEIR 不支持**；e2e 仅 eager、graph/aclgraph 禁用。
+- 参数：`--backend {npu,npusim,xpu}`（e2e 另支持 `cpu`；默认 `npu`）、`--sim-soc`（默认 `Ascend950`）、`--sim-output`（默认 `<root>/sim_output`）、`--sim-report`（出流水图 `trace_core*.json`）、`--sim-cores`、`--sim-obj`。
+- 约束：与 `--no-prof` **互斥**（仿真内部自动生成输入/golden）；**GEIR 不支持**；e2e 建议仅用 eager（graph/aclgraph 仿真未验证、可能失败）。
 - 环境：需 source 含 **Ascend-950-ops** 的 CANN（如 `9.1.0-beta.3`）；9.2.0 缺 950-ops 会编译失败。
 - 详细参数见 `references/npusim-params.md`，完整指南见 `docs/NPUSim/npusim_usage.md`。
 
@@ -93,49 +93,47 @@ python3 -m ttk e2e    --backend npusim -i cases.csv -t add_f32_01
 | 参数 | 缩写 | 示例 |
 |------|------|------|
 | `--testcase` | `-t` | `-t add_01,add_02` |
-| `--testcase-index` | `--ti` | `--ti 1-10` |
+| `--testcase-index` | `--ti` | `--ti 0-9`（从 0 起） |
 | `--testcase-count` | `--tc` | `--tc 10` |
 | `--operator` | `--op` | `--op add,mat_mul_v3` |
 | `--exclude-operator` | `--no-op` | `--no-op mat_mul_v3` |
 | `--priority` | | `--priority 1-3` |
-| `--rerun` | | `--rerun precision_status`（`-i` 须为含该列的结果 CSV） |
+| `--rerun` | | `--rerun precision_status`（Kernel/GEIR 通路；ACLNN/E2E 不支持；`-i` 须为含该列的结果 CSV） |
 
 ### 设备与进程
 
 | 参数 | 缩写 | 说明 | 默认 |
 |------|------|------|------|
 | `--device` | `--dev` | 使用设备数 | 全部 |
-| `--device-whitelist` | | 指定设备 | 无 |
-| `--device-blacklist` | | 排除设备 | 无 |
+| `--devices` | `--device-whitelist` | 设备 ID 表达式：`3`/`0,1`/`0-7` 正选，`^` 排除（如 `0-7,^3`、`^2,^3`） | 无 |
 | `--process-count` | `--pc` | 每卡进程数 | 自动（CPU核数×80%÷卡数，上限4） |
 | `--platform` | `--plat` | SoC 版本 | 自动 |
-| `--proc-timeout` | | 单用例超时(秒) | 0 |
-| `--deterministic-level` | `--dl` | 确定性级别：0=关、1=确定性计算（MD5 跨 NPU 一致）、2=强一致、3=批量一致性 | 0 |
+| `--proc-timeout` | | 单用例超时(秒) | 3600 |
+| `--deterministic-level` | `--dl` | 确定性级别：0=关、1=确定性计算（MD5 跨 NPU 一致）、2=强一致、3=确定性执行（完整声明 batch 字段时进入切片比对） | 0 |
 
 ### 精度控制
 
 | 参数 | 说明 | 默认 |
 |------|------|------|
-| `--compare` | `close`/`stat_rel_err`/`mixed`/`cosine`/`binary`/`requant`/`cross_check` | Spec.tolerance 路由（需 `--plugin`），否则 `mixed` |
+| `--compare` | `close`/`stat_rel_err`/`mixed`/`cosine`/`binary`/`requant`/`cross_check` | Spec.tolerance 路由（需 `--plugin`）；无声明时按输出 dtype 默认（浮点 `mixed`、整型/布尔 `binary_equal` 等） |
 | `--seed` | 随机种子。取相同值时，同一个用例每次执行生成的输入数据完全一致 | 随机 |
-| `--golden-mode` | `Enable`/`Disable`/`Promote` | `Enable` |
+| `--golden-mode` | `Enable`/`Disable`/`Promote`/`XPU` | `Enable` |
 | `--input-dist` | `uniform`/`normal` | `uniform` |
-| `--provider` | 指定待测三方 provider（如 `torch,tf`），用于 `cross_check` 筛选 | 自动 |
+| `--provider` | 指定待测三方 provider（如 `torch,tf`），只收窄分发范围（作用于所有三方/XPU 采集路径，不覆盖 yaml 配置） | 自动 |
 
-> 完整容差优先级（`--compare` > `Spec.tolerance` > 方法默认）见 `ttk-how-diagnose/references/precision-debug.md`。CSV 字段为 legacy，`precision_tolerances` 由 `close`/`cosine` 读取、`absolute_precision` 仅 `close` 读取。
+> 方法选择优先级（`--compare` > `Spec.tolerance.standard` > dtype 类别默认），同一判据内容差参数以 legacy CSV 字段优先，详见 `ttk-how-diagnose/references/precision-debug.md`。CSV 字段为 legacy，`precision_tolerances` 由 `close`/`cosine`/`requant`（只读 ptol）读取、`absolute_precision` 仅 `close` 读取。
 
 ### 调试
 
 | 参数 | 说明 | 默认 |
 |------|------|------|
-| `--dump-on-fail` | 精度失败时 Dump 全部数据 | 关闭 |
+| `--dump-on-fail` | 精度失败时补 Dump 输入/输出/Golden（不含 `xpu`） | 关闭 |
 | `--dump in,out,golden,xpu` | 指定 Dump 内容；`xpu` 保存远端第三方输出 | 关闭 |
 | `--dump-format npy` | Dump 格式：`bin`/`npy`/`pt`/`print` | `bin` |
-| `--single-log` | 每个用例独立日志文件 | 关闭 |
 | `--plugin path.py` | 加载自定义插件 | 无 |
 | `--validate` | 仅校验 CSV 格式和字段（不执行编译、输入生成、Golden生成等流程） | 关闭 |
 | `--manual-data-dirs <dir>` | 手工数据回放（配合 `--no-prof --dump in,golden` 准备） | 无 |
-| `--config <yaml>` | 指定配置文件（整体覆盖 default→`~/.config/ttk`→`./ttk.conf.yaml`） | 无 |
+| `--config <yaml>` | 指定配置文件（deep-merge 叠加在 default 与 `~/.config/ttk`→`./ttk.conf.yaml` 用户配置之上） | 无 |
 
 **手工数据两阶段**：先用 `--no-prof --dump in,golden` 准备输入与 golden，再用 `--manual-data-dirs <dir>` 回放比对。注意 `--backend npusim` 与 `--no-prof` **互斥**——仿真后端内部自动准备数据。
 
@@ -150,19 +148,19 @@ python3 -m ttk e2e    --backend npusim -i cases.csv -t add_f32_01
 
 ```shell
 # 运行自带示例
-python3 -m ttk kernel -i examples/case_store/kernel/add.csv
-python3 -m ttk geir -i examples/case_store/kernel/add.csv
-python3 -m ttk aclnn -i examples/case_store/aclnn/aclnn_cat.csv
-python3 -m ttk e2e -i examples/case_store/e2e/torch_ops.csv
+python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast
+python3 -m ttk geir -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast
+python3 -m ttk aclnn -i examples/case_store/aclnn/cases.csv -t add_fp16_broadcast
+python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv
 
-# 调试单个失败用例
-python3 -m ttk kernel -i cases.csv -t case_name --dump-on-fail --single-log
+# 调试单个失败用例（每用例日志自动落 log/<mode>/<用例名>/ttk.log）
+python3 -m ttk kernel -i cases.csv -t case_name --dump-on-fail
 
 # 输出结果到 CSV
 python3 -m ttk kernel -i cases.csv -o results.csv
 
 # NPUSim 仿真（无卡，kernel/aclnn/e2e 均支持）
-python3 -m ttk kernel --backend npusim -i examples/case_store/kernel/add.csv --sim-cores 0
+python3 -m ttk kernel --backend npusim -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast --sim-cores 0
 ```
 
 ## 详细参数

@@ -34,7 +34,7 @@ from typing import Optional
 import numpy as np
 
 from ttk.remote import has_data
-from ttk.utilities.container_utils import deep_flatten
+from ttk.utilities.container import deep_flatten
 
 CHUNK_SIZE = 64 * 1024  # 64KB chunks for file streaming
 
@@ -149,110 +149,12 @@ def _serialize_to_file(inputs: list, dir=None) -> str:
     return tmp.name
 
 
-_FEATURE_CACHE: dict = {}
-FEATURE_CACHE_TTL_S = 300.0
-
-
-def _forget_server_features(host, port):
-    """连接层出错时丢弃缓存: 对端可能已被换成另一个实例。"""
-    _FEATURE_CACHE.pop((host, port), None)
-
-
-def _features_from_health(host, port):
-    """从心跳写的 health 文件取该 endpoint 的能力; 取不到返回 None(表示"不知道")。
-
-    返回 None 与返回 [] 含义不同: [] 是"探过了, 服务端没有任何能力", None 是"没查到,
-    请调用方自己探" —— 混淆两者会让旧服务端被误判成新服务端。
-    """
-    try:
-        from ttk.remote.health_file import read_health_file
-
-        health = read_health_file()
-        if not health:
-            return None
-        entry = (health.get("endpoints") or {}).get(f"{host}:{port}")
-        if not isinstance(entry, dict) or "features" not in entry:
-            return None
-        return list(entry.get("features") or [])
-    except Exception:  # noqa: BLE001  取不到就退回自己探, 绝不因此让派发失败
-        return None
-
-
-def _server_features(host, port, timeout):
-    """探一次服务端能力并按 (host, port) 缓存(带 TTL)。探不到一律按"不支持"处理。
-
-    能力来自服务端自己在 /v1/heartbeat 里的声明, **不按端口号硬编码判断新旧**。
-    但 (host, port) 并不唯一标识一个服务实例 —— 服务端升级重启、或隧道被重新
-    指向另一个实例, 同一个地址背后就换了人。所以缓存必须有 TTL, 且连接出错时作废。
-    """
-    key = (host, port)
-    hit = _FEATURE_CACHE.get(key)
-    if hit is not None and time.monotonic() - hit[0] < FEATURE_CACHE_TTL_S:
-        return hit[1]
-    # 先读心跳写的 health 文件: 本模块的 _FEATURE_CACHE 是**模块级**字典, 而跑批的每个
-    # 用例跑在独立 worker 进程里 —— 进程间不共享, 每个 worker 都会自己探一次(慢链路上
-    # 就是每 worker 一个多余 RTT)。心跳本来就在周期性调 /v1/heartbeat, 能力已写进 health
-    # 文件, 直接取即可; 取不到再退回自己探(单机无心跳、health 文件还没生成等场景)。
-    shared = _features_from_health(host, port)
-    if shared is not None:
-        _FEATURE_CACHE[key] = (time.monotonic(), shared)
-        return shared
-    feats = []
-    try:
-        conn = _create_connection(host, port, timeout=min(timeout, 15))
-        try:
-            conn.request("GET", "/v1/heartbeat")
-            resp = conn.getresponse()
-            body = resp.read()
-            if resp.status == 200:
-                feats = json.loads(body).get("features") or []
-        finally:
-            conn.close()
-    except Exception as e:  # noqa: BLE001  探测失败只影响是否启用优化
-        logging.debug("feature probe failed for %s:%s (%s)", host, port, e)
-    _FEATURE_CACHE[key] = (time.monotonic(), feats)
-    logging.info("server %s:%s features=%s", host, port, feats)
-    return feats
-
-
-def _plan_zero_upload(inputs: list, input_recipes: Optional[dict]):
-    """能免传就返回 {recipes, digests}，否则 None（调用方回落整包上传）。
-
-    判据是**逐片可证**的：把要发的每片叶子算出内容指纹，到配方表里查；
-    全查得到才成立。任何一片查不到（非连续视图、input 插件原地改过数据、
-    该片没播种……）就整体放弃——宁可多传，不可两端数据不同却当成相同。
-    """
-    if not input_recipes:
-        return None
-    from .input_recipe import digest_of
-
-    leaves = [a for a in deep_flatten(inputs) if a is not None]
-    if not leaves:
-        return None
-    digests = []
-    recipes = []
-    for leaf in leaves:
-        key = digest_of(leaf)
-        recipe = input_recipes.get(key)
-        if recipe is None:
-            return None
-        digests.append(key)
-        recipes.append(recipe)
-    return {"recipes": recipes, "digests": digests}
-
-
 def _reinterpret_dtype(arr, dtype_name):
-    from ..utilities.dtypes import numpy_bfloat16, numpy_float8_e4m3fn, numpy_float8_e5m2, numpy_float8_e8m0
+    from ..utilities.dtypes import resolve_numpy_dtype
 
     try:
-        if dtype_name == "bfloat16":
-            return arr.view(numpy_bfloat16())
-        if dtype_name == "float8_e5m2":
-            return arr.view(numpy_float8_e5m2())
-        if dtype_name == "float8_e4m3fn":
-            return arr.view(numpy_float8_e4m3fn())
-        if dtype_name == "float8_e8m0":
-            return arr.view(numpy_float8_e8m0())
+        if dtype_name in ("bfloat16", "float8_e5m2", "float8_e4m3fn", "float8_e8m0"):
+            return arr.view(resolve_numpy_dtype(dtype_name))
     except (ImportError, AttributeError, ValueError, TypeError, RuntimeError):
         return arr
     return arr
@@ -346,7 +248,7 @@ def _build_input_schema(
         return []
 
     assert len(inputs) <= len(input_names), (
-        f"inputs({len(inputs)}) > names({len(input_names)}): slots/names 长度不匹配（caller 构造 bug）"
+        f"inputs({len(inputs)}) > names({len(input_names)}): slots/names length mismatch (caller bug)"
     )
 
     fmts = list(input_formats) if input_formats else []
@@ -466,9 +368,9 @@ def _sync_missing_dependency(
     upload; concurrent workers poll ``get_semaphore`` and reuse its result,
     avoiding duplicate uploads and concurrent-write races on xpu_server.
     """
-    from ttk.core_modules.tbe_multiprocessing.pool import get_process_context
+    from ttk.core_modules.common.process import process_context
 
-    ctx = get_process_context()
+    ctx = process_context()
     if ctx is None:
         # Single-process mode (no pool): sync directly — no concurrent dedup needed.
         return _do_http_sync(missing, search_roots, endpoint_host, endpoint_port, tenant_id, timeout)
@@ -599,6 +501,233 @@ if hasattr(os, "register_at_fork"):
 atexit.register(close_pooled_connections)
 
 
+@dataclass
+class _RequestMeta:
+    """请求描述——/v1/run 请求头装配的全部输入（api/spec 双形态 + 算子标识）。"""
+
+    op_name: Optional[str]
+    op_type: Optional[str]
+    provider: str
+    attrs: dict
+    tenant_id: str
+    execution_type: str
+    api: Optional[str]
+    spec_module: Optional[str]
+    spec_class: Optional[str]
+    param_order: Optional[list]
+    mode_int: int
+    runtime: int
+
+
+def _build_headers(meta: _RequestMeta, schema: list, leaf_count: int) -> dict:
+    """装配 /v1/run 请求头：模式位、输入 schema、api/spec 双形态、算子标识。"""
+    headers = {
+        "X-Execution-Type": meta.execution_type,
+        "X-Provider": meta.provider,
+        "X-Attrs": json.dumps(meta.attrs),
+        "X-Input-Schema": json.dumps(schema),
+        "X-Input-Count": str(leaf_count),
+        "X-Mode": str(meta.mode_int),
+        "X-Runtime": str(meta.runtime),
+        "X-Tenant-ID": meta.tenant_id,
+        "Content-Type": "application/octet-stream",
+    }
+    if meta.param_order:
+        headers["X-Param-Order"] = json.dumps(meta.param_order)
+    if meta.execution_type == "api":
+        if meta.api:
+            headers["X-API"] = meta.api
+    else:  # spec
+        if meta.spec_module:
+            headers["X-Spec-Module"] = meta.spec_module
+        if meta.spec_class:
+            headers["X-Spec-Class"] = meta.spec_class
+    if meta.op_name:
+        headers["X-Op-Name"] = meta.op_name
+    if meta.op_type:
+        headers["X-Op-Type"] = meta.op_type
+    return headers
+
+
+@dataclass
+class _DispatchPlan:
+    """一次远端派发的流程状态：请求头 + 端点 + 重试预算（各阶段共享，计数器随重试递增）。"""
+
+    headers: dict
+    mode_int: int
+    endpoint_host: str
+    endpoint_port: int
+    timeout: int
+    tenant_id: str
+    spec_search_roots: list
+    return_result: bool
+    max_retries: int
+    deadline_s: int
+    deadline_at: float
+    budget_503: int
+    budget_conn: int
+    budget_424: int
+    used_503: int = 0
+    used_conn: int = 0
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self.deadline_at
+
+    def busy_retry(self) -> bool:
+        """503 预算内退避后重试（424 重试不占此预算）。"""
+        if self.used_503 >= self.budget_503:
+            return False
+        self.used_503 += 1
+        time.sleep(self._backoff(self.used_503))
+        return True
+
+    def transport_retry(self, exc: Exception) -> bool:
+        """传输异常预算内退避后重试（端点死亡由 HB 11s 驱逐，不在此标记）。"""
+        if self.used_conn >= self.budget_conn:
+            return False
+        self.used_conn += 1
+        logging.warning(f"conn error, retry ({self.used_conn}/{self.budget_conn}): {exc}")
+        time.sleep(self._backoff(self.used_conn))
+        return True
+
+    def _backoff(self, used: int) -> float:
+        return _backoff_delay(
+            used - 1, _cfg("backoff_base_s", 0.5), _cfg("backoff_max_s", 10.0), _cfg("backoff_jitter", 0.25)
+        )
+
+
+def _send_request(plan: _DispatchPlan, tmp_path: str):
+    """一次 HTTP 尝试：建连 → 64KB 流式上传 → (conn, resp)；conn 由调用方关闭。"""
+    conn, reused = _acquire_connection(plan.endpoint_host, plan.endpoint_port, plan.timeout)
+    if reused:
+        # 复用连接可能已被对端静默关闭——立即换新连接重试一次（keep-alive 兜底语义）
+        try:
+            return _send_on(conn, plan, tmp_path)
+        except (http.client.HTTPException, OSError):
+            with contextlib.suppress(Exception):
+                conn.close()
+            conn = _create_connection(plan.endpoint_host, plan.endpoint_port, timeout=plan.timeout)
+    return _send_on(conn, plan, tmp_path)
+
+
+def _send_on(conn, plan, tmp_path):
+    plan.headers["Content-Length"] = str(os.path.getsize(tmp_path))
+    conn.putrequest("POST", "/v1/run")
+    for key, value in plan.headers.items():
+        conn.putheader(key, value)
+    conn.endheaders()
+    with open(tmp_path, "rb") as f:
+        while True:
+            chunk = f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            conn.send(chunk)
+    return conn, conn.getresponse()
+
+
+def _finish(plan: _DispatchPlan, outputs, perf, api=None):
+    """按 return_result 决定返回形态：裸 outputs 或 RemoteResult 包装。"""
+    return RemoteResult(outputs=outputs, perf=perf, api=api) if plan.return_result else outputs
+
+
+def _handle_ok(resp, plan: _DispatchPlan, req_dir: str):
+    """200：PERF-only / 零输出直接收尾；DATA 模式按 X-Output-Schema 回解 npz。"""
+    perf = _parse_perf_header(resp.getheader("X-Perf"))
+    api = _parse_api_header(resp.getheader("X-API"))
+    if not has_data(plan.mode_int):
+        resp.read()
+        return _finish(plan, [], perf, api)
+    output_count = int(resp.getheader("X-Output-Count", "1"))
+    if output_count == 0:
+        resp.read()
+        return _finish(plan, [], perf, api)
+    _schema_raw = resp.getheader("X-Output-Schema")
+    _schema = json.loads(_schema_raw) if _schema_raw else []
+    _source = _resp_to_npz_source(resp, req_dir)
+    return _finish(plan, _load_npz_outputs(_source, _schema), perf, api)
+
+
+def _handle_missing_dep(resp, plan: _DispatchPlan) -> None:
+    """424：预算内查找并 /v1/sync 缺失的 spec 依赖，返回后由主循环重试。
+
+    预算耗尽 / 缺失模块不在 spec 搜索路径（server 侧环境依赖）→ 抛
+    RemoteExecutionError；同步失败仅告警（重试与预算耗尽兜底）。
+    """
+    resp_body = resp.read()
+    plan.budget_424 -= 1
+    if plan.budget_424 < 0:
+        raise RemoteExecutionError(f"424 dependency retries ({plan.max_retries}) exceeded: {resp_body.decode()}")
+    logging.warning(f"424 retry ({plan.max_retries - plan.budget_424}/{plan.max_retries}): {resp_body.decode()}")
+    try:
+        missing_module = json.loads(resp_body).get("missing", "")
+    except json.JSONDecodeError:
+        missing_module = ""
+    if not (missing_module and plan.spec_search_roots):
+        return
+    # Pre-check: can we find this file locally? If not, this is an environment
+    # dep (e.g. scipy not installed on the server), not a spec file — retrying
+    # won't help.
+    if _find_spec_file(missing_module, plan.spec_search_roots) is None:
+        raise RemoteExecutionError(
+            f"server requires module '{missing_module}' which is not "
+            f"in spec search paths; likely a server-side "
+            f"environment dependency (pip install) is missing"
+        )
+    synced = _sync_missing_dependency(
+        missing_module,
+        plan.spec_search_roots,
+        plan.endpoint_host,
+        plan.endpoint_port,
+        plan.tenant_id,
+        plan.timeout,
+    )
+    if not synced:
+        logging.warning(
+            f"Could not sync '{missing_module}', retrying ({plan.max_retries - plan.budget_424}/{plan.max_retries})"
+        )
+
+
+def _handle_busy(resp, plan: _DispatchPlan) -> None:
+    """503：读空响应体；预算内退避（返回后主循环重试），预算尽抛 RemoteBusyError。"""
+    resp.read()
+    if not plan.busy_retry():
+        raise RemoteBusyError(f"server busy (503), retry budget ({plan.budget_503}) exhausted")
+
+
+def _dispatch_loop(plan: _DispatchPlan, tmp_path: str, req_dir: str):
+    """重试主循环：deadline 检查 → 发送 → 按响应分类（200 回解 / 424 同步 / 503 退避 / 其余终止）。"""
+    while True:
+        if plan.expired():
+            raise RemoteExecutionError(f"dispatch deadline ({plan.deadline_s}s) exceeded")
+        conn = None
+        resp = None
+        try:
+            conn, resp = _send_request(plan, tmp_path)
+            if resp.status == 200:
+                return _handle_ok(resp, plan, req_dir)
+            if resp.status == 424:
+                _handle_missing_dep(resp, plan)
+                continue  # does NOT touch 503 budget
+            if resp.status == 503:
+                _handle_busy(resp, plan)
+                continue  # does NOT touch 424 budget
+            # 400 / 500 / other -> genuine failure, do not retry.
+            resp_body = resp.read()
+            raise RemoteExecutionError(f"Server returned {resp.status}: {resp_body.decode()}")
+        except RemoteExecutionError:
+            raise
+        except (http.client.HTTPException, ConnectionRefusedError, OSError) as e:
+            # _mark_endpoint_dead removed: round-robin + HB 11s eviction replace it
+            if not plan.transport_retry(e):
+                raise RemoteConnectionError(f"connection retries ({plan.budget_conn}) exhausted: {e}") from e
+        finally:
+            if conn:
+                # keep-alive：响应允复用则归还连接池，否则关闭
+                with contextlib.suppress(Exception):
+                    reusable = _response_allows_reuse(resp) if resp is not None else False
+                _settle_connection(plan.endpoint_host, plan.endpoint_port, conn, reusable)
+
+
 def dispatch_to_remote(
     op_name: str,
     inputs: list,
@@ -625,17 +754,13 @@ def dispatch_to_remote(
     tmp_root: Optional[str] = None,
     runtime: int = 3,
     param_order: Optional[list] = None,
-    input_recipes: Optional[dict] = None,
 ):
     """Send inputs to remote xpu_server, return numpy outputs.
 
     On 424 (missing dependency), automatically searches spec_search_roots
     for the missing .py file and uploads it via /v1/sync before retrying.
     """
-    attrs = attrs or {}
-    input_names = input_names or []
     spec_search_roots = list(spec_search_roots or [])
-
     # In spec mode, ensure the spec source dir is searchable for 424 dep sync.
     if execution_type == "spec" and spec_file:
         _fdir = os.path.dirname(os.path.abspath(spec_file))
@@ -644,222 +769,47 @@ def dispatch_to_remote(
 
     # KERNEL no-spec (api=None) relies on the server's _resolve_3party_api to
     # derive the API from op_name/op_type — do NOT infer client-side.
-    schema = _build_input_schema(inputs, input_names, input_formats, input_dtypes)
-    effective_count = _schema_leaf_count(schema)
-    mode_int = _parse_client_mode(mode)
+    schema = _build_input_schema(inputs, input_names or [], input_formats, input_dtypes)
+    meta = _RequestMeta(
+        op_name=op_name,
+        op_type=op_type,
+        provider=provider,
+        attrs=attrs or {},
+        tenant_id=tenant_id,
+        execution_type=execution_type,
+        api=api,
+        spec_module=spec_module,
+        spec_class=spec_class,
+        param_order=param_order,
+        mode_int=_parse_client_mode(mode),
+        runtime=runtime,
+    )
+    headers = _build_headers(meta, schema, _schema_leaf_count(schema))
 
-    headers = {
-        "X-Execution-Type": execution_type,
-        "X-Provider": provider,
-        "X-Attrs": json.dumps(attrs),
-        "X-Input-Schema": json.dumps(schema),
-        "X-Input-Count": str(effective_count),
-        "X-Mode": str(mode_int),
-        "X-Runtime": str(runtime),
-        "X-Tenant-ID": tenant_id,
-        "Content-Type": "application/octet-stream",
-    }
-    if param_order:
-        headers["X-Param-Order"] = json.dumps(param_order)
-
-    # 免上传：仅当每片叶子的内容指纹都能在配方表里查到，才敢声明"服务端可自行重算"。
-    # 查不到（非连续视图、input 插件改过数据、未播种……）就老老实实整包上传。
-    # 必须先协商: 旧服务端不认这两个头, 会把"没有 body"当成参数绑定失败而回 400。
-    if input_recipes and "zero_upload" not in _server_features(endpoint_host, endpoint_port, timeout):
-        logging.info("[%s] zero-upload disabled: server does not advertise support", op_name)
-        input_recipes = None
-    zero_upload = _plan_zero_upload(inputs, input_recipes)
-    if zero_upload:
-        headers["X-Input-Recipes"] = json.dumps(zero_upload["recipes"])
-        headers["X-Input-Digests"] = json.dumps(zero_upload["digests"])
-        logging.info("[%s] zero-upload: %d leaf recipes sent", op_name, len(zero_upload["recipes"]))
-    elif input_recipes is not None:
-        # 配方表在但没能全部对上指纹 —— 静默回落最危险: "生效了"和"没生效"
-        # 在日志上长得一样, 事后根本分不清。这里必须留痕。
-        logging.info("[%s] zero-upload not applicable (some leaf has no matching recipe)", op_name)
-    if execution_type == "api":
-        if api:
-            headers["X-API"] = api
-    else:  # spec
-        if spec_module:
-            headers["X-Spec-Module"] = spec_module
-        if spec_class:
-            headers["X-Spec-Class"] = spec_class
-    if op_name:
-        headers["X-Op-Name"] = op_name
-    if op_type:
-        headers["X-Op-Type"] = op_type
-
-    def _done(outputs, perf, api=None):
-        return RemoteResult(outputs=outputs, perf=perf, api=api) if return_result else outputs
-
-    deadline_at = time.monotonic() + _cfg("dispatch_deadline_s", 300.0, int)
-    budget_503 = _cfg("max_503_retries", 10.0, int)
-    budget_conn = _cfg("max_conn_retries", 5.0, int)
-    budget_424 = max_retries
-    used_503 = 0
-    used_conn = 0
+    deadline_s = _cfg("dispatch_deadline_s", 300.0, int)
+    plan = _DispatchPlan(
+        headers=headers,
+        mode_int=meta.mode_int,
+        endpoint_host=endpoint_host,
+        endpoint_port=endpoint_port,
+        timeout=timeout,
+        tenant_id=tenant_id,
+        spec_search_roots=spec_search_roots,
+        return_result=return_result,
+        max_retries=max_retries,
+        deadline_s=deadline_s,
+        deadline_at=time.monotonic() + deadline_s,
+        budget_503=_cfg("max_503_retries", 10.0, int),
+        budget_conn=_cfg("max_conn_retries", 5.0, int),
+        budget_424=max_retries,
+    )
 
     req_dir = None
     try:
         if tmp_root:
             os.makedirs(tmp_root, exist_ok=True)
         req_dir = tempfile.mkdtemp(prefix=f"req_{tenant_id}_", dir=tmp_root)
-        # 免传时不序列化（省的就是这份 npz 与它的上行带宽）；一旦服务端回 409
-        # 说重算对不上，再在原地序列化并按老路重发。
-        tmp_path = None if zero_upload else _serialize_to_file(inputs, dir=req_dir)
-        while True:
-            if time.monotonic() >= deadline_at:
-                raise RemoteExecutionError(f"dispatch deadline ({_cfg('dispatch_deadline_s', 300.0, int)}s) exceeded")
-            conn = None
-            conn_reused = False
-            keep_conn = False
-            try:
-                conn, conn_reused = _acquire_connection(endpoint_host, endpoint_port, timeout)
-                file_size = 0 if tmp_path is None else os.path.getsize(tmp_path)
-                headers["Content-Length"] = str(file_size)
-                conn.putrequest("POST", "/v1/run")
-                for key, value in headers.items():
-                    conn.putheader(key, value)
-                conn.endheaders()
-                _t_send = time.monotonic()  # TEMP-XFER-PROBE
-                if tmp_path is not None:
-                    _sent = 0  # TEMP-XFER-PROBE
-                    with open(tmp_path, "rb") as f:
-                        while True:
-                            chunk = f.read(CHUNK_SIZE)
-                            if not chunk:
-                                break
-                            conn.send(chunk)
-                            _sent += len(chunk)  # TEMP-XFER-PROBE
-                    _d = time.monotonic() - _t_send  # TEMP-XFER-PROBE
-                    logging.info(
-                        "XFER_PROBE mode=UPLOAD bytes=%d sec=%.3f rate=%.2fMB/s",
-                        _sent,
-                        _d,
-                        _sent / max(_d, 1e-9) / 1048576,
-                    )  # TEMP-XFER-PROBE
-                else:
-                    logging.info(
-                        "XFER_PROBE mode=ZERO_UPLOAD bytes=0 sec=%.3f", time.monotonic() - _t_send
-                    )  # TEMP-XFER-PROBE
-
-                _t_rt = time.monotonic()  # TEMP-XFER-PROBE
-                resp = conn.getresponse()
-                logging.info("RESP_PROBE blocked=%.3f", time.monotonic() - _t_send)  # TEMP-XFER-PROBE
-
-                if resp.status == 200:
-                    keep_conn = _response_allows_reuse(resp)
-                    perf = _parse_perf_header(resp.getheader("X-Perf"))
-                    api = _parse_api_header(resp.getheader("X-API"))
-                    if not has_data(mode_int):
-                        resp.read()
-                        return _done([], perf, api)
-                    output_count = int(resp.getheader("X-Output-Count", "1"))
-                    if output_count == 0:
-                        resp.read()
-                        return _done([], perf, api)
-                    _schema_raw = resp.getheader("X-Output-Schema")
-                    _schema = json.loads(_schema_raw) if _schema_raw else []
-                    _source = _resp_to_npz_source(resp, req_dir)
-                    return _done(_load_npz_outputs(_source, _schema), perf, api)
-
-                if resp.status == 409 and zero_upload:
-                    # 服务端按配方重算后摘要对不上 —— 两端生成环境有差异
-                    # （numpy/scipy 版本、生成代码不同步等）。不是错误结论，
-                    # 而是免传不成立：回落成整包上传，本次请求原样重发。
-                    detail = resp.read().decode(errors="replace")[:200]
-                    logging.warning(
-                        "[%s] zero-upload rejected by server, falling back to full upload: %s", op_name, detail
-                    )
-                    zero_upload = None
-                    headers.pop("X-Input-Recipes", None)
-                    headers.pop("X-Input-Digests", None)
-                    tmp_path = _serialize_to_file(inputs, dir=req_dir)
-                    continue
-
-                if resp.status == 424:
-                    resp_body = resp.read()
-                    keep_conn = _response_allows_reuse(resp)
-                    budget_424 -= 1
-                    if budget_424 < 0:
-                        raise RemoteExecutionError(
-                            f"424 dependency retries ({max_retries}) exceeded: {resp_body.decode()}"
-                        )
-                    logging.warning(f"424 retry ({max_retries - budget_424}/{max_retries}): {resp_body.decode()}")
-                    try:
-                        missing_info = json.loads(resp_body)
-                        missing_module = missing_info.get("missing", "")
-                    except json.JSONDecodeError:
-                        missing_module = ""
-                    if missing_module and spec_search_roots:
-                        # Pre-check: can we find this file locally?
-                        # If not, this is an environment dep (e.g. scipy not installed
-                        # on the server), not a spec file — retrying won't help.
-                        if _find_spec_file(missing_module, spec_search_roots) is None:
-                            raise RemoteExecutionError(
-                                f"server requires module '{missing_module}' which is not "
-                                f"in spec search paths; likely a server-side "
-                                f"environment dependency (pip install) is missing"
-                            )
-                        synced = _sync_missing_dependency(
-                            missing_module, spec_search_roots, endpoint_host, endpoint_port, tenant_id, timeout
-                        )
-                        if not synced:
-                            logging.warning(
-                                f"Could not sync '{missing_module}', "
-                                f"retrying ({max_retries - budget_424}/{max_retries})"
-                            )
-                    continue  # does NOT touch 503 budget
-
-                if resp.status == 503:
-                    resp.read()
-                    keep_conn = _response_allows_reuse(resp)
-                    if used_503 >= budget_503:
-                        raise RemoteBusyError(f"server busy (503), retry budget ({budget_503}) exhausted")
-                    used_503 += 1
-                    time.sleep(
-                        _backoff_delay(
-                            used_503 - 1,
-                            _cfg("backoff_base_s", 0.5),
-                            _cfg("backoff_max_s", 10.0),
-                            _cfg("backoff_jitter", 0.25),
-                        )
-                    )
-                    continue  # does NOT touch 424 budget
-
-                # 400 / 500 / other -> genuine failure, do not retry.
-                resp_body = resp.read()
-                raise RemoteExecutionError(f"Server returned {resp.status}: {resp_body.decode()}")
-
-            except RemoteExecutionError:
-                raise
-            except (http.client.HTTPException, ConnectionRefusedError, OSError) as e:
-                # 复用连接失败是 keep-alive 的固有竞态: 服务端可能正好在我们发请求的
-                # 瞬间关掉了这条空闲连接。这不算"连接不上", 立即换新连接重试一次,
-                # 不消耗重试预算也不退避 —— 否则每次池过期都要白等一轮 backoff。
-                if conn_reused:
-                    logging.debug(f"pooled connection stale, reconnecting: {e}")
-                    continue
-                _forget_server_features(endpoint_host, endpoint_port)
-                # _mark_endpoint_dead removed: round-robin + HB 11s eviction replace it
-                if used_conn >= budget_conn:
-                    raise RemoteConnectionError(f"connection retries ({budget_conn}) exhausted: {e}") from e
-                used_conn += 1
-                logging.warning(f"conn error, retry ({used_conn}/{budget_conn}): {e}")
-                time.sleep(
-                    _backoff_delay(
-                        used_conn - 1,
-                        _cfg("backoff_base_s", 0.5),
-                        _cfg("backoff_max_s", 10.0),
-                        _cfg("backoff_jitter", 0.25),
-                    )
-                )
-                continue
-            finally:
-                if conn:
-                    _settle_connection(endpoint_host, endpoint_port, conn, keep_conn)
-
+        return _dispatch_loop(plan, _serialize_to_file(inputs, dir=req_dir), req_dir)
     finally:
         if req_dir:
             shutil.rmtree(req_dir, ignore_errors=True)

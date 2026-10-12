@@ -30,9 +30,9 @@ from ttk.remote.tls import build_tls_connection
 
 HEARTBEAT_INTERVAL_S = 11
 # 心跳超时不能按"空闲链路"来定: 探活与业务流量**共用同一条 ssh 隧道**时, ssh 把所有 channel
-# 复用在一条 TCP 上, 跑批推大包期间新建 channel 的请求会排在队尾 —— 实测(2026-09-27)
-# TTK 一启动, 5s 探活立刻 100% 超时, 而**同期业务请求全部正常**; 负载一停探活立刻回到 33ms。
-# 也就是说 5s 测的是"链路忙不忙"而不是"通不通", 会把饱和误判成端点不可用, 进而触发
+# 复用在一条 TCP 上, 跑批推大包期间新建 channel 的请求会排在队尾 —— 高负载下短超时
+# 探活会立刻 100% 超时, 而**同期业务请求全部正常**; 负载一停探活立刻恢复毫秒级响应。
+# 也就是说短超时测的是"链路忙不忙"而不是"通不通", 会把饱和误判成端点不可用, 进而触发
 # 端点摘除/熔断, 打断在途请求。放宽到 30s: 仍能发现真正的端点故障(远端服务挂掉是秒级拒连),
 # 但不会把队头阻塞当故障。
 HEARTBEAT_TIMEOUT_S = 30
@@ -137,12 +137,6 @@ def _probe_one(endpoint, tenant_id, out_dict, tls):
             "last_seen": time.time() if alive else None,
             "providers": body.get("providers", []),
             "hardware": body.get("hardware", ""),
-            # 服务端能力(zero_upload / keepalive …)顺带记进 health 文件: 心跳本来就在调
-            # /v1/heartbeat, 能力就在同一个返回体里。dispatcher 的 _FEATURE_CACHE 是模块级
-            # 字典, 而跑批的每个 worker 是独立进程 —— 缓存跨进程不共享, 于是每个 worker
-            # 都要自己再探一次(慢链路上就是每 worker 一个多余 RTT)。这里存一份, worker
-            # 直接读 health 文件即可。
-            "features": body.get("features", []),
             "ts": time.time(),
         }
     except Exception as e:

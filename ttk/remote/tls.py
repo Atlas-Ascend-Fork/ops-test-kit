@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 """Shared TLS config parsing + connection builder (dispatcher + heartbeat).
 
 单一事实源：cert/key 成对校验（fail-loud）+ `ca or (cert and key)` HTTPS 门。
@@ -20,7 +30,7 @@ def tls_from_config(config) -> dict:
     key = getattr(config, "tls_key", "") or ""
     skip_verify = bool(getattr(config, "tls_skip_verify", False))
     if (cert and not key) or (key and not cert):
-        raise RuntimeError(f"TLS 配置错误：tls_cert/tls_key 必须成对（cert={cert!r}, key={key!r}）")
+        raise RuntimeError(f"TLS misconfiguration: tls_cert/tls_key must be paired (cert={cert!r}, key={key!r})")
     if not (ca or cert):
         return {}
     return {"ca_cert": ca, "cert": cert, "key": key, "skip_verify": skip_verify}

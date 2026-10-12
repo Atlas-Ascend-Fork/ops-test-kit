@@ -92,7 +92,7 @@ class TestSerializationRoundtrip:
 
 class TestInputSchema:
     def test_build_schema_tensor_list(self):
-        # G2 守卫：list slot 发 indices + 真实 dtype（卡 index/dtype 错配）
+        # 守卫：list slot 发 indices + 真实 dtype（卡 index/dtype 错配）
         import numpy as np
 
         from ttk.remote.dispatcher import _build_input_schema
@@ -145,7 +145,7 @@ class TestInputSchema:
 
 class TestSerialize:
     def test_serialize_flattens_nested_and_skips_none(self):
-        # G1：npz 叶子数守卫（卡 merge corruption —— 原 bug 把 [a,b] 堆成 (2,1)）
+        # npz 叶子数守卫（卡 merge corruption —— 原 bug 把 [a,b] 堆成 (2,1)）
         import os
 
         import numpy as np
@@ -165,7 +165,7 @@ class TestSerialize:
 
 class TestSchemaLeafCount:
     def test_count_equals_npz_and_schema(self):
-        # G5：两路不变量（§4.4）—— _schema_leaf_count(schema) == npz 叶子数
+        # 两路不变量—— _schema_leaf_count(schema) == npz 叶子数
         import os
 
         import numpy as np
@@ -218,7 +218,7 @@ class TestSyncSemaphore:
 
         fake = FakeCtx()
         with patch("ttk.remote.dispatcher._do_http_sync", return_value=True) as do_sync, patch(
-            "ttk.core_modules.tbe_multiprocessing.pool.get_process_context", return_value=fake
+            "ttk.core_modules.common.process.process_context", return_value=fake
         ):
             ok = dispatcher._sync_missing_dependency("m", [str(tmp_path)], "127.0.0.1", 19090, "t1", 5)
         assert ok is True
@@ -323,12 +323,12 @@ class TestDispatchBackoff:
 
 class TestRoundTrip:
     def test_nested_round_trips_through_match_params_v1(self):
-        # G3：端到端 schema→serialize→server match_params_v1 结构对等
+        # 端到端 schema→serialize→server match_params_v1 结构对等
         # 未修代码上必红（p0 是 merged (2,1) 数组,不是 list）
         import numpy as np
 
         from ttk.remote.dispatcher import _build_input_schema, _serialize_to_file
-        from ttk.remote.server.execution_container import match_params_v1
+        from ttk.remote.server.executor import match_params_v1
 
         a, b, c, d, e = [np.array([float(i)]) for i in range(1, 6)]
         inputs = [[a, b], c, [d, e], None]

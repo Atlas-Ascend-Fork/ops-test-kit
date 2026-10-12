@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""Docker entrypoint: receive kwargs as JSON via argv[1], run executor, print envelope.
+# -*- coding: UTF-8 -*-
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+"""Docker sandbox entrypoint: receive kwargs as JSON via argv[1], run executor, print envelope.
 
 Reads a JSON file path from argv[1] containing the execute_request kwargs dict.
 Runs execute_request, prints the envelope JSON to stdout. Exit code 0 on success.
 
-The script's directory (/executor/) is on sys.path by default, so the executor
-package is importable directly.
+Invoked as ``python -m ttk.remote.server.executor_main <kwargs.json>`` inside
+the executor image (WORKDIR=/executor，即 ttk 包根).
 """
 
 import json
 import sys
 
-# Flat-layout assumption: Dockerfile COPYs the server dir to /executor/, so this
-# script's dir (sys.path[0]) contains executor.py as a top-level module.
-from executor import execute_request
+from ttk.remote.server.executor import execute_request
 
 
 def main():

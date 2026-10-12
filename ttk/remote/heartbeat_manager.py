@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 """Heartbeat subprocess lifecycle management.
 
 Owns the health file path and the heartbeat Process. Called from
@@ -5,6 +15,7 @@ InstanceBase.prepare_subprocesss() / close_subprocesss().
 """
 
 import atexit
+import contextlib
 import logging
 import multiprocessing
 import os
@@ -196,7 +207,5 @@ class HeartbeatManager:
             self._process.terminate()
             self._process.join(timeout=5)
         if os.path.exists(self.health_path):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(self.health_path)
-            except OSError:
-                pass

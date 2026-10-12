@@ -11,14 +11,18 @@
 
 """
 Result data structures for framework_api profiling.
-Follows TTK convention: __slots__-based class with get_titles() and pick_data().
+
+FrameworkApiReturnStructure 聚合单用例各形态（eager/graph×3）的精度与性能
+结果；pick_data 按 get_titles 列序取数写结果 CSV，列序锚定 __slots__ 原序。
 """
 
 import json
 
+from ..common.result import ReturnStructureBase
 
-class FrameworkApiReturnStructure:
-    """Return structure from profile_process, written to result CSV."""
+
+class FrameworkApiReturnStructure(ReturnStructureBase):
+    """Return structure from worker run, written to result CSV."""
 
     __slots__ = (
         "precision_status",
@@ -49,6 +53,10 @@ class FrameworkApiReturnStructure:
         "npu_memory",
     )
 
+    # 专属列 = __slots__ 去公共槽（COMMON_SLOTS 由基类声明）派生——单源维护，
+    # 与 __slots__ 原序一致，结果 CSV 列序不变
+    EXTRA_SLOTS = tuple(s for s in __slots__ if s not in ReturnStructureBase.COMMON_SLOTS)
+
     def __init__(self):
         self.precision_status = None
         self.eager_precision = None
@@ -76,13 +84,13 @@ class FrameworkApiReturnStructure:
         self.precision_metrics = {}
         self.xpu_metrics = {}
         self.npu_memory = None
+        # dl=3 batch 一致性：worker 切片哈希摘要（随 pipe 回传主进程，非 CSV 列——
+        # cleanup 组装比对消费）
+        self.batch_summary = None
 
-    @staticmethod
-    def get_titles():
-        return FrameworkApiReturnStructure.__slots__
-
-    def pick_data(self, titles):
-        return tuple(getattr(self, t, None) for t in titles)
+    @classmethod
+    def get_titles(cls, **kwargs):
+        return cls.__slots__
 
     _MODE_PREFIX = {"static": "cst", "dynamic": "dyn", "aclgraph": "aclgraph"}
 

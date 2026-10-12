@@ -88,20 +88,20 @@ python3 -m ttk list -i cases.csv
 python3 -m ttk list -i cases.csv --op add
 ```
 
-> 注：`ttk list` 仅列出用例名，不做字段校验；校验请用对应模式 `--validate`。
+> 注：`ttk list` 仅列出用例名，并要求 `testcase_name` 列存在且非空（否则直接报错），不做其他字段校验；完整校验请用对应模式 `--validate`。
 
 # 执行问题
 
 ## 算子太大执行超时或超出内存
 
 - 设置单用例超时时间：`--proc-timeout=300`
-- 设置HBM内存限制：`-l 10`（10GB）
-- 预留HBM内存：`--reserve-hbm=512`
+- 设置HBM内存限制：`-l 10`（10GB，仅 Kernel/ACLNN 通路注册）
+- 预留HBM内存：`--reserve-hbm=512`（仅 Kernel 通路注册）
 
 ## 多卡并行时部分用例失败
 
 - 检查设备是否正常：`python3 -m ttk info`
-- 排除问题设备：`--device-blacklist=2,3`
+- 排除问题设备：`--devices='^2,^3'`（每个被剔除 ID 均需带 `^` 前缀，等价于全选后剔除，也可写 `'0-7,^2,^3'`）
 - 减少每张卡进程数：`--pc=1`
 
 ## 如何复现某次测试结果？
@@ -119,7 +119,7 @@ python3 -m ttk kernel -i cases.csv --seed 42
 python3 -m ttk info
 
 # 运行内置示例
-python3 -m ttk kernel -i examples/case_store/kernel/add.csv
+python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast
 ```
 
 # 精度问题
@@ -128,8 +128,8 @@ python3 -m ttk kernel -i examples/case_store/kernel/add.csv
 
 1. 使用 `--dump-on-fail` 在失败时自动Dump数据
 2. 使用 `--dump in,out,golden --dump-format npy` 保存输入、输出和Golden到npy文件
-3. 用 `-t case_name --single-log` 锁定到单个用例并产出独立日志
-4. 检查CSV中 `precision_tolerances` 和 `absolute_precision` 设置是否合理（`precision_tolerances` 仅 `--compare close`/`cosine` 生效、`absolute_precision` 仅 `close` 生效；默认 `mixed` 需在 TestSpec `tolerance` 中调整）
+3. 用 `-t case_name` 锁定到单个用例（单用例执行时框架自动产出该用例的独立日志目录）
+4. 检查CSV中 `precision_tolerances` 和 `absolute_precision` 设置是否合理（`precision_tolerances` 由 `--compare close`（rtol/ptol）/`cosine`（rtol）/`requant`（ptol）及 TestSpec 声明的 `quant` 判据（ptol）读取、`absolute_precision` 仅 `close` 生效；默认 `mixed` 需在 TestSpec `tolerance` 中调整）
 
 ```shell
 # 失败时自动Dump数据
@@ -163,7 +163,7 @@ absolute_precision,1e-8
 - `precision_tolerances`：每个输出的 (rtol, ptol) 对
 - `absolute_precision`：全局绝对精度容差
 
-> 注意：这两个 CSV 字段是 legacy 字段，`precision_tolerances` 由 `--compare close` / `cosine` 读取、`absolute_precision` 仅 `close` 读取。默认的 `mixed` 不读 CSV 容差字段，需在 TestSpec 的 `tolerance` 中覆盖（需 `--plugin`）：
+> 注意：这两个 CSV 字段是 legacy 字段，`precision_tolerances` 由 `--compare close`（rtol/ptol）/`cosine`（rtol）/`requant`（ptol）及 TestSpec 声明的 `quant` 判据（ptol）读取、`absolute_precision` 仅 `close` 读取。默认的 `mixed` 不读 CSV 容差字段，需在 TestSpec 的 `tolerance` 中覆盖（需 `--plugin`）：
 >
 > ```python
 > tolerance = {"float32": {"standard": "mix_tolerance", "rtol": 0.002, "atol": 1e-5}}
@@ -181,4 +181,4 @@ absolute_precision,1e-8
 
 ## 多个插件有同名算子注册
 
-后加载的插件会覆盖先加载的同名注册，并会打印警告信息。请确保注册名称唯一。
+TestSpec（`__spec__`）注册同名时先加载的搜索路径优先（first match wins）；旧 `__golden__`/`__input__` 注册同名时后扫描的插件会覆盖先扫描的。两种情况均不会打印警告，请确保注册名称唯一。

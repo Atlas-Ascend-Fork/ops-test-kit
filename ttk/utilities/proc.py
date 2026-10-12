@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
-# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# This program is free software: you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
@@ -13,119 +13,41 @@ Process Related Utilities
 
 __all__ = [
     "set_process_name",
-    "get_process_name",
     "is_main_process",
     "set_thread_name",
-    "process_exists",
-    "waiting_for_memory",
-    "append_ld_library_path",
     "signal_registered",
     "cpu_count",
-    "insert_env_path",
-    "add_exec_permission",
-    "get_ubuntu_main_version",
-    "insert_python_path",
     "msdebug_runtime_injection_enabled",
     "kernel_debug_compile_enabled",
+    "get_loaded_so_path",
 ]
 
 
 # Standard Packages
 import multiprocessing
 import os
-import pathlib
-import re
-import shutil
-import stat
 import subprocess
 import threading
-import time
-from typing import Union
-
-import psutil
+from ctypes import CDLL
 
 
 def set_process_name(name: str = "MP"):
-    """Set process name for logging"""
+    """Set current process name for logging."""
     multiprocessing.current_process().name = name
 
 
-def get_process_name() -> str:
-    """Set process name for logging"""
-    return multiprocessing.current_process().name
-
-
 def set_thread_name(name: str = "MT"):
-    """Set current thread name for threading"""
-    threading.current_thread().setName(name)
+    """Set current thread name for threading."""
+    threading.current_thread().name = name
 
 
 def is_main_process() -> bool:
+    """True in the TTK parent process (compares against TTK_PARENT_PID)."""
     return os.getpid() == int(os.getenv("TTK_PARENT_PID", "0"))
 
 
-def process_exists(pid: int):
-    """
-    Check whether @pid exists
-    """
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
-
-
-def waiting_for_memory():
-    import logging
-
-    GB = 1024 * 1024 * 1024
-    print_once = False
-    while (
-        psutil.virtual_memory().available <= psutil.virtual_memory().total * 0.5
-        and psutil.virtual_memory().available <= 128 * GB
-    ):
-        if not print_once:
-            logging.warning(
-                f"Task paused because of insufficient memory, "
-                f"available: {psutil.virtual_memory().available / GB} GB, "
-                f"total: {psutil.virtual_memory().total / GB} GB"
-            )
-            print_once = True
-        time.sleep(1)
-        if os.path.exists("/tmp/TTK_FORCE_MEMORY_OVERRIDE"):
-            logging.warning("Detected OVERRIDE signal, continue")
-            return
-
-
-def insert_env_xpath(path: Union[pathlib.Path, str], env_name):
-    env_xpath = os.getenv(env_name, "")
-    lists = env_xpath.split(":")
-    if isinstance(path, str):
-        path = pathlib.Path(path)
-    abs_path = path.resolve()
-    if abs_path not in lists:
-        os.environ[env_name] = f"{abs_path}:{env_xpath}"
-
-
-def append_ld_library_path(path: Union[pathlib.Path, str]):
-    insert_env_xpath(path, "LD_LIBRARY_PATH")
-
-
-def insert_env_path(path: Union[pathlib.Path, str]):
-    insert_env_xpath(path, "PATH")
-
-
-def insert_python_path(path: Union[pathlib.Path, str]):
-    insert_env_xpath(path, "PYTHONPATH")
-
-
-def add_exec_permission(file_path):
-    cur_permissions = os.stat(file_path).st_mode
-    new_permissions = cur_permissions | stat.S_IXUSR
-    os.chmod(file_path, new_permissions)
-
-
 def signal_registered(signum: int) -> bool:
+    """True if @signum is caught/ignored/blocked by this process (via /proc status)."""
     pid = os.getpid()
     status_file = f"/proc/{pid}/status"
     signal_fields = ["SigCgt", "SigIgn", "SigBlk"]
@@ -142,60 +64,13 @@ def signal_registered(signum: int) -> bool:
                     bitmask = int(hex_str, 16)
                     signal_data[field] = bitmask
 
-    results = {}
-    for field, bitmask in signal_data.items():
-        # signum stars from 1. bit is `signum - 1`
-        is_set = (bitmask >> (signum - 1)) & 1
-        results[field] = bool(is_set)
-    return any(results.values())
+    # signum starts from 1. bit is `signum - 1`
+    return any((bitmask >> (signum - 1)) & 1 for bitmask in signal_data.values())
 
 
 def cpu_count() -> int:
+    """Number of CPUs available to this process (affinity-aware)."""
     return len(os.sched_getaffinity(0))
-
-
-def get_ubuntu_main_version_via_lsb_release():
-    if shutil.which("lsb_release") is None:
-        return None
-
-    try:
-        result = subprocess.run(["lsb_release", "-r"], capture_output=True, text=True, shell=False)
-        if result.returncode == 0:
-            # Release:	18.04
-            version_str = result.stdout.strip()
-            match = re.search(r"(\d+)\.\d+", version_str)
-            if match:
-                return int(match.group(1))
-    except Exception:
-        pass
-    return None
-
-
-def get_ubuntu_main_version_via_etc_files():
-    etc_files = ["/etc/os-release", "/etc/lsb-release", "/usr/lib/os-release"]
-    for file_path in etc_files:
-        try:
-            with open(file_path) as f:
-                content = f.read()
-                if "ubuntu" in content.lower():
-                    patterns = [r'VERSION_ID\s*=\s*"(\d+)\.\d+"', r"DISTRIB_RELEASE\s*=\s*(\d+)\.\d+"]
-                    for pattern in patterns:
-                        match = re.search(pattern, content, re.IGNORECASE)
-                        if match:
-                            return int(match.group(1))
-        except Exception:
-            continue
-    return None
-
-
-def get_ubuntu_main_version() -> int:
-    v = get_ubuntu_main_version_via_lsb_release()
-    if v is None:
-        v = get_ubuntu_main_version_via_etc_files()
-    return v
-
-
-_REGBASE_V2_SOURCE_DEBUG_OPTION = "--cce-ignore-always-inline=false"
 
 
 def msdebug_runtime_injection_enabled() -> bool:
@@ -228,3 +103,19 @@ def kernel_debug_compile_enabled() -> bool:
     specific signal for changing kernel compilation to -O0 -g.
     """
     return _msdebug_runtime_stub_preloaded()
+
+
+def get_loaded_so_path(loaded_cdll: CDLL) -> str:
+    """On-disk path(s) of a loaded CDLL, via lsof on this process; "UNKNOWN" if unavailable."""
+    try:
+        # noinspection PyProtectedMember
+        so_name = os.path.basename(loaded_cdll._name)
+        lines = subprocess.check_output(["lsof", "-p", str(os.getpid())], encoding="UTF-8").split("\n")
+        # match the trailing path column by basename — whole-line substring would
+        # false-hit other libs (e.g. "librt.so" against "librt.so.1")
+        results = [
+            path for path in (line.split(" ")[-1] for line in lines) if path and os.path.basename(path) == so_name
+        ]
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "UNKNOWN"
+    return "|".join(results) if results else "UNKNOWN"

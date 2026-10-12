@@ -25,17 +25,20 @@ from ttk.cli.bridge import (
     configure_manual_data,
 )
 from ttk.cli.e2e import register_e2e_command
+from ttk.cli.geir import register_geir_command
 from ttk.cli.kernel import register_kernel_command
-from ttk.utilities.classes import SWITCHES
+from ttk.core_modules.common.dump import DumpConfig
+from ttk.switches import SWITCHES
 
 
 def _parser():
-    """构造带 e2e/aclnn/kernel 三子命令的 parser。"""
+    """构造带 e2e/aclnn/kernel/geir 四子命令的 parser。"""
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
     register_e2e_command(subparsers)
     register_aclnn_command(subparsers)
     register_kernel_command(subparsers)
+    register_geir_command(subparsers)
     return parser
 
 
@@ -49,9 +52,10 @@ def _args(**overrides):
 def _prepare_switches(file_format="bin"):
     """构造 prepare 模式所需 SWITCHES：开 input+golden dump、指定 file_format。"""
     switches = SWITCHES()
+    switches.dump_config = DumpConfig()
     switches.dyn_switches.enabled = False
-    switches.dump_config.enable_input()
-    switches.dump_config.enable_golden()
+    switches.dump_config.dump_input = True
+    switches.dump_config.dump_golden = True
     switches.dump_config.file_format = file_format
     return switches
 
@@ -59,8 +63,8 @@ def _prepare_switches(file_format="bin"):
 # -- 参数暴露 ----------------------------------------------------------------
 
 
-def test_manual_data_dirs_exposed_on_three_commands():
-    """e2e/aclnn/kernel 三个子命令都暴露 --manual-data-dirs 和 --no-prof。"""
+def test_manual_data_dirs_exposed_on_four_commands():
+    """e2e/aclnn/kernel/geir 四个子命令都暴露 --manual-data-dirs 和 --no-prof。"""
     parser = _parser()
     e2e = parser.parse_args(
         [
@@ -93,29 +97,43 @@ def test_manual_data_dirs_exposed_on_three_commands():
             "prepared",
         ]
     )
+    geir = parser.parse_args(
+        [
+            "geir",
+            "-i",
+            "case.csv",
+            "--no-prof",
+            "--dump",
+            "in,golden",
+            "--manual-data-dirs",
+            "prepared",
+        ]
+    )
 
     assert e2e.no_prof is True
     assert e2e.manual_data_dirs == ["prepared"]
     assert aclnn.manual_data_dirs == ["first", "second"]
     assert kernel.manual_data_dirs == ["prepared"]
+    assert geir.no_prof is True
+    assert geir.manual_data_dirs == ["prepared"]
 
 
-# -- prepare 模式 ------------------------------------------------------------
+# -- dump 方向（--no-prof 落盘） ----------------------------------------------
 
 
 def test_prepare_defaults_to_plugin_manual_data_dir(tmp_path):
-    """prepare 默认输出目录 = <plugin_path>/manual_data。"""
+    """--no-prof 落盘默认输出目录 = <plugin_path>/manual_data。"""
     switches = _prepare_switches()
     switches.plugin_path = (tmp_path / "assets",)
 
     configure_manual_data(switches, _args(no_prof=True), "e2e")
 
-    assert switches.manual_data_mode == "prepare"
+    assert switches.no_prof is True
     assert switches.manual_data_dirs == (str((tmp_path / "assets" / "manual_data").resolve()),)
 
 
 def test_prepare_without_plugin_defaults_to_cwd(tmp_path, monkeypatch, caplog):
-    """无 plugin 时 prepare 默认输出 cwd/manual_data 并打 INFO 日志。"""
+    """无 plugin 时 --no-prof 落盘默认输出 cwd/manual_data 并打 INFO 日志。"""
     switches = _prepare_switches()
     monkeypatch.chdir(tmp_path)
 
@@ -147,28 +165,24 @@ def test_prepare_accepts_explicit_output_directory(tmp_path):
         "aclnn",
     )
 
-    assert switches.manual_data_mode == "prepare"
+    assert switches.no_prof is True
     assert switches.manual_data_dirs == (str((tmp_path / "data").resolve()),)
 
 
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
-        # output/full dump 不能在设备执行前生成
-        (lambda sw: sw.dump_config.enable_output(), "--dump in,golden or --dump in"),
         # dump 格式不可恢复（print 无法回放）
         (lambda sw: setattr(sw.dump_config, "file_format", "print"), "not restorable"),
-        # --dump-on-fail 需要比对，不能与 --no-prof 共存
-        (lambda sw: setattr(sw.dump_config, "dump_on_fail", True), "--dump-on-fail"),
-        # --golden-mode Disable 关闭 CPU golden 生成，prepare 无从生成
+        # --golden-mode Disable 关闭 CPU golden 生成，golden 无从落盘
         (lambda sw: setattr(sw, "golden_mode", "Disable"), "CPU golden"),
-        # --validate 只校验 CSV，不产出数据
-        (lambda sw: setattr(sw, "validate_only", True), "--validate"),
+        # e2e/aclnn --no-prof 必须开 input 落盘门
+        (lambda sw: setattr(sw.dump_config, "dump_input", False), "requires --dump in"),
     ],
-    ids=["wrong-dump-mode", "unrestorable-format", "dump-on-fail", "golden-disable", "validate-only"],
+    ids=["unrestorable-format", "golden-disable", "no-input-dump"],
 )
 def test_prepare_rejects_incompatible_combinations(mutate, message):
-    """prepare 模式拒绝 5 种不兼容的 flag 组合。"""
+    """--no-prof 落盘拒绝 3 种不兼容组合（落什么由 dump 门控自然决定）。"""
     switches = _prepare_switches()
     mutate(switches)
 
@@ -176,57 +190,97 @@ def test_prepare_rejects_incompatible_combinations(mutate, message):
         configure_manual_data(switches, _args(no_prof=True), "e2e")
 
 
-def test_e2e_prepare_accepts_input_only_dump():
+def test_prepare_allows_full_dump_combo():
+    """--no-prof --dump full 不再报错：output 门自然无产物（不上板）。"""
+    switches = _prepare_switches()
+    switches.dump_config.dump_output = True
+
+    configure_manual_data(switches, _args(no_prof=True), "e2e")
+
+    assert switches.no_prof is True
+    assert switches.manual_data_dirs  # 默认目录已设置
+
+
+def test_e2e_prepare_accepts_input_only_dump(tmp_path):
     switches = SWITCHES()
+    switches.dump_config = DumpConfig()
     switches.dyn_switches.enabled = False
-    switches.dump_config.enable_input()
+    switches.dump_config.dump_input = True
     switches.golden_mode = "Disable"
 
     configure_manual_data(switches, _args(no_prof=True), "e2e")
 
-    assert switches.manual_data_mode == "prepare"
-    assert switches.dump_config.is_input_enabled()
-    assert not switches.dump_config.is_golden_enabled()
+    assert switches.no_prof is True
+    assert switches.manual_data_dirs  # 默认目录已设置
+    assert switches.dump_config.dump_input
+    assert not switches.dump_config.dump_golden
 
 
-# -- replay 模式 -------------------------------------------------------------
+# -- load 方向（--manual-data-dirs 搜索） ------------------------------------
 
 
 def test_replay_preserves_directory_order(tmp_path):
-    """replay 模式按 --manual-data-dirs 指定顺序搜索（顺序敏感）。"""
+    """load 方向按 --manual-data-dirs 指定顺序搜索（顺序敏感）。"""
     switches = SWITCHES()
+    switches.dump_config = DumpConfig()
     directories = [str(tmp_path / "one"), str(tmp_path / "two")]
 
     configure_manual_data(switches, _args(manual_data_dirs=directories), "aclnn")
 
-    assert switches.manual_data_mode == "replay"
+    assert switches.no_prof is False
     assert switches.manual_data_dirs == tuple(str((tmp_path / name).resolve()) for name in ("one", "two"))
 
 
 def test_e2e_replay_rejects_cpu_backend(tmp_path):
-    """e2e replay 是设备阶段，不能与 --cpu 共存。"""
+    """e2e load 是设备阶段，不能与 --cpu 共存。"""
     switches = SWITCHES()
+    switches.dump_config = DumpConfig()
     switches.force_cpu = True
 
     with pytest.raises(ValueError, match="device stage"):
         configure_manual_data(switches, _args(manual_data_dirs=[str(tmp_path)]), "e2e")
 
 
+def test_geir_no_prof_rejects_xpu_golden_mode():
+    """geir --no-prof 落盘的是 host 侧生成的 golden；golden-mode XPU（三方产出）无可落盘。"""
+    switches = _prepare_switches()
+    switches.golden_mode = "XPU"
+
+    with pytest.raises(ValueError, match="nothing to write"):
+        configure_manual_data(switches, _args(no_prof=True), "geir")
+
+
+def test_geir_no_prof_accepts_input_only_dump():
+    """geir --no-prof 与 aclnn/e2e 同构：仅 --dump in 也接受（golden 缺席时复跑回退现算）。"""
+    switches = SWITCHES()
+    switches.dump_config = DumpConfig()
+    switches.dyn_switches.enabled = False
+    switches.dump_config.dump_input = True
+    switches.golden_mode = "Disable"
+
+    configure_manual_data(switches, _args(no_prof=True), "geir")
+
+    assert switches.no_prof is True
+    assert switches.manual_data_dirs  # 默认目录已设置
+    assert not switches.dump_config.dump_golden
+
+
 # -- kernel 特有语义 ---------------------------------------------------------
 
 
 def test_kernel_no_prof_without_dump_pair_keeps_legacy():
-    """kernel --no-prof 但无 --dump in,golden → 不进入 prepare，保持旧 dry-run 语义。"""
+    """kernel --no-prof 但无 --dump in,golden → 不落盘，保持旧 dry-run 语义。"""
     switches = SWITCHES()
+    switches.dump_config = DumpConfig()
 
     configure_manual_data(switches, _args(no_prof=True), "kernel")
 
-    assert switches.manual_data_mode is None
+    assert switches.no_prof is True
     assert switches.manual_data_dirs == ()
 
 
 def test_kernel_prepare_requires_exact_dump_pair(tmp_path):
-    """kernel prepare 需要精确的 --dump in,golden 组合 + 可恢复格式。"""
+    """kernel 落盘需要精确的 --dump in,golden 组合 + 可恢复格式。"""
     switches = _prepare_switches("npy")
 
     configure_manual_data(
@@ -235,13 +289,14 @@ def test_kernel_prepare_requires_exact_dump_pair(tmp_path):
         "kernel",
     )
 
-    assert switches.manual_data_mode == "prepare"
+    assert switches.no_prof is True
     assert switches.manual_data_dirs == (str(tmp_path.resolve()),)
 
 
 def test_kernel_prepare_without_dump_pair_rejected(tmp_path):
-    """kernel prepare 有目录但无 --dump in,golden → 报错。"""
+    """kernel 有目录但无 --dump in,golden → 报错。"""
     switches = SWITCHES()
+    switches.dump_config = DumpConfig()
 
     with pytest.raises(ValueError, match="exactly --no-prof --dump in,golden"):
         configure_manual_data(
@@ -252,7 +307,7 @@ def test_kernel_prepare_without_dump_pair_rejected(tmp_path):
 
 
 def test_kernel_manual_data_rejects_compile_only(tmp_path):
-    """kernel manual-data（prepare）不能与 --compile-only 共存。"""
+    """kernel manual-data（dump 方向）不能与 --compile-only 共存。"""
     switches = _prepare_switches()
     switches.compile_only = True
 
@@ -264,14 +319,15 @@ def test_kernel_manual_data_rejects_compile_only(tmp_path):
 
 
 def test_manual_data_fields_survive_worker_pickle(tmp_path):
-    """manual_data_mode / manual_data_dirs 经 pickle 往返不丢（worker 传递保障）。"""
+    """no_prof / manual_data_dirs 经 pickle 往返不丢（worker 传递保障）。"""
     switches = SWITCHES()
-    switches.manual_data_mode = "replay"
+    switches.dump_config = DumpConfig()
+    switches.no_prof = True
     switches.manual_data_dirs = (str(tmp_path),)
 
     restored = pickle.loads(pickle.dumps(switches))  # noqa: S301
 
-    assert restored.manual_data_mode == "replay"
+    assert restored.no_prof is True
     assert restored.manual_data_dirs == (str(tmp_path),)
 
 

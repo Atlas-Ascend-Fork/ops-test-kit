@@ -2,7 +2,7 @@
 
 ACLNN 流程在 torch API 层运行，`golden` / `customize_inputs` 用 **torch.Tensor**。参数名和顺序与 `aclnnXxxGetWorkspaceSize` 函数签名一致（不含 workspaceSize 和 executor）。
 
-> 当 ACLNN 接口入参名与 Python 保留名冲突（如 `self`）时，类形式有两种写法：(1) 用 `*args` 按位置接收所有未具名消费的输入/属性，`args[0]` 对应 C header 第一个参数，以此类推；(2) 展开写但改名（如 `selfT`），改名参数按位置兜底——**约束：改名参数的出现顺序须与所消费的池条目顺序一致**（如 C header `self,other,alpha` 可用 `(selfT, other, alpha)` 捕获）。函数形式无此限制（参数名可任意，按位置绑定）。
+> 当 ACLNN 接口入参名与 Python 保留名冲突（如 `self`）时：spec 类内 `golden` **方法**（函数形式）按位置绑定，参数名可任意（如改名为 `selfT`），只要出现顺序与 C header 一致即可（如 C header `self,other,alpha` 可写 `(selfT, other, alpha)`）；**类形式**（`golden = GoldenClass`）严格按名绑定，未命中且无默认值的参数直接抛 `UnknownParamError`（不做位置兜底），此时可用 `*args` 按位置接收所有未具名消费的输入/属性（`args[0]` 对应 C header 第一个参数，以此类推）。
 
 ## golden 示例
 
@@ -19,7 +19,7 @@ class AclnnAddTestSpec:
         Parameters follow aclnnAddGetWorkspaceSize without workspaceSize & executor.
 
         **kwargs: tensor_dtypes, tensor_formats, scalar_dtypes,
-                 use_torch, short_soc_version, testcase_name
+                 use_numpy, short_soc_version, testcase_name
         '''
         return [torch.add(selfT, other, alpha=alpha)]
 ```
@@ -63,7 +63,7 @@ class AclnnMyDivOpTestSpec:
         '''除法算子输入，避免零值。返回 (selfT, other)。
 
         **kwargs: tensor_dtypes, tensor_formats, scalar_dtypes, input_ranges,
-                 use_torch, short_soc_version, testcase_name
+                 use_numpy, short_soc_version, testcase_name
         '''
         selfT_data = torch.rand(selfT.shape, dtype=selfT.dtype).uniform_(0.1, 10.0)
         other_data = torch.rand(other.shape, dtype=other.dtype).uniform_(0.1, 10.0)
@@ -90,6 +90,6 @@ class AclnnMyOpTestSpec:
 | `tensor_formats` | 张量格式嵌套结构 |
 | `scalar_dtypes` | 标量 dtype 嵌套结构 |
 | `input_ranges` | 输入数据范围（customize_inputs 专用） |
-| `use_torch` | 是否支持 torch dtype |
+| `use_numpy` | 是否退回 numpy 承载（非 torch 原生 dtype 时 `True`） |
 | `short_soc_version` | SoC 版本简称 |
 | `testcase_name` | 当前用例名称 |

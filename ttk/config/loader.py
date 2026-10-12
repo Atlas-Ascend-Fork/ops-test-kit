@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 """
 配置加载：default.yaml（基础）→ 用户配置（覆盖）→ CLI（覆盖）。
 """
@@ -70,11 +80,6 @@ def get_remote_config() -> Optional[RemoteConfig]:
     if not remote.get("endpoints"):
         return None
     return RemoteConfig.from_dict(remote)
-
-
-def get_hardware_config() -> dict:
-    """frameworks 段；空返回 {}（仅 cpu 合法默认，区别 remote 的 None）。"""
-    return get_config().get("frameworks", {}) or {}
 
 
 # ── CascadeConfig ──
@@ -171,7 +176,6 @@ def get_config() -> dict:
     删 lazy fallback：原行为是未加载时静默 load_config()（丢 --config），
     掩盖了 forkserver worker 拿不到配置的 bug。改为显式 raise 让问题早暴露。
     """
-    global _config
     if _config is None:
         raise RuntimeError("config not loaded — call load_config() first")
     return _config

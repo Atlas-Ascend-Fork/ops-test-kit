@@ -11,7 +11,7 @@
 run_with_switches 按 test_mode 分派到正确 Instance 类。"""
 
 import argparse
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -146,48 +146,67 @@ class TestE2eMode:
         sw = _run(["e2e", "-i", "x.csv"], captured)
         assert sw.test_mode == "framework-api"
 
-    def test_cpu_flag_sets_force_cpu(self, captured):
-        """--cpu 将 force_cpu 设为 True（强制 CPU 后端）。"""
-        sw = _run(["e2e", "-i", "x.csv", "--cpu"], captured)
-        assert sw.force_cpu is True
-
     def test_fullgraph_flag(self, captured):
         """--fullgraph 1 打开 torch.compile 全图捕获。"""
         sw = _run(["e2e", "-i", "x.csv", "--fullgraph", "1"], captured)
         assert sw.fullgraph == 1
 
     def test_aclgraph_flag(self, captured):
-        """--aclgraph 启用 aclgraph reduce-overhead 模式。"""
+        """--aclgraph 启用 aclgraph reduce-overhead 模式（算子编译默认二进制复用）。"""
         sw = _run(["e2e", "-i", "x.csv", "--aclgraph"], captured)
         assert sw.aclgraph_enabled is True
-        assert sw.aclgraph_online_compile is True
+        assert sw.e2e_binary is True
+
+    def test_binary_default_on_all_legs(self, captured):
+        """-b 默认二进制：不依赖 --aclgraph，eager/-c/-d/aclgraph 三种模式全生效。"""
+        sw = _run(["e2e", "-i", "x.csv"], captured)
+        assert sw.e2e_binary is True
+        sw = _run(["e2e", "-i", "x.csv", "-c"], captured)
+        assert sw.e2e_binary is True
+        sw = _run(["e2e", "-i", "x.csv", "--aclgraph"], captured)
+        assert sw.e2e_binary is True
 
     @pytest.mark.parametrize(
         "binary_args", [["-b"], ["-b=release"], ["-b", "release"], ["--binary"], ["--binary=true"]]
     )
-    def test_aclgraph_can_disable_online_compile(self, captured, binary_args):
-        sw = _run(["e2e", "-i", "x.csv", "--aclgraph", *binary_args], captured)
-        assert sw.aclgraph_enabled is True
-        assert sw.aclgraph_online_compile is False
+    def test_binary_explicit_forms_enable_binary(self, captured, binary_args):
+        """显式 -b（含 release 等价写法）与默认等价，无需 --aclgraph。"""
+        sw = _run(["e2e", "-i", "x.csv", *binary_args], captured)
+        assert sw.e2e_binary is True
 
     @pytest.mark.parametrize("value", ["false", "0", "no", "off"])
-    def test_binary_false_keeps_online_compile(self, captured, value):
-        sw = _run(["e2e", "-i", "x.csv", "--aclgraph", f"-b={value}"], captured)
-        assert sw.aclgraph_online_compile is True
+    def test_binary_false_restores_online_compile(self, captured, value):
+        """-b=false 恢复在线编译。"""
+        sw = _run(["e2e", "-i", "x.csv", f"-b={value}"], captured)
+        assert sw.e2e_binary is False
 
-    @pytest.mark.parametrize("extra", [[], ["-c"], ["--aclgraph", "--super-kernel"]])
-    def test_binary_rejects_invalid_combinations(self, captured, extra):
+    def test_binary_rejects_super_kernel(self, captured):
+        """显式 -b 与 --super-kernel 同开报错（SuperKernel 要求在线编译）。"""
         with pytest.raises(ValueError, match="--binary"):
-            _run(["e2e", "-i", "x.csv", "-b", *extra], captured)
+            _run(["e2e", "-i", "x.csv", "-b", "--aclgraph", "--super-kernel"], captured)
+
+    def test_super_kernel_forces_online_compile(self, captured):
+        """隐式默认二进制 + --super-kernel：自动回退在线编译（不破坏既有裸用法）。"""
+        sw = _run(["e2e", "-i", "x.csv", "--aclgraph", "--super-kernel"], captured)
+        assert sw.e2e_binary is False
+        assert sw.super_kernel_enabled is True
 
     def test_binary_false_allows_super_kernel(self, captured):
         sw = _run(["e2e", "-i", "x.csv", "--aclgraph", "--super-kernel", "-b=false"], captured)
-        assert sw.aclgraph_online_compile is True
+        assert sw.e2e_binary is False
         assert sw.super_kernel_enabled is True
 
-    def test_binary_rejects_invalid_value(self, captured):
-        with pytest.raises(SystemExit):
-            _run(["e2e", "-i", "x.csv", "--aclgraph", "-b=invalid"], captured)
+    def test_binary_lenient_truthy_token(self, captured):
+        """-b 为布尔风格参数（对齐 -c/-d/--eager）：非 falsy 串一律视为 True。"""
+        sw = _run(["e2e", "-i", "x.csv", "--aclgraph", "-b=invalid"], captured)
+        assert sw.e2e_binary is True
+
+    def test_binary_forced_off_under_npusim(self, captured):
+        """npusim 仿真要求算子在线编译：默认/显式二进制均强制关闭。"""
+        sw = _run(["e2e", "-i", "x.csv", "--backend", "npusim"], captured)
+        assert sw.e2e_binary is False
+        sw = _run(["e2e", "-i", "x.csv", "--backend", "npusim", "-b"], captured)
+        assert sw.e2e_binary is False
 
 
 # -- run_with_switches 分派 --------------------------------------------------
@@ -195,35 +214,55 @@ class TestE2eMode:
 
 class TestRunWithSwitchesDispatch:
     @pytest.mark.parametrize(
-        ("test_mode", "instance_path"),
-        [
-            ("op", "ttk.core_modules.npu.instance_refactor.NpuInstance"),
-            ("aclnn", "ttk.core_modules.npu.instance_refactor.NpuInstance"),
-            ("geir", "ttk.core_modules.geir.instance.GeirInstance"),
-            ("framework-api", "ttk.core_modules.framework_api.instance.FrameworkApiInstance"),
-        ],
+        "test_mode",
+        ["op", "aclnn", "geir", "framework-api"],
     )
     @pytest.mark.parametrize("fail_count", [0, 1])
-    def test_dispatches_to_correct_instance(self, test_mode, instance_path, monkeypatch, fail_count):
-        """run_with_switches 按 test_mode 分派到对应 Instance 类并调用 profile()。"""
+    def test_dispatches_to_correct_instance(self, test_mode, monkeypatch, fail_count):
+        """run_with_switches 经注册表按 test_mode 分派（get_instance_by_name 惰性单例）
+        并调用 profile()；失败计数非零时以退出码 1 退出。"""
+        from ttk.core_modules.common import instance as instance_mod
+
+        mock_ins = MagicMock()
+        mock_ins.fail_count = fail_count
+        monkeypatch.setattr(instance_mod, "get_instance_by_name", lambda name: mock_ins)
+
         sw = MagicMock()
         sw.test_mode = test_mode
         sw.logging_to_file = False
         sw.input_files = ["x.csv"]
 
-        monkeypatch.setattr("ttk.utilities.set_global_storage", lambda _sw: None)
-        monkeypatch.setattr("ttk.core_modules.tbe_logging.default_logging_config", lambda **kw: None)
+        monkeypatch.setattr("ttk.switches.set_global_storage", lambda _sw: None)
+        monkeypatch.setattr("ttk.core_modules.common.logging.default_logging_config", lambda **kw: None)
         monkeypatch.setattr("ttk.utilities.set_process_name", lambda: None)
         monkeypatch.setattr("ttk.utilities.set_thread_name", lambda: None)
         monkeypatch.setattr("ttk.cli.bridge._detect_framework_from_csv", lambda files, sheet=None: "torch")
 
-        with patch(instance_path) as mock_cls:
-            mock_cls.return_value.fail_count = fail_count
-            if fail_count:
-                with pytest.raises(SystemExit) as exc:
-                    run_with_switches(sw)
-                assert exc.value.code == 1
-            else:
+        if fail_count:
+            with pytest.raises(SystemExit) as exc:
                 run_with_switches(sw)
-            mock_cls.assert_called_once()
-            mock_cls.return_value.profile.assert_called_once()
+            assert exc.value.code == 1
+        else:
+            run_with_switches(sw)
+        mock_ins.run.assert_called_once()
+
+
+def test_cli_top_level_error_is_single_line(capsys, monkeypatch, tmp_path):
+    """bridge/handler 的校验 ValueError → 单行 ttk: error（非 traceback）；TTK_DEBUG=1 保留全栈。"""
+    import sys
+
+    monkeypatch.chdir(tmp_path)  # 隔离用户级 ttk.conf.yaml
+    monkeypatch.setattr(sys, "argv", ["ttk", "kernel", "-i", "x.csv", "--dump", "in,foo"])
+    from ttk.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("ttk: error:")
+    assert "unknown token" in err
+    assert "Traceback" not in err
+
+    monkeypatch.setenv("TTK_DEBUG", "1")
+    with pytest.raises(ValueError, match="unknown token"):
+        main()

@@ -9,18 +9,18 @@
 | 三方交叉校验 | `--compare cross_check` + `--config` + `--plugin` | XPU 输出作为第三方参考，与 NPU 输出/Golden 做误差比值 |
 | 固定 XPU 输出 | `manual_xpu_binaries` + `--compare cross_check` | 使用本地 XPU 输出文件，跳过远端 dispatch |
 | XPU 输出落盘 | `--dump xpu` + `--config` | 保存远端 XPU 返回的第三方输出 |
-| XPU 性能采集 | `--xpu-perf` + `--config` | 只采集 XPU 侧 `device_ms`，不取数据，不影响精度比对 |
+| XPU 性能采集 | `--xpu-perf` + `--config` | 只采集 XPU 侧 `device_us`（及 `peak_memory_mb`），不取数据，不影响精度比对 |
 
-> 远端 XPU 场景需要先部署 xpu-server，详见 [xpu-server 部署指南](../ttk/remote/server/README.md)。
+> XPU 采集为远端专用（remote-only）：三方硬件在本机时同样在本机启动 xpu-server，endpoint 指向 `127.0.0.1` 即可。部署详见 [xpu-server 部署指南](../ttk/remote/server/README.md)。
 
 ## 1. 前置准备
 
 ### 1.1 部署 xpu-server
 
-在 XPU 机器上启动服务（本机测试最简）：
+在 XPU 机器上启动服务（本机测试最简；cwd = ttk 仓根或 PYTHONPATH 含仓根）：
 
 ```bash
-python -m xpu_server.xpu_server --port 9090
+python -m ttk.remote.server.xpu_server --port 9090
 ```
 
 跨机/CI 等场景参见 [xpu-server 部署指南](../ttk/remote/server/README.md) 的「场景 1-4」。
@@ -38,12 +38,6 @@ remote:
   # tls_ca: /opt/ttk-certs/ca.crt
   # tls_cert: /opt/ttk-certs/client.crt
   # tls_key: /opt/ttk-certs/client.key
-
-frameworks:
-  torch:
-    xpu:                   # XPU 硬件 profile
-      torch_lib: mlu       # torch binding（如 torch_mlu）
-      profiler: builtin
 ```
 
 ### 1.3 配置 third_party（cross_check 必需）
@@ -65,7 +59,7 @@ class AddTestSpec:
     # third_party = {"torch": ThirdPartyImpl}
 ```
 
-没有 `third_party` 时，`cross_check` 会因无参考输出而 `GOLDEN_FAILURE`。
+未声明 `third_party` 时，远端走 server 端推导（E2E 按 `op_name` 点分路径解析；kernel/aclnn 按算子名解析），推导失败才会 `GOLDEN_FAILURE`。
 
 ## 2. 三方交叉校验
 
@@ -125,10 +119,10 @@ class ComplexMulTestSpec:
             return [x1 * x2]  # 输出 complex32，server 自动转交错 fp16 回传
 
     third_party = {"torch": TorchRefImpl}
-    tolerance = {"complex32": {"standard": "cross_check"}}
 ```
 
 - 同一算子混跑 `float16` / `complex32` 用例时，在 `__call__` 里按 `x1.dtype == torch.complex32`（或 `x1.is_complex()`）分支即可——逻辑 dtype 已随请求传递，不再依赖尾维启发式。
+- `cross_check` 仅支持 `float16` / `bfloat16` / `float32` 输出；complex32 输出走默认 `close` 判据（读取 CSV legacy 容差），在 `tolerance` 中声明 `cross_check` 不会生效。
 - 字符串形式只接受点分 API 路径（如 `"torch.abs"`）；自定义实现传类或可调用对象。
 
 输出方向同理：三方返回的 complex32 张量由 server 转回 fp16 `[..., 2]` 交错布局回传，与 NPU 输出 / golden 的存储约定对齐后参与比对。第三方实现若返回 complex64/complex128（numpy 原生复数），元素数与交错布局不匹配会导致比对错位——complex32 输出请返回 complex32（或自行 `view(torch.float16)`）。
@@ -139,7 +133,7 @@ class ComplexMulTestSpec:
 - provider 解析失败 → 同上
 - XPU 执行报错 → 该 provider 标记为 `FAIL`，不参与比对
 
-### 2.6 固定 XPU 输出
+### 2.7 固定 XPU 输出
 
 Kernel 用例可通过 `manual_xpu_binaries` 直接读取已生成的 XPU 输出：
 
@@ -152,7 +146,7 @@ manual_input_binaries,manual_golden_binaries,manual_xpu_binaries
 `manual_input_binaries`（有输入算子）和 `manual_golden_binaries`，文件数量必须与输出数量一致。
 固定文件模式不需要 `--config` 或 `--provider`。
 
-### 2.7 XPU 输出落盘
+### 2.8 XPU 输出落盘
 
 使用 `--dump xpu` 可将远端 XPU 返回的第三方输出保存到本地。`xpu` 是 `--dump` 的一个类别，
 可通过 `--dump in,out,golden,xpu` 与其他类别组合。该选项会请求 XPU 返回数据，
@@ -175,8 +169,8 @@ python3 -m ttk kernel -i cases.csv \
 例如 `add_001_xpu_golden_0.bin`。文件名与 `manual_xpu_binaries` 归档回放契约一致，可直接上传归档平台参与 cross_check。
 多个 provider 同时产出时按 provider 分目录保存（如 `torch/add_001_xpu_golden_0.bin`），避免同名覆盖；嵌套 TensorList 输出会展平后编号。
 用例名或 provider 名包含路径字符时会附加短哈希，避免清洗后文件名冲突。
-输出目录优先使用环境变量 `NPU_DUMP_PATH`，未设置时使用 TTK 根目录；文件格式复用
-`--dump-format bin|npy|pt|print`。失败的 provider 和仅启用 `--xpu-perf` 的 PERF-only 结果不会生成输出文件。
+输出目录优先使用环境变量 `NPU_DUMP_PATH`，未设置时使用 TTK 根目录；文件格式跟随
+`--dump-format`，当前 XPU 输出仅实现 bin/npy 两种（传 `pt`/`print` 时按 bin 落盘）。失败的 provider 和仅启用 `--xpu-perf` 的 PERF-only 结果不会生成输出文件。
 
 ## 3. XPU 性能采集
 
@@ -194,8 +188,8 @@ python3 -m ttk kernel -i cases.csv \
 |------|-------------|------------------------|
 | 数据传输 | 不取 XPU 输出 | 取 XPU 输出做比对 |
 | 精度影响 | 不影响 | 替换比对方法 |
-| 结果列 | `xpu_metrics`（device_ms） | `precision_status` + `xpu_metrics` |
-| 需要 third_party | 否 | 是 |
+| 结果列 | `xpu_metrics`（device_us） | `precision_status` + `xpu_metrics` |
+| 需要 third_party | 否 | 建议声明（未声明时走 server 端推导，推导失败则 `GOLDEN_FAILURE`） |
 
 `--xpu-perf` 可与默认 `mixed` 比对同时使用：NPU 侧正常做 Golden 比对，XPU 侧额外采集性能数据。
 
@@ -204,19 +198,21 @@ python3 -m ttk kernel -i cases.csv \
 `xpu_metrics` 列写入结果 CSV，格式示例：
 
 ```json
-{"torch": {"device_ms": 0.45, "status": "PASS"}}
+{"torch": {"status": "PASS", "api": "torch.add", "device_us": 450.0, "peak_memory_mb": 12.5}}
 ```
+
+每个 provider 条目恒含 `status` 与 `api` 两个键；性能采集时另有 `device_us` 与 `peak_memory_mb`。
 
 ## 4. 参数约束
 
 | 参数 | cross_check | xpu-perf | `--dump xpu` |
 |------|------------|----------|----------|
 | `--compare` | 必须 `cross_check` | 任意（默认 `mixed`） | 任意 |
-| `--config` | 必须（含 endpoints） | 必须（含 endpoints） | 必须（含 endpoints） |
-| `--plugin` | 必须（含 `third_party`） | 可选 | 可选 |
+| `--config` | 需要 endpoints 才能取到三方输出；缺配置不报错，cross_check 判据产出 `GOLDEN_FAILURE` | 必须含 endpoints（缺配置直接报错） | 必须含 endpoints（缺配置降级跳过并告警） |
+| `--plugin` | 建议（未声明 `third_party` 时走 server 端按 op_name 推导，推导失败则 `GOLDEN_FAILURE`） | 可选 | 可选 |
 | `--provider` | 可选过滤 | 可选过滤 | 可选过滤 |
-| `--no-prof` | 不兼容 | 不兼容 | 不执行 XPU dispatch |
-| `--validate` | 不兼容 | 不兼容 | 不执行 XPU dispatch |
+| `--no-prof` | 不执行 XPU dispatch | 不执行 XPU dispatch | 不执行 XPU dispatch |
+| `--validate` | 不执行 XPU dispatch | 不执行 XPU dispatch | 不执行 XPU dispatch |
 
 ## 5. 通路支持
 

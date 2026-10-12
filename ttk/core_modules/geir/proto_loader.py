@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 # Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
 
 import logging
 import os
 import re
 from typing import Dict, List, Optional
 
+from ttk.core_modules.common.plugin.spec_loader import snake_to_pascal
 from ttk.utilities import Singleton
 
 
@@ -50,7 +58,7 @@ class ProtoLoader(metaclass=Singleton):
 
     def __init__(self, ascend_path=None):
         from ttk._env import _find_ascend_root
-        from ttk.utilities.platform import get_opp_paths
+        from ttk.core_modules.common.device import get_opp_paths
 
         root = ascend_path or _find_ascend_root() or ""
 
@@ -78,11 +86,9 @@ class ProtoLoader(metaclass=Singleton):
         if op_name in self._cache:
             return self._cache[op_name]
 
-        from ttk.test_spec.loader import _snake_to_pascal
-
         # GE REG_OP uses PascalCase; try pascal first, then original
         candidates = []
-        pascal = _snake_to_pascal(op_name)
+        pascal = snake_to_pascal(op_name)
         if pascal != op_name:
             candidates.append(pascal)
         candidates.append(op_name)
@@ -104,10 +110,7 @@ class ProtoLoader(metaclass=Singleton):
         import glob
 
         for category, proto_dir in self._proto_dirs:
-            if category == "builtin":
-                pattern = "ops_proto_*.h"
-            else:
-                pattern = "*_proto.h"
+            pattern = "ops_proto_*.h" if category == "builtin" else "*_proto.h"
             for proto_path in sorted(glob.glob(os.path.join(proto_dir, pattern))):
                 if "ops_proto_legacy.h" in proto_path:
                     continue
@@ -117,7 +120,7 @@ class ProtoLoader(metaclass=Singleton):
                     info = self._parse_reg_op(content, os.path.basename(proto_path), op_name)
                     if info:
                         return info
-                except Exception:
+                except Exception:  # noqa: S112 proto 头逐个探测，坏文件跳过属预期
                     continue
         return None
 

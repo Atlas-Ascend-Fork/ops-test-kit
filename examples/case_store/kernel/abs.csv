@@ -1,9 +1,0 @@
-testcase_name,op_name,input_shapes,input_dtypes,input_formats,output_shapes,output_dtypes,output_formats,precision_tolerances,absolute_precision
-abs_sample_3,abs,"((22, 17),)","('int32',)","('ND',)","((22, 17),)","('int32',)","('ND',)","((0, 0),)",0
-abs_sample_2,abs,"((18,),)","('float32',)","('ND',)","((18,),)","('float32',)","('ND',)","((0, 0),)",0
-abs_sample_4,abs,"((35, 19),)","('int16',)","('ND',)","((35, 19),)","('int16',)","('ND',)","((0, 0),)",0
-abs_sample_6,abs,"((17, 26, 41),)","('int8',)","('ND',)","((17, 26, 41),)","('int8',)","('ND',)","((0, 0),)",0
-abs_sample_0,abs,"((30, 16, 8, 44),)","('int8',)","('ND',)","((30, 16, 8, 44),)","('int8',)","('ND',)","((0, 0),)",0
-abs_sample_1,abs,"((20, 18, 29),)","('float16',)","('ND',)","((20, 18, 29),)","('float16',)","('ND',)","((0, 0),)",0
-abs_sample_7,abs,"((17, 23),)","('int64',)","('ND',)","((17, 23),)","('int64',)","('ND',)","((0, 0),)",0
-abs_sample_5,abs,"((16, 19, 24, 49, 9),)","('float16',)","('ND',)","((16, 19, 24, 49, 9),)","('float16',)","('ND',)","((0, 0),)",0

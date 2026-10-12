@@ -3,7 +3,7 @@
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS FILE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
@@ -22,7 +22,7 @@ def _cfg(**overrides):
 
 
 @pytest.mark.parametrize(
-    "fields, expected",
+    ("fields", "expected"),
     [
         # backoff 三字段
         (
@@ -83,8 +83,12 @@ def test_remote_config_all_fields_together():
         }
     )
     assert len(config.endpoints) == 2
-    assert config.backoff_base_s == 1.0 and config.backoff_max_s == 30.0 and config.backoff_jitter == 0.05
-    assert config.max_503_retries == 20 and config.max_conn_retries == 10 and config.dispatch_deadline_s == 900
+    assert config.backoff_base_s == 1.0
+    assert config.backoff_max_s == 30.0
+    assert config.backoff_jitter == 0.05
+    assert config.max_503_retries == 20
+    assert config.max_conn_retries == 10
+    assert config.dispatch_deadline_s == 900
     assert config.tls_ca == "/etc/ssl/ca.crt"
     assert config.tls_cert == "/etc/ssl/client.crt"
     assert config.tls_key == "/etc/ssl/client.key"

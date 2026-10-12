@@ -1,3 +1,0 @@
-testcase_name,api_name,tensor_view_shapes,tensor_dtypes,precision_tolerances,absolute_precision,attributes
-aclnnNonzeroV2_00,aclnnNonzeroV2,"((2,4),(2,8),)","('float32','int64')","((0,0),)",0,{'as_tuple': True}
-aclnnNonzero_00,aclnnNonzero,"((2,4),(8,2),)","('float32','int64')","((0,0),)",0,{'as_tuple': False}

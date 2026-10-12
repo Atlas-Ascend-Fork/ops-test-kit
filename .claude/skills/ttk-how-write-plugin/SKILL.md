@@ -22,8 +22,8 @@ description: 编写/定义算子测试规范（TestSpec，尚未跑或要新增 
 
 | 测试路径 | 注册名 | 参数名来源 | Golden 参数类型 | 无 spec 时默认行为 |
 |---------|--------|----------|----------------|-------------------|
-| Kernel | `abs`（CSV `op_name`） | 算子 `def.cpp` 形参 | numpy.ndarray | 无 golden，报 UNSUPPORTED |
-| GEIR | `abs`（CSV `op_name`） | 算子 `def.cpp` 形参 | numpy.ndarray | 无 golden，报 UNSUPPORTED |
+| Kernel | `abs`（CSV `op_name`） | 算子 `def.cpp` 形参 | numpy.ndarray | 回退内置映射（`KERNEL_GOLDEN` → numpy 同名 API，如 `abs`）；无命中才报 UNSUPPORTED |
+| GEIR | `abs`（CSV `op_name`） | 算子 `def.cpp` 形参 | numpy.ndarray | 同 Kernel（复用同一回退链） |
 | ACLNN | `aclnnAbs`（CSV `api_name`） | `aclnn_abs.h` 形参 | torch.Tensor | 自动从 torch 同名 API 映射 |
 | E2E | `torch.abs`（CSV `api_name`） | torch API 签名 | torch.Tensor | 框架自动在 CPU 跑同 API 作 golden |
 
@@ -51,14 +51,14 @@ class AbsTestSpec:
   | 流程 | 入参类型 | 说明 |
   |------|---------|------|
   | Kernel / GEIR | numpy.ndarray | 需内部 `torch.from_numpy()` 转 torch 计算后 `.numpy()` 转回 |
-  | ACLNN / E2E | torch.Tensor | 已完成 H2D，直接用 torch 计算 |
+  | ACLNN / E2E | torch.Tensor | CPU（host）侧张量（`torch.from_numpy` 构造，先于设备执行生成），直接用 torch 计算 |
 
 - **`third_party`**：调用三方 API（如 torch）
 
   | 流程 | 入参类型 | 说明 |
   |------|---------|------|
   | Kernel / GEIR | torch.Tensor | 框架将 numpy 转 torch 后调用 |
-  | ACLNN / E2E | torch.Tensor | 直接传入设备侧 tensor |
+  | ACLNN / E2E | torch.Tensor | 三方执行侧再上设备（远端/本地 XPU 执行时 `.to(device)`） |
 
 - **`compare` / `pre_compare`**：入参**始终为 numpy ndarray**（任何场景；框架把输出转 numpy 再传入）
 
@@ -79,7 +79,8 @@ class AbsTestSpec:
 | `compare` | 自定义比对 | 函数 |
 | `pre_compare` | 比对前处理 | 函数 |
 | `torch_graph` | Graph 模式 | `torch.nn.Module` 子类（仅 torch API） |
-| `describe` | 算子描述信息 | 函数 |
+| `npu_preprocess` | NPU 执行前设备侧预处理钩子（-1 动态槽物化） | 函数（ACLNN / E2E） |
+| `describe` | 算子描述信息（保留字段，当前未消费） | 函数 |
 
 ## golden 三形式
 
@@ -162,7 +163,7 @@ def sort_golden(x, descending=False, **kwargs):
 |-------------|------|------------------|
 | `mix_tolerance` | 混合容差（默认，生态算子开源精度标准） | `mixed` |
 | `stat_rel_err` | 统计相对误差 | `stat_rel_err` |
-| `binary_equal` | 逐 bit 相等 | `binary`、`bin` |
+| `binary_equal` | 逐 bit 相等 | `binary`（`bin` 为内部判据别名，不能直接传给 `--compare`） |
 | `cross_check` | 交叉比对（需配合 `third_party`） | `cross_check` |
 | `quant` | 量化比对（int4/int8 量化输出，绝对误差 ≤ 1） | —（仅 Spec.tolerance 声明） |
 | `isclose` | numpy.isclose 容差比对 | `close` |
@@ -212,7 +213,7 @@ python3 -m ttk aclnn -i cases.csv --plugin /path/to/assets_a/,/path/to/assets_b/
 python3 -c "import ast; ast.parse(open('spec.py').read()); print('ok')"
 
 # 单用例测试
-python3 -m ttk kernel -i cases.csv -t case_name --plugin /path/to/assets/ --single-log
+python3 -m ttk kernel -i cases.csv -t case_name --plugin /path/to/assets/
 ```
 
 常见问题：
@@ -231,7 +232,7 @@ input_data_ranges,"((-1, 1), (0.1, 10))"
 
 ## 详细规范
 
-完整规范见 `ttk/test_spec/README.md`，渐进示例见 `ttk/test_spec/examples/`：
+完整规范见 `ttk/core_modules/common/plugin/README.md`，渐进示例见 `ttk/core_modules/common/plugin/examples/`：
 
 | 文件 | 场景 |
 |------|------|

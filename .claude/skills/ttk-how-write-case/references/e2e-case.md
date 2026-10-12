@@ -1,7 +1,7 @@
 # E2E 模式用例编写
 
 子命令：`python3 -m ttk e2e`
-结构类：`TestcaseE2e`（共 19 个字段：9 公共 + 10 专有）
+结构类：`TestcaseE2e`（标准字段 23 个：13 公共 + 10 专有；另有 `attributes1`～`attributes9` 扩展列，全量 32 个）
 
 ## 用例配置依据
 
@@ -45,6 +45,7 @@ E2E 用例的参数（张量数量/顺序/dtype、关键字参数等）来自框
 | 字段 | 必填 | 默认 | 说明 |
 |------|------|------|------|
 | `output_tensor_indexes` | 否 | *(自动)* | 输出张量索引。Inplace Tensor 方法（`torch.Tensor.xxx_`）自动填充 `(0,)`；带 `out` 参数的 API 需手动指定输出位置索引。未设置且 API 无 `out` 参数时，框架自动处理返回值 |
+| `inplace_input_indexes` | 否 | `()` | 原地改写输入张量的索引（图模式捕获前备份、重放后还原这些输入；Inplace Tensor 方法自动填充的是 `output_tensor_indexes=(0,)`，此字段需手动声明） |
 | `attributes` | 否 | `{}` | 框架 API 关键字参数。如 `{'alpha': 1.0}`。API 签名中的必选非张量参数**必须**提供，否则用例校验不通过 |
 | `golden_api` | 否 | `""` | 替代 Golden 计算的 API（详见常见模式） |
 

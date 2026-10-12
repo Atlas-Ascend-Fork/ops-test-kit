@@ -1,6 +1,6 @@
 # ACLNN 模式专用参数
 
-ACLNN 子命令复用全部通用参数，专属选项仅 `--no-prof`（准备输入/golden 不执行）、`--xpu-perf`（XPU 远程性能采集）。
+ACLNN 子命令复用全部通用参数（含共享组的 `--no-prof` 手工数据准备与 `--xpu-perf` XPU 性能采集），无模式专属选项。
 
 > **仿真**：ACLNN 支持 `--backend npusim` 无卡仿真，见 `npusim-params.md`。
 

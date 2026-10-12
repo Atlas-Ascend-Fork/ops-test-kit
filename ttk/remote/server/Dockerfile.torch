@@ -1,8 +1,16 @@
 # Example Dockerfile for torch executor.
 # Base image version is an example — actual image configured via docker.images.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
 FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 # Install everything the executor + fixtures need. bfloat16 fixtures need
 # ml_dtypes; add per-op deps here.
 RUN pip install numpy pyyaml ml_dtypes
-COPY . /executor/
-ENTRYPOINT ["python", "/executor/executor_main.py"]
+COPY ttk /executor/ttk
+WORKDIR /executor
+ENTRYPOINT ["python", "-m", "ttk.remote.server.executor_main"]

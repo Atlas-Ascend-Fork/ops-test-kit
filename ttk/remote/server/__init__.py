@@ -1,17 +1,15 @@
-"""xpu-server — standalone-deployable remote XPU execution server.
+"""xpu-server — remote XPU execution server (整仓部署).
 
-Deployment boundary (authoritative):
-  * This package (``ttk/remote/server/``) deploys STANDALONE on the XPU box and
-    is COMPLETELY ttk-free and ml_dtypes-free:
-      - no ``from ttk...`` / ``import ttk...`` imports at all;
-      - bfloat16 is handled with ``numpy.int16`` ``view`` (bit-preserving) plus
-        ``torch`` — never ml_dtypes;
-      - only intra-package RELATIVE imports (``from .execution_container ...``,
-        ``from . import executor``), so the directory can be copied/renamed and
-        run as ``python -m <pkg>.xpu_server`` with no ttk hierarchy on path.
-    Runtime deps: Python stdlib + numpy + torch (lazy-imported).
-
-  * The CLIENT side (``ttk/remote/dispatcher.py`` and the rest of ``ttk/``)
-    runs on the TTK worker and MAY freely use ml_dtypes and ttk modules — the
-    ttk-free constraint applies to THIS server package only.
+Deployment boundary:
+  * Server deploys WITH the whole ttk repo (git clone / pip install / 拷贝整仓)
+    and starts via ``python -m ttk.remote.server.xpu_server``. It consumes
+    same-source contract code and the profiler engine from
+    ``ttk.core_modules.common`` (bind_params / UnknownParamError /
+    resolve_activities / summarize_events) — single copy, no mirror drift.
+  * Copying just this subdirectory and running it standalone
+    (``python -m <pkg>.xpu_server``) is NOT supported — the contract code
+    lives outside this package.
+  * bfloat16/complex32/float8 are handled with numpy bit views plus torch —
+    never ml_dtypes.
+  * Runtime deps: Python stdlib + numpy + torch/tensorflow (lazy-imported).
 """

@@ -65,7 +65,6 @@ def collect_xpu_results(
     runtime: int = 3,
     param_order=None,
     dump_xpu: bool = False,
-    input_recipes=None,
 ):
     """Dispatch specs to xpu-server, return aggregated results.
 
@@ -117,7 +116,6 @@ def collect_xpu_results(
                 attrs=attrs or {},
                 input_formats=input_formats,
                 input_dtypes=input_dtypes,
-                input_recipes=input_recipes,
                 endpoint_host=ep.host,
                 endpoint_port=ep.port,
                 tenant_id=tenant_id,

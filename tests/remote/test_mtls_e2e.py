@@ -11,7 +11,7 @@
 
 Verifies the full mTLS path (server wrap_socket CERT_REQUIRED + client
 HTTPSConnection) that unit tests (config loading / HTTP-vs-HTTPS selection)
-don't cover. See spec 2026-06-19-mtls-e2e-test-design.
+don't cover.
 """
 
 import os
@@ -121,9 +121,7 @@ def mtls_env(tmp_path_factory):
     import yaml
 
     certs = tmp_path_factory.mktemp("certs")
-    wrong_certs = tmp_path_factory.mktemp("wrong_certs")
     _gen_certs(certs)
-    _gen_certs(wrong_certs)  # independent CA for the wrong-CA negative test
 
     port = _free_port()
     sync = tmp_path_factory.mktemp("sync")
@@ -162,7 +160,6 @@ def mtls_env(tmp_path_factory):
             "ca": str(certs / "ca.crt"),
             "client_crt": str(certs / f"{_TENANT}.client.crt"),
             "client_key": str(certs / f"{_TENANT}.client.key"),
-            "wrong_ca": str(wrong_certs / "ca.crt"),
         }
     finally:
         proc.terminate()

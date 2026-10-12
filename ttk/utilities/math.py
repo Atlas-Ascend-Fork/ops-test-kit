@@ -8,7 +8,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 """
-math utils
+Integer alignment algebra and bit-exact +/-0 predicates.
 """
 
 __all__ = [
@@ -17,8 +17,6 @@ __all__ = [
     "lcm",
     "is_negative_zero",
     "is_positive_zero",
-    "positive_zero_in_array",
-    "negative_zero_in_array",
 ]
 
 
@@ -27,10 +25,12 @@ import numpy
 
 
 def ceil_div(a, b):
+    """Ceiling of a / b for non-negative ints."""
     return (a + b - 1) // b
 
 
 def align(a, b):
+    """Round a up to the next multiple of b."""
     return ceil_div(a, b) * b
 
 
@@ -40,17 +40,9 @@ def lcm(a, b):
 
 
 def is_negative_zero(number: float) -> bool:
-    # warning: return value of torch.signbit is different within torch version ...
+    # torch.signbit behavior varies across torch versions, so numpy.signbit is used here
     return bool(number == 0 and numpy.signbit(number))
 
 
 def is_positive_zero(number: float) -> bool:
     return bool(number == 0 and not numpy.signbit(number))
-
-
-def positive_zero_in_array(array: numpy.ndarray) -> numpy.ndarray:
-    return numpy.logical_and(array == 0, ~numpy.signbit(array))
-
-
-def negative_zero_in_array(array: numpy.ndarray) -> numpy.ndarray:
-    return numpy.logical_and(array == 0, numpy.signbit(array))

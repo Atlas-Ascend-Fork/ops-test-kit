@@ -3,7 +3,7 @@
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS FILE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
@@ -17,10 +17,10 @@ from unittest.mock import MagicMock
 def _make_args(**kwargs):
     """构造 args mock，只填 args_to_switches 实际读取的字段。"""
     args = MagicMock()
-    args.provider = kwargs.get("provider", None)
-    args.config = kwargs.get("config", None)
+    args.provider = kwargs.get("provider")
+    args.config = kwargs.get("config")
     args.input = kwargs.get("input", "x.csv")
-    args.output = kwargs.get("output", None)
+    args.output = kwargs.get("output")
     args.run = kwargs.get("run", 1)
     return args
 
@@ -37,7 +37,7 @@ remote:
 """)
     monkeypatch.chdir(tmp_path)
 
-    import ttk.config.loader as loader
+    from ttk.config import loader
 
     loader._config = None
 
@@ -62,7 +62,7 @@ remote:
 """)
     monkeypatch.chdir(tmp_path)
 
-    import ttk.config.loader as loader
+    from ttk.config import loader
 
     loader._config = None
 
@@ -82,7 +82,7 @@ remote:
 """)
     monkeypatch.chdir(tmp_path)
 
-    import ttk.config.loader as loader
+    from ttk.config import loader
 
     loader._config = None
 
@@ -97,8 +97,8 @@ remote:
 
 def test_args_to_switches_loads_config_unconditionally():
     """config=None 时 args_to_switches 仍无条件调 load_config（lazy fallback 已删的回归看护）。"""
-    import ttk.config.loader as loader
     from ttk.cli.bridge import args_to_switches
+    from ttk.config import loader
 
     saved = loader._config
     loader._config = None

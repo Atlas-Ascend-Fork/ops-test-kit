@@ -14,7 +14,7 @@ XPU 第三方输出采集客户端 —— 面向 core_modules 的门面。
 派发到远端 xpu_server 执行，提取返回的第三方输出数组。
 
 本模块是 Kernel / GEIR / ACLNN / E2E 各模式共用的通用编排层，不耦合任何模式
-专属上下文（OpInfoKeeper / OpApiInfoKeeper / TestcaseOp / TestcaseAclnn 等）。
+专属上下文（OpInfoKeeper / OpApiInfoKeeper / TestcaseKernel / TestcaseAclnn 等）。
 各模式在调用前自行准备：op_name、inputs（逻辑 ori-shape 数组）、input_names、
 op_type、attributes、testcase_name、switches。
 """
@@ -87,7 +87,7 @@ def xpu_mode_of(switches, need_data: bool) -> int:
     mode = 0
     if getattr(switches, "xpu_perf", False):
         mode |= PERF
-    if need_data or switches.dump_config.is_xpu_enabled():
+    if need_data or switches.dump_config.dump_xpu:
         mode |= DATA
     return mode
 
@@ -114,6 +114,17 @@ def _safe_dump_token(value, default: str) -> str:
     return token or default
 
 
+def _dump_xpu_output(output, target_dir, file_name, file_format):
+    """按格式落盘单个 XPU 输出（remote 独立部署：不依赖 core_modules 的 formatter 注册制）。"""
+    if file_format == "npy":
+        import numpy
+
+        numpy.save(os.path.join(target_dir, file_name + ".npy"), output)
+    else:
+        with open(os.path.join(target_dir, file_name + ".bin"), "wb") as f:
+            f.write(output.tobytes() if hasattr(output, "tobytes") else bytes(output))
+
+
 def _dump_xpu_outputs(xpu_results, testcase_name: str, switches) -> None:
     """Persist successful XPU outputs when --dump xpu is enabled.
 
@@ -121,10 +132,10 @@ def _dump_xpu_outputs(xpu_results, testcase_name: str, switches) -> None:
     ``manual_xpu_binaries`` 上传归档平台。多个 provider 同时产出时按 provider
     分目录避免同名覆盖，各目录内文件名保持一致。
     """
-    if not switches.dump_config.is_xpu_enabled() or not xpu_results:
+    if not switches.dump_config.dump_xpu or not xpu_results:
         return
 
-    from ttk.utilities import deep_flatten, dump_to_file
+    from ttk.utilities import deep_flatten
 
     dump_path = os.getenv("NPU_DUMP_PATH") or getattr(switches, "root_path", os.getcwd())
     file_format = getattr(getattr(switches, "dump_config", None), "file_format", "bin")
@@ -145,7 +156,7 @@ def _dump_xpu_outputs(xpu_results, testcase_name: str, switches) -> None:
             if output is None or isinstance(output, str):
                 continue
             file_name = f"{case_token}_xpu_golden_{index}"
-            dump_to_file(output, target_dir, file_name, file_format=file_format)
+            _dump_xpu_output(output, target_dir, file_name, file_format)
             logging.info("[%s] Dumped XPU output: %s/%s", testcase_name or "testcase", target_dir, file_name)
 
 
@@ -181,11 +192,10 @@ def _probe_endpoints_alive(ev) -> bool:
 def _resolve_with_recovery(ev, spec_providers, cli_providers, label):
     """解析 provider; 端点暂时不可用时退避等待其恢复, 而不是把用例判死。
 
-    背景(2026-09-23 实测): 跨公网跳板的链路会瞬时中断。端点一旦判死, 后续每个用例
+    背景: 跨公网跳板的链路会瞬时中断。端点一旦判死, 后续每个用例
     都会快速失败并被**消耗掉** —— 等链路几分钟后恢复时, 这些用例已经记成 FAIL,
     整批只能重跑。更糟的是这种 FAIL 与"算子精度真的不达标"在 precision_status 上
     无法区分, 得翻 xpu_metrics 才看得出是基础设施问题。
-    一次 72 例的跑批因此废掉 55 例。
     """
     import time as _time
 
@@ -235,7 +245,6 @@ def dispatch_xpu(
     switches,
     need_data: bool,
     param_order: Optional[list] = None,
-    input_recipes: Optional[dict] = None,
 ):
     """Run XPU dispatch，返回 (xpu_results, priority_provider)。
 
@@ -243,13 +252,15 @@ def dispatch_xpu(
     （→ extract_third_party None → GOLDEN_FAILURE）。
 
     参数化：不读 OpInfoKeeper / context.op_name / get_global_storage，
-    全部由调用方注入。
+    全部由调用方注入。本地执行路由在 common/xpu.py（RemoteXpuExecutor
+    委托）；spec 查询经 ttk.core_modules.common.plugin。
     """
+    from ttk.core_modules.common.plugin import SpecResolver, get_spec_class_meta
     from ttk.remote.endpoint_view import EndpointView, _parse_provider_filter
-    from ttk.test_spec import get_spec_attr, get_spec_class_meta
 
     paths = getattr(switches, "plugin_path", None) or ()
-    tp = get_spec_attr(op_name, "third_party", paths)
+    # pathway 仅参与缓存键：third_party 查询在 spec 系统内通路无关
+    tp = SpecResolver(op_name, "kernel", paths).resolve_third_party()
     if isinstance(tp, dict):
         tp = {_TP_ALIASES.get(k, k): v for k, v in tp.items()}
     meta = get_spec_class_meta(op_name, paths)
@@ -292,8 +303,7 @@ def dispatch_xpu(
         tmp_root=_tmp_root,
         runtime=getattr(switches, "run_time", 3),
         param_order=param_order,
-        dump_xpu=switches.dump_config.is_xpu_enabled(),
-        input_recipes=input_recipes,
+        dump_xpu=switches.dump_config.dump_xpu,
     )
     _record_breaker(switches, **_judge_xpu_results(xpu_results))
     _dump_xpu_outputs(xpu_results, testcase_name, switches)
@@ -301,7 +311,7 @@ def dispatch_xpu(
 
 
 def _judge_xpu_results(xpu_results: dict) -> dict:
-    """本例三方腿算成功还是失败(喂给熔断器)。任一 provider PASS 即成功。"""
+    """本例三方采集算成功还是失败(喂给熔断器)。任一 provider PASS 即成功。"""
     if any((r or {}).get("status") == "PASS" for r in xpu_results.values()):
         return {"ok": True, "reason": ""}
     errors = [(r or {}).get("error", "") for r in xpu_results.values()]
@@ -309,7 +319,7 @@ def _judge_xpu_results(xpu_results: dict) -> dict:
 
 
 def _record_breaker(switches, *, ok: bool, reason: str) -> None:
-    """记一例三方腿结果；熔断器自身出问题绝不能影响跑批。"""
+    """记一例三方采集结果；熔断器自身出问题绝不能影响跑批。"""
     from ttk.remote import xpu_breaker
 
     try:
@@ -331,7 +341,6 @@ def collect_third_party(
     param_order: Optional[list] = None,
     input_formats: Optional[list] = None,
     input_dtypes: Optional[list] = None,
-    input_recipes: Optional[dict] = None,
 ) -> Tuple[Optional[str], Optional[list], Optional[dict]]:
     """门面：采集第三方输出，返回 (priority_provider, flat_third_parties, xpu_results)。
 
@@ -365,7 +374,6 @@ def collect_third_party(
         testcase_name=testcase_name,
         switches=switches,
         need_data=need_data,
-        input_recipes=input_recipes,
         param_order=param_order,
         input_formats=input_formats,
         input_dtypes=input_dtypes,

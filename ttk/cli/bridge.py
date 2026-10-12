@@ -26,9 +26,26 @@ def _apply_io_args(sw, args):
         sw.append_mode = False
 
 
+def _split_csv(value: str) -> list:
+    """逗号串 → 剔空格、滤空段（'a, b' → ['a', 'b']——裸 split 会留 ' b' 导致静默失配）。"""
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+_FALSY_FLAG_TOKENS = ("false", "0", "no", "off")
+
+
+def parse_cli_bool(value: str) -> bool:
+    """可选布尔参数取值语义：'false'/'0'/'no'/'off' → False，其余 → True。
+
+    CLI 层唯一布尔解析（--warmup/--task-prof 的 type、-c/-d/--eager/-b 的
+    bridge 落位共用）——避免各处 lambda 只认 "false" 导致 --warmup 0 静默变 True。
+    """
+    return value.lower() not in _FALSY_FLAG_TOKENS
+
+
 def _apply_case_selection_args(sw, args):
     if hasattr(args, "testcase") and args.testcase:
-        sw.selected_testcases = [item.strip() for item in args.testcase.split(",") if item.strip()]
+        sw.selected_testcases = _split_csv(args.testcase)
     if hasattr(args, "testcase_index") and args.testcase_index:
         sw.selected_testcase_indexes = _parse_indexes(args.testcase_index)
     if hasattr(args, "testcase_count") and args.testcase_count is not None:
@@ -39,9 +56,51 @@ def _apply_filter_args(sw, args):
     if hasattr(args, "priority") and args.priority:
         sw.priorities = _parse_priorities(args.priority)
     if hasattr(args, "operator") and args.operator:
-        sw.selected_operators = tuple(args.operator.split(","))
+        sw.selected_operators = tuple(_split_csv(args.operator))
     if hasattr(args, "exclude_operator") and args.exclude_operator:
-        sw.excluded_operators = tuple(args.exclude_operator.split(","))
+        sw.excluded_operators = tuple(_split_csv(args.exclude_operator))
+
+
+def _apply_devices(sw, spec, dev_count=None):
+    """--devices ID 表达式解析（正选 '3'/'0,1'/'0-7' + '^' 剔除）。与 --dev N
+    组合：N 决定池上限，正选在池内取交集（池外正选无效）；
+    '^' 单独用时黑名单直接表达、池上限由 --dev 或探测决定。内部解析为
+    device_count + device_blacklist（黑名单 = 全量 - available），
+    由 _initialize_device_lock 统一消费。"""
+    if not isinstance(spec, str):
+        return
+    spec = spec.strip()
+    picks: set = set()
+    excludes: set = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if part.startswith("^"):
+            excludes.update(_parse_ids(part[1:].strip()))
+        else:
+            picks.update(_parse_ids(part))
+    if not picks:
+        # '^' 单独形式：正选 = 探测全量，黑名单直接表达；device_count 不动（探测默认）
+        sw.device_blacklist = tuple(sorted(excludes)) if excludes else ()
+        return
+    if excludes:
+        picks -= excludes
+    if not picks:
+        raise ValueError(f"--devices {spec!r} resolves to an empty device set")
+    count = dev_count if dev_count is not None else max(picks) + 1
+    # available 集 → 数量 + 黑名单（全量 - available；_initialize_device_lock 唯一消费面）
+    sw.device_count = count
+    sw.device_blacklist = tuple(i for i in range(count) if i not in picks)
+
+
+def _parse_ids(token: str):
+    if re.fullmatch(r"\d+", token):
+        return {int(token)}
+    m = re.fullmatch(r"(\d+)-(\d+)", token)
+    if m:
+        return set(range(int(m.group(1)), int(m.group(2)) + 1))
+    raise ValueError(f"invalid device id expression: {token!r}")
 
 
 def _apply_compare_dump_args(sw, args):
@@ -53,53 +112,41 @@ def _apply_compare_dump_args(sw, args):
         sw.compare_method = args.compare
     if hasattr(args, "golden_mode"):
         sw.golden_mode = args.golden_mode
-    if hasattr(args, "dump") and args.dump is not None:
-        _apply_dump_config(sw.dump_config, args.dump)
-    if hasattr(args, "dump_format"):
-        sw.dump_config.file_format = args.dump_format
-    if hasattr(args, "dump_on_fail") and args.dump_on_fail:
-        sw.dump_config.dump_on_fail = True
+    # DumpConfig 由本层注入（utilities 不 import common）
+    from ttk.core_modules.common.dump import DumpConfig
+
+    if hasattr(args, "dump") or hasattr(args, "dump_format") or hasattr(args, "dump_on_fail"):
+        sw.dump_config = DumpConfig.from_cli(getattr(args, "dump", None))
+        if hasattr(args, "dump_format"):
+            sw.dump_config.file_format = args.dump_format
+        if getattr(args, "dump_on_fail", False):
+            sw.dump_config.dump_on_fail = True
     if hasattr(args, "xpu_perf") and args.xpu_perf:
         sw.xpu_perf = True
-    if getattr(args, "xpu_zero_upload", False):
-        sw.xpu_zero_upload = True
-    if getattr(args, "geir_serve", False):
-        sw.geir_serve = True
 
 
 def _apply_plugin_rerun_args(sw, args):
     if hasattr(args, "plugin") and args.plugin:
         sw.plugin_path = tuple(pathlib.Path(p.strip()).resolve() for p in args.plugin.split(",") if p.strip())
     if hasattr(args, "rerun") and args.rerun:
-        sw.rerun_targets = [item.strip().lower() for item in args.rerun.split(",") if item.strip()]
+        sw.rerun_targets = [t.lower() for t in _split_csv(args.rerun)]
 
 
 def _apply_output_log_args(sw, args):
-    if hasattr(args, "title") and args.title:
-        sw.custom_columns = args.title.split(",")
-    if hasattr(args, "csv_preserve") and args.csv_preserve:
-        sw.preserve_original_csv = True
-    if hasattr(args, "single_log") and args.single_log:
-        sw.single_testcase_log_mode = True
-    if hasattr(args, "summary_print") and not args.summary_print:
-        sw.summary_print = False
     if hasattr(args, "proc_no_reuse") and args.proc_no_reuse:
         sw.proc_no_reuse = True
-    if hasattr(args, "no_memory_check") and args.no_memory_check:
-        sw.no_memory_check = True
     if hasattr(args, "task_prof") and not args.task_prof:
-        sw.TASK_PROFILING = False
+        sw.task_profiling = False
     if hasattr(args, "progress_output") and args.progress_output:
         sw.progress_output = args.progress_output
 
 
 def _apply_device_args(sw, args):
-    if hasattr(args, "device") and args.device is not None:
-        sw.device_count = args.device
-    if hasattr(args, "device_blacklist") and args.device_blacklist:
-        sw.device_blacklist = tuple(int(x) for x in args.device_blacklist.split(","))
-    if hasattr(args, "device_whitelist") and args.device_whitelist:
-        sw.device_whitelist = tuple(int(x) for x in args.device_whitelist.split(","))
+    dev_count = getattr(args, "device", None)
+    if dev_count is not None:
+        sw.device_count = dev_count
+    if hasattr(args, "devices") and getattr(args, "devices", None) is not None:
+        _apply_devices(sw, args.devices, dev_count)
     if hasattr(args, "process_count") and args.process_count is not None:
         sw.process_per_device = args.process_count
     if hasattr(args, "platform") and args.platform:
@@ -111,6 +158,8 @@ def _apply_device_args(sw, args):
 def _apply_run_args(sw, args):
     if hasattr(args, "validate_only") and args.validate_only:
         sw.validate_only = True
+    if hasattr(args, "no_memory_check") and args.no_memory_check:
+        sw.no_memory_check = True
     if hasattr(args, "warmup") and not args.warmup:
         sw.warmup = False
     if hasattr(args, "run") and args.run is not None:
@@ -122,7 +171,7 @@ def _apply_run_args(sw, args):
 
 
 def args_to_switches(args):
-    from ttk.utilities.classes import SWITCHES
+    from ttk.switches import SWITCHES
 
     sw = SWITCHES()
     sw.logging_to_file = True
@@ -143,29 +192,60 @@ def args_to_switches(args):
     _apply_output_log_args(sw, args)
     _apply_device_args(sw, args)
     _apply_run_args(sw, args)
+    # --core-limit（add_perf_args 共享注册）：统一在此解析（args_to_switches
+    # 四通路必经，收口于此）。类型守卫对齐 CLI 契约（str/None；int 供编程式调用），
+    # 同时天然跳过 MagicMock 自动属性（测试桩无需逐字段置 None）。
+    core_limit = getattr(args, "core_limit", None)
+    if isinstance(core_limit, (int, str)):
+        sw.core_limit = _parse_core_limit(core_limit)
+    # -l/--limit 与 --simt-*（device control 组 hbm_simt 档：kernel/aclnn 共享
+    # 注册，消费侧 kernel=tiling/RTS、aclnn=守门/rtLimit）
+    limit = getattr(args, "limit", None)
+    if isinstance(limit, int):
+        sw.hbm_size_limit = limit
+    simt_ub = getattr(args, "simt_ub", None)
+    if isinstance(simt_ub, int):
+        sw.force_simt_ub_size = [simt_ub] * 3
+    elif isinstance(simt_ub, (list, tuple)):
+        sw.force_simt_ub_size = list(simt_ub[:3])
+    if isinstance(getattr(args, "simt_stack_dcu", None), int):
+        sw.simt_cfg.dcu_stack = args.simt_stack_dcu
+    if isinstance(getattr(args, "simt_stack_dvg", None), int):
+        sw.simt_cfg.dvg_stack = args.simt_stack_dvg
 
     return sw
+
+
+def _apply_device_state_args(sw, args):
+    """--clear-ub/l1/l0 设备状态控制组（四通路消费；aclnn 经 AclInterface→RTSInterface 委托）。"""
+    if hasattr(args, "clear_ub") and args.clear_ub is not None:
+        sw.force_clear_ub = _parse_clean_val("UB", args.clear_ub)
+    if hasattr(args, "clear_l1") and args.clear_l1 is not None:
+        sw.force_clear_l1 = _parse_clean_val("L1", args.clear_l1)
+    if hasattr(args, "clear_l0") and args.clear_l0 is not None:
+        sw.force_clear_l0 = _parse_clean_val("L0", args.clear_l0)
 
 
 def apply_kernel_args(sw, args):
     if hasattr(args, "dynamic") and args.dynamic is not None:
         val = args.dynamic
         if isinstance(val, str):
-            val = val.lower() not in ("false", "0", "no", "off")
+            val = parse_cli_bool(val)
         sw.dyn_switches.enabled = val
     if hasattr(args, "const") and args.const is not None:
         val = args.const
         if isinstance(val, str):
-            val = val.lower() not in ("false", "0", "no", "off")
+            val = parse_cli_bool(val)
         sw.cst_switches.enabled = val
     if hasattr(args, "binary") and args.binary is not None:
         if args.binary == "release":
             sw.bin_switches.enabled = True
             sw.bin_switches.realtime = "release"
-        elif args.binary is not True:
+        else:
+            # 裸 -b（True）启用 binary 模式（默认 realtime）；-b=false 关闭
             val = args.binary
             if isinstance(val, str):
-                val = val.lower() not in ("false", "0", "no", "off")
+                val = parse_cli_bool(val)
             sw.bin_switches.enabled = val
     if hasattr(args, "compile_only") and args.compile_only:
         sw.compile_only = True
@@ -178,8 +258,7 @@ def apply_kernel_args(sw, args):
             sw.compile_options[key] = value
     if hasattr(args, "impl_mode") and args.impl_mode:
         sw.op_impl_mode = args.impl_mode
-    if hasattr(args, "limit") and args.limit is not None:
-        sw.DAVINCI_HBM_SIZE_LIMIT = args.limit
+    # -l/--limit 与 --simt-* 的解析位于 args_to_switches（kernel/aclnn 共享注册）
     if hasattr(args, "reuse_hbm") and args.reuse_hbm:
         sw.reuse_hbm = True
     if hasattr(args, "reserve_hbm") and args.reserve_hbm is not None:
@@ -194,30 +273,12 @@ def apply_kernel_args(sw, args):
         _apply_cce(sw, args.cce)
     if hasattr(args, "clear_atomic") and args.clear_atomic:
         _apply_clear_atomic(sw, args.clear_atomic)
-    if hasattr(args, "clear_ub") and args.clear_ub is not None:
-        sw.force_clear_ub = _parse_clean_val("UB", args.clear_ub)
-    if hasattr(args, "clear_l1") and args.clear_l1 is not None:
-        sw.force_clear_l1 = _parse_clean_val("L1", args.clear_l1)
-    if hasattr(args, "clear_l0") and args.clear_l0 is not None:
-        sw.force_clear_l0 = _parse_clean_val("L0", args.clear_l0)
     if hasattr(args, "force_block_dim") and args.force_block_dim is not None:
         bd = args.force_block_dim
         if isinstance(bd, int):
             sw.force_block_dim = [bd] * 3
         else:
             sw.force_block_dim = list(bd)
-    if hasattr(args, "core_limit") and args.core_limit is not None:
-        sw.core_limit = _parse_core_limit(args.core_limit)
-    if hasattr(args, "simt_ub") and args.simt_ub is not None:
-        v = args.simt_ub
-        if isinstance(v, int):
-            sw.force_simt_ub_size = [v] * 3
-        else:
-            sw.force_simt_ub_size = list(v[:3])
-    if hasattr(args, "simt_stack_dcu") and args.simt_stack_dcu is not None:
-        sw.simt_cfg.dcu_stack = args.simt_stack_dcu
-    if hasattr(args, "simt_stack_dvg") and args.simt_stack_dvg is not None:
-        sw.simt_cfg.dvg_stack = args.simt_stack_dvg
 
 
 def apply_aclnn_args(sw, args):
@@ -228,37 +289,50 @@ def apply_e2e_args(sw, args):
     if hasattr(args, "dynamic") and args.dynamic is not None:
         val = args.dynamic
         if isinstance(val, str):
-            val = val.lower() not in ("false", "0", "no", "off")
+            val = parse_cli_bool(val)
         sw.dyn_switches.enabled = val
     if hasattr(args, "const") and args.const is not None:
         val = args.const
         if isinstance(val, str):
-            val = val.lower() not in ("false", "0", "no", "off")
+            val = parse_cli_bool(val)
         sw.cst_switches.enabled = val
-    if getattr(args, "cpu", False):
-        sw.force_cpu = True
     if hasattr(args, "fullgraph"):
         sw.fullgraph = args.fullgraph
     if getattr(args, "aclgraph", False):
         sw.aclgraph_enabled = True
-    if getattr(args, "binary", None) is not None:
+    # -b/--binary：默认二进制（三种模式全生效），-b=false 恢复在线编译；显式启用
+    # 且与 --super-kernel 同开时报错（SuperKernel 编译流程要求在线编译）
+    if hasattr(args, "binary") and args.binary is not None:
         binary = args.binary
         if isinstance(binary, str):
-            binary = binary.lower() not in ("false", "0", "no", "off")
-        if binary:
-            if not sw.aclgraph_enabled:
-                raise ValueError("--binary requires --aclgraph in e2e mode")
-            if getattr(args, "super_kernel", False):
-                raise ValueError("--binary cannot be combined with --super-kernel")
-        sw.aclgraph_online_compile = not binary
+            binary = parse_cli_bool(binary)
+        if binary and getattr(args, "super_kernel", False):
+            raise ValueError("--binary cannot be combined with --super-kernel")
+        sw.e2e_binary = bool(binary)
     if hasattr(args, "core_limit") and args.core_limit is not None:
         sw.core_limit = _parse_core_limit(args.core_limit)
+    if hasattr(args, "eager") and args.eager is not None:
+        val = args.eager
+        if isinstance(val, str):
+            val = parse_cli_bool(val)
+        sw.eager_enabled = val
+        if not sw.eager_enabled and not (sw.dyn_switches.enabled or sw.cst_switches.enabled or sw.aclgraph_enabled):
+            raise ValueError("--eager=false requires a graph mode: -c/-d/--aclgraph")
+    # --core-limit 的解析位于 args_to_switches（四通路共享注册，add_perf_args）
     if getattr(args, "super_kernel", False):
         sw.super_kernel_enabled = True
-        if sw.force_cpu:
-            raise ValueError("--super-kernel cannot be combined with --cpu")
+        if getattr(args, "backend", None) == "cpu":
+            raise ValueError("--super-kernel cannot be combined with --backend cpu")
         if not (sw.dyn_switches.enabled or sw.cst_switches.enabled or sw.aclgraph_enabled):
             raise ValueError("--super-kernel requires a graph mode: -c/-d/--aclgraph")
+        # SuperKernel 要求在线编译：隐式默认二进制时自动回退在线（显式 -b 已在上面报错）
+        if getattr(sw, "e2e_binary", False):
+            sw.e2e_binary = False
+            logging.warning("--super-kernel requires online kernel compilation; forcing online compile (-b=false)")
+    # npusim 仿真要求算子在线编译（camodel 编译产物），二进制复用强制关闭
+    if getattr(args, "backend", None) == "npusim" and getattr(sw, "e2e_binary", False):
+        sw.e2e_binary = False
+        logging.warning("--binary is ignored under --backend npusim; online kernel compilation is required")
 
 
 def _parse_core_limit(value):
@@ -291,42 +365,48 @@ def _parse_core_limit(value):
     return (ai_limit, vec_limit)
 
 
-def _configure_manual_data_prepare(sw, command, directories, complete_prepare, is_prepare_dump):
-    # Kernel's legacy --no-prof dry run remains valid until a complete prepare dump is requested.
-    if command == "kernel" and not complete_prepare:
-        if directories:
-            raise ValueError("Kernel manual-data preparation requires exactly --no-prof --dump in,golden")
-        return
-    if not is_prepare_dump:
-        raise ValueError(
-            "--no-prof requires exactly --dump in,golden or --dump in; "
-            "output/full dump cannot be produced before device execution"
-        )
-    if sw.dump_config.file_format not in ("bin", "pt", "npy"):
-        raise ValueError(
-            f"--dump-format {sw.dump_config.file_format!r} is not restorable with --no-prof; use bin, pt, or npy"
-        )
-    if sw.dump_config.dump_on_fail:
-        raise ValueError("--dump-on-fail requires comparison and cannot be used with --no-prof")
-    if sw.golden_mode == "Disable" and complete_prepare:
-        raise ValueError("--no-prof requires CPU golden generation; --golden-mode Disable is invalid")
-    if sw.validate_only:
-        raise ValueError("--validate cannot be combined with --no-prof data preparation")
+def _configure_manual_data_dump(sw, command, directories):
+    """--no-prof 落盘方向：显式目录或默认目录，仅保留写侧成立的硬约束。
+
+    落什么由 DumpConfig 门控自然决定（不上板就没有 output 可落）；不做
+    "必须/禁止 out" 类人工约束。Kernel 例外：output 分配依赖 Golden，
+    落盘必须 in+golden 成对。
+    """
+    cfg = sw.dump_config
+    kernel_pair = cfg.dump_input and cfg.dump_golden
+    if command == "kernel" and not directories and not kernel_pair:
+        return  # kernel legacy dry-run：--no-prof 纯关执行，无落盘意图
     if command == "kernel" and sw.compile_only:
-        raise ValueError("--compile-only cannot be combined with Kernel manual-data preparation")
-    graph_enabled = any((sw.cst_switches.enabled, sw.dyn_switches.enabled, sw.fullgraph))
-    if command == "e2e" and graph_enabled:
-        raise ValueError("graph execution options cannot be combined with --no-prof data preparation")
+        raise ValueError("--compile-only cannot be combined with Kernel manual-data output")
+    if command == "kernel" and directories and not kernel_pair:
+        raise ValueError("Kernel manual-data output requires exactly --no-prof --dump in,golden")
+    if command == "geir" and sw.golden_mode == "XPU":
+        raise ValueError(
+            "--no-prof writes host-generated input/golden; "
+            "--golden-mode XPU (golden from third-party execution) has nothing to write"
+        )
+    if not cfg.dump_input:
+        if directories:
+            raise ValueError("--no-prof manual-data output requires --dump in")
+        raise ValueError("--no-prof requires --dump in (manual-data output)")
+    if cfg.file_format not in ("bin", "pt", "npy"):
+        raise ValueError(
+            f"--dump-format {cfg.file_format!r} is not restorable for manual-data output; use bin, pt, or npy"
+        )
+    if cfg.dump_golden and sw.golden_mode == "Disable":
+        raise ValueError("--no-prof golden output requires CPU golden generation; --golden-mode Disable is invalid")
     if len(directories) > 1:
         raise ValueError("--no-prof writes one dataset; specify at most one --manual-data-dirs path")
-    sw.manual_data_mode = "prepare"
     sw.manual_data_dirs = directories or (_default_manual_data_dir(sw),)
 
 
 def configure_manual_data(sw, args, command):
-    """Validate and resolve the E2E/ACLNN/Kernel two-stage manual-data mode."""
-    from ttk.utilities.classes import DumpLevel
+    """Resolve --manual-data-dirs and --no-prof into switches (no mode inference).
 
+    full-flow + 目录集 → load 方向（优先恢复已存用例）；--no-prof → 不上板，
+    dump 门控开启时向（显式或默认）目录落盘。上不上板与数据目录互不触发。
+    """
+    sw.no_prof = getattr(args, "no_prof", False) is True
     raw_dirs = getattr(args, "manual_data_dirs", None)
     if isinstance(raw_dirs, str):
         raw_dirs = (raw_dirs,)
@@ -336,29 +416,21 @@ def configure_manual_data(sw, args, command):
         str(pathlib.Path(item).expanduser().resolve()) for item in raw_dirs if isinstance(item, str) and item
     )
 
-    no_prof = getattr(args, "no_prof", False) is True
-    input_dump = DumpLevel.INPUT.value
-    complete_dump = input_dump | DumpLevel.GOLDEN.value
-    input_only = sw.dump_config.mode == input_dump
-    complete_prepare = sw.dump_config.mode == complete_dump
-    is_prepare_dump = no_prof and (input_only or complete_prepare)
-    if not no_prof and not directories:
-        return
-
-    if not no_prof:
+    if not sw.no_prof:
+        if not directories:
+            return
         if sw.golden_mode != "Enable":
-            raise ValueError("--manual-data-dirs replay loads an existing golden; use --golden-mode Enable")
+            raise ValueError("--manual-data-dirs loading uses an existing golden; use --golden-mode Enable")
         if sw.validate_only:
-            raise ValueError("--validate cannot be combined with --manual-data-dirs replay")
+            raise ValueError("--validate cannot be combined with --manual-data-dirs")
         if command == "kernel" and sw.compile_only:
-            raise ValueError("--compile-only cannot be combined with Kernel manual-data replay")
+            raise ValueError("--compile-only cannot be combined with Kernel --manual-data-dirs")
         if command == "e2e" and sw.force_cpu:
-            raise ValueError("--manual-data-dirs replay is the device stage and cannot use --cpu")
-        sw.manual_data_mode = "replay"
+            raise ValueError("--manual-data-dirs loading is the device stage and cannot use --backend cpu")
         sw.manual_data_dirs = directories
         return
 
-    _configure_manual_data_prepare(sw, command, directories, complete_prepare, is_prepare_dump)
+    _configure_manual_data_dump(sw, command, directories)
 
 
 def _default_manual_data_dir(sw):
@@ -375,11 +447,7 @@ def _default_manual_data_dir(sw):
 
 def _log_manual_data_configuration(sw):
     default_dir = str((pathlib.Path.cwd() / "manual_data").resolve())
-    if (
-        getattr(sw, "manual_data_mode", None) == "prepare"
-        and not sw.plugin_path
-        and sw.manual_data_dirs == (default_dir,)
-    ):
+    if sw.no_prof and not sw.plugin_path and sw.manual_data_dirs == (default_dir,):
         logging.info(
             "No --plugin was provided; using current-directory manual-data output: %s",
             default_dir,
@@ -403,8 +471,8 @@ def _detect_framework_from_csv(input_files, sheet=None):
     if not input_files:
         return "torch"
 
-    from ttk.core_modules.framework_api.framework_detector import detect_framework
-    from ttk.utilities.table_reader import read_table
+    from ttk.core_modules.common.backend import detect_framework
+    from ttk.core_modules.common.testcase import read_table
 
     try:
         header, rows = read_table(input_files[0], sheet)
@@ -440,11 +508,10 @@ def _detect_framework_from_csv(input_files, sheet=None):
 
 
 def run_with_switches(sw):
-    from ttk.core_modules.tbe_logging import default_logging_config
-    from ttk.utilities import set_global_storage
+    from ttk.core_modules.common.logging import default_logging_config
 
-    set_global_storage(sw)
-    default_logging_config(file_handler=sw.logging_to_file)
+    sw.activate()
+    default_logging_config()  # 主进程 stdout only——文件仅 per-case
     _log_manual_data_configuration(sw)
 
     from ttk.utilities import set_process_name, set_thread_name
@@ -454,28 +521,30 @@ def run_with_switches(sw):
 
     logging.info(f"Command: ttk {sw.test_mode} -i {sw.input_files[0] if sw.input_files else ''}")
 
-    if sw.test_mode == "framework-api":
-        from ttk.core_modules.framework_api.instance import FrameworkApiInstance
-
-        sw.framework = _detect_framework_from_csv(sw.input_files, getattr(sw, "sheet", None))
-        ins = FrameworkApiInstance()
+    # 注册表分发（无 if-else）。注册是 import 副作用：按 test_mode
+    # import 通路 Instance 模块触发 @register_instance（CLI 层向下依赖合法）
+    if sw.test_mode in ("op", "kernel"):
+        from ttk.core_modules.kernel import instance  # noqa: F401
+    elif sw.test_mode == "aclnn":
+        from ttk.core_modules.aclnn import instance  # noqa: F401
     elif sw.test_mode == "geir":
-        from ttk.core_modules.geir.instance import GeirInstance
+        import ttk.core_modules.geir  # noqa: F401  # Instance 宿主为包根
+    elif sw.test_mode == "framework-api":
+        sw.framework = _detect_framework_from_csv(sw.input_files, getattr(sw, "sheet", None))
+        from ttk.core_modules.framework_api import instance  # noqa: F401
+    from ttk.core_modules.common.instance import get_instance_by_name
 
-        ins = GeirInstance()
-    else:
-        from ttk.core_modules.npu.instance_refactor import NpuInstance
-
-        ins = NpuInstance()
-
-    ins.profile()
+    ins = get_instance_by_name(sw.test_mode)
+    ins.run()
     if ins.fail_count:
         raise SystemExit(1)
 
 
 def _parse_indexes(spec):
     selected = []
-    for part in spec.split(","):
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
         if "-" in part:
             lo, hi = part.split("-", 1)
             selected.extend(range(int(lo), int(hi) + 1))
@@ -486,37 +555,16 @@ def _parse_indexes(spec):
 
 def _parse_priorities(spec):
     priorities = []
-    for p in spec.split(","):
+    for p in (raw.strip() for raw in spec.split(",")):
+        if not p:
+            continue
         if "-" in p:
             lo, hi = p.split("-", 1)
+            lo, hi = lo.strip(), hi.strip()
             priorities.append((int(lo) if lo else 0, int(hi) if hi else float("inf")))
         else:
             priorities.append((int(p), int(p)))
     return tuple(priorities)
-
-
-def _apply_dump_config(dump_config, value):
-    if value == "full":
-        dump_config.enable_all()
-        return
-    modes = [raw_mode.strip() for raw_mode in value.lower().split(",") if raw_mode.strip()]
-    valid_modes = {"in", "out", "golden", "xpu", "full"}
-    unknown_modes = [mode for mode in modes if mode not in valid_modes]
-    if unknown_modes:
-        raise ValueError(
-            "Unsupported --dump mode(s): " + ", ".join(unknown_modes) + "; use full, in, out, golden, or xpu"
-        )
-    for mode in modes:
-        if mode == "in":
-            dump_config.enable_input()
-        elif mode == "out":
-            dump_config.enable_output()
-        elif mode == "golden":
-            dump_config.enable_golden()
-        elif mode == "xpu":
-            dump_config.enable_xpu()
-        elif mode == "full":
-            dump_config.enable_all()
 
 
 def _apply_cce(sw, value):

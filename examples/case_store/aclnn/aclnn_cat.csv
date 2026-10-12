@@ -1,7 +1,0 @@
-testcase_name,api_name,tensor_view_shapes,tensor_dtypes,attributes,output_tensor_indexes
-aclnnCat_float,aclnnCat,"(((3,3),(3,2)),(3,5),)","(('float32','float32'),'float32')",{'dim': -1},"(1,)"
-aclnnCat_bf16,aclnnCat,"(((4,5),(4,5)),(4,10),)","(('bfloat16','bfloat16'),'bfloat16')",{'dim': -1},"(1,)"
-aclnnCat_int8,aclnnCat,"(((13,20),(13,20)),(26,20),)","(('int8','int8'),'int8')",{'dim': 0},"(1,)"
-aclnnCat_int64,aclnnCat,"(((30,30),(30,30)),(30,60),)","(('int64','int64'),'int64')",{'dim': -1},"(1,)"
-aclnnCat_float16,aclnnCat,"(((3,4),(3,4)),(3,8),)","(('float16','float16'),'float16')",{'dim': -1},"(1,)"
-aclnnCat_int32,aclnnCat,"(((10,10),(10,10)),(10,20),)","(('int32','int32'),'int32')",{'dim': -1},"(1,)"

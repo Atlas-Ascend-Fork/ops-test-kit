@@ -12,6 +12,18 @@ TTK (ops Test Tool Kit) is a full-pipeline, automated, batch operator testing fr
 
 [中文文档](./README.md)
 
+## Architecture Layers & Test Coverage
+
+```
+┌──────────────────────────────────────────────────┐
+│  Framework Layer  ✅ Torch · TensorFlow · ...    │  ← E2E (end-to-end, full pipeline)
+├──────────────────────────────────────────────────┤
+│  Engine Layer     ✅ GEIR · ✅ ACLNN             │  ← GEIR (GE graph compile + execute) / ACLNN (engine API)
+├──────────────────────────────────────────────────┤
+│  Operator Layer   ✅ AiCore · AiCpu              │  ← Kernel (operator kernel, compile + execute)
+└──────────────────────────────────────────────────┘
+```
+
 ## Installation
 
 - Install CANN from the Ascend community: [Official Link](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850alpha001/softwareinst/instg/instg_quick.html)
@@ -31,17 +43,17 @@ Define test cases via CSV files (see [Test Case Generation](./docs/Test_Case_Gen
 # Show device info
 python3 -m ttk info
 
-# Kernel: compile + execute + precision comparison
-python3 -m ttk kernel -i examples/case_store/kernel/add.csv
+# Kernel: compile + execute + precision comparison (--plugin provides golden for some cases)
+python3 -m ttk kernel -i examples/case_store/kernel/cases.csv --plugin examples/case_store/kernel/golden.py
 
 # GEIR: GE graph compile + execute
-python3 -m ttk geir -i examples/case_store/kernel/add.csv
+python3 -m ttk geir -i examples/case_store/kernel/cases.csv --plugin examples/case_store/kernel/golden.py
 
 # ACLNN: aclnn* C API
-python3 -m ttk aclnn -i examples/case_store/aclnn/aclnn_cat.csv
+python3 -m ttk aclnn -i examples/case_store/aclnn/cases.csv --plugin examples/case_store/aclnn/golden.py
 
-# E2E: framework end-to-end (--cpu forces CPU backend)
-python3 -m ttk e2e -i examples/case_store/e2e/torch_add.xlsx
+# E2E: framework end-to-end (--backend cpu forces CPU backend)
+python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv
 ```
 
 Per-case precision status and overall pass rate are printed to the terminal. Add `-o` to output a result CSV. Run `python3 -m ttk kernel --help` for parameters.
@@ -73,7 +85,7 @@ Offline data prepare, XPU cross-check, deterministic compute, dump debug, NPUSim
 
 - [mssanitizer Adaptation](./docs/Operator_Test_Guides/mssanitizer_guide.md) (Chinese) — memory/race/sync detection
 - [msopprof Adaptation](./docs/Operator_Test_Guides/msopprof_guide.md) (Chinese) — operator performance profiling
-- [msdebug Adaptation](./docs/Operator_Test_Guides/msdebug适配方法指南.md) (Chinese) — operator source-level debugging
+- [msdebug Adaptation](./docs/Operator_Test_Guides/msdebug_guide.md) (Chinese) — operator source-level debugging
 
 ### FAQ
 

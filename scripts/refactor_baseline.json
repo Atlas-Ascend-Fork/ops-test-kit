@@ -1,0 +1,324 @@
+{
+  "import_direction": {
+    "ttk/core_modules/aclnn/instance.py": {
+      "ttk.core_modules.kernel.compile.compiler": "helper kernel 编译为 kernel/aclnn 执行链共享设施"
+    },
+    "ttk/core_modules/aclnn/runtime.py": {
+      "ttk.core_modules.kernel.runtime": "RTSInterface 为 kernel/aclnn 共享的运行时封装"
+    },
+    "ttk/core_modules/common/simulator/sim_profiling.py": {
+      "ttk.core_modules.aclnn.result": "仿真复用各通路结果与执行结构",
+      "ttk.core_modules.kernel.execute": "同上",
+      "ttk.core_modules.kernel.info_keeper": "同上",
+      "ttk.core_modules.kernel.result": "复用 kernel 结果数据类"
+    },
+    "ttk/core_modules/framework_api/execute.py": {
+      "ttk.core_modules.kernel.device_state": "e2e 与 kernel 共用设备状态清理（e2e 同进程轮前 RTS 清）"
+    },
+    "ttk/remote/client.py": {
+      "ttk.core_modules.common.plugin": "远端配置加载需插件解析"
+    },
+    "ttk/remote/dispatcher.py": {
+      "ttk.core_modules.common.process": "远端调度复用 common 进程设施"
+    },
+    "ttk/remote/server/executor.py": {
+      "ttk.core_modules.common.xpu": "server 侧复用 common.xpu"
+    },
+    "ttk/remote/server/xpu_profiler.py": {
+      "ttk.core_modules.common.profiler.torch_profiler": "XPU pass 共享引擎（resolve_activities/summarize_events）同源防漂移（pass 归 server 唯一消费方）"
+    },
+    "ttk/remote/server/xpu_server.py": {
+      "ttk.core_modules.common.xpu": "server 侧复用 common.xpu"
+    }
+  },
+  "ruff": {
+    "ttk/_env.py": {
+      "C901": 2
+    },
+    "ttk/cli/bridge.py": {
+      "C901": 3
+    },
+    "ttk/core_modules/aclnn/execute.py": {
+      "C901": 2,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/aclnn/golden.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/aclnn/hccl_cascade.py": {
+      "C901": 4,
+      "PLR0913": 15,
+      "PLR0915": 3
+    },
+    "ttk/core_modules/aclnn/hccl_multi_device.py": {
+      "C901": 2,
+      "PLR0913": 2,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/aclnn/instance.py": {
+      "PLR0915": 1
+    },
+    "ttk/core_modules/aclnn/result.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/aclnn/testcase.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/aclnn/worker.py": {
+      "C901": 1,
+      "PLR0913": 8
+    },
+    "ttk/core_modules/common/comparison/comparison.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/comparison/cross_check.py": {
+      "PLR0913": 3
+    },
+    "ttk/core_modules/common/comparison/mix_tolerance.py": {
+      "PLR0913": 2
+    },
+    "ttk/core_modules/common/comparison/registry.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/common/comparison/resolve.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/common/device/platform.py": {
+      "C901": 2
+    },
+    "ttk/core_modules/common/dump/manual_data.py": {
+      "C901": 1,
+      "PLR0913": 2,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/common/instance.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/invoke.py": {
+      "C901": 2
+    },
+    "ttk/core_modules/common/plugin/spec_loader.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/plugin/spec_validator.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/process/simple_command.py": {
+      "C901": 1,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/common/profiler/factory.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/profiler/ms_profiler.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/common/testcase/api_base.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/testcase/api_param.py": {
+      "C901": 3,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/common/testcase/base.py": {
+      "C901": 1,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/common/testcase/batch_replace.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/common/testcase/factory.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/testcase/field_parser.py": {
+      "C901": 6,
+      "PLR0913": 1
+    },
+    "ttk/core_modules/common/testcase/infershape.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/common/xpu.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/adapter.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/api_model.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/api_param.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/compare.py": {
+      "PLR0913": 3
+    },
+    "ttk/core_modules/framework_api/execute.py": {
+      "C901": 1,
+      "PLR0913": 2,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/framework_api/golden.py": {
+      "C901": 1,
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/input_generate.py": {
+      "C901": 1,
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/testcase.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/tf/__init__.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/tf/graph_runner.py": {
+      "C901": 1,
+      "PLR0913": 3,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/framework_api/torch/__init__.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/torch/graph_runner.py": {
+      "C901": 2,
+      "PLR0913": 2,
+      "PLR0915": 2
+    },
+    "ttk/core_modules/framework_api/torch/multi_device.py": {
+      "C901": 2,
+      "PLR0913": 22,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/framework_api/torch/npu_declaration.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/torch/param_extractor.py": {
+      "C901": 8,
+      "PLR0913": 1,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/framework_api/torch/pyi_loader.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/torch/type_inference.py": {
+      "C901": 4,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/framework_api/utils.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/worker.py": {
+      "C901": 5,
+      "PLR0913": 14,
+      "PLR0915": 2
+    },
+    "ttk/core_modules/geir/compare.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/geir/graph_builder.py": {
+      "PLR0913": 4
+    },
+    "ttk/core_modules/geir/proto_loader.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/geir/result.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/geir/worker.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/kernel/compare.py": {
+      "C901": 1,
+      "PLR0913": 2
+    },
+    "ttk/core_modules/kernel/compile/binary_match.py": {
+      "C901": 5,
+      "PLR0913": 1
+    },
+    "ttk/core_modules/kernel/compile/dynamic.py": {
+      "C901": 1,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/kernel/compile/result.py": {
+      "PLR0913": 4
+    },
+    "ttk/core_modules/kernel/execute.py": {
+      "C901": 2,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/kernel/info_keeper.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/kernel/input_generate.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/kernel/instance.py": {
+      "PLR0915": 1
+    },
+    "ttk/core_modules/kernel/operator/op_interface.py": {
+      "C901": 3,
+      "PLR0913": 3
+    },
+    "ttk/core_modules/kernel/operator/registries.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/kernel/result.py": {
+      "C901": 1,
+      "PLR0913": 1
+    },
+    "ttk/core_modules/kernel/runtime/adx_interface.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/kernel/runtime/rts_interface.py": {
+      "C901": 1,
+      "PLR0913": 1
+    },
+    "ttk/core_modules/kernel/testcase.py": {
+      "C901": 2,
+      "PLR0913": 1
+    },
+    "ttk/core_modules/kernel/worker.py": {
+      "PLR0913": 1
+    },
+    "ttk/remote/client.py": {
+      "PLR0913": 2
+    },
+    "ttk/remote/dispatcher.py": {
+      "PLR0913": 3
+    },
+    "ttk/remote/server/config.py": {
+      "C901": 1
+    },
+    "ttk/remote/server/container.py": {
+      "C901": 1,
+      "PLR0913": 1
+    },
+    "ttk/remote/server/executor.py": {
+      "C901": 3,
+      "PLR0913": 8
+    },
+    "ttk/remote/server/xpu_server.py": {
+      "C901": 1,
+      "PLR0913": 2
+    },
+    "ttk/remote/xpu_collector.py": {
+      "PLR0913": 1
+    },
+    "ttk/utilities/dtypes.py": {
+      "C901": 1,
+      "PLR0913": 1
+    },
+    "ttk/utilities/string.py": {
+      "C901": 1
+    }
+  },
+  "underscore": {
+    "ttk/core_modules/aclnn/golden.py": {
+      "ttk.core_modules.common.invoke:_framework_of": "golden 复用框架探测辅助函数"
+    },
+    "ttk/core_modules/kernel/golden.py": {
+      "ttk.core_modules.common.comparison.resolve:_BIN_DTYPES": "golden 复用比较层的量化 dtype 集合",
+      "ttk.core_modules.common.invoke:_framework_of": "golden 复用框架探测辅助函数"
+    }
+  }
+}

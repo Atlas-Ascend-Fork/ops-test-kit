@@ -1,5 +1,0 @@
-testcase_name,api_name,tensor_view_shapes,tensor_dtypes,attributes,output_tensor_indexes
-aclnnSplitTensor_float,aclnnSplitTensor,"((4,2),((2,2),(2,2)))","('float32',)","{'splitSections': 2, 'dim': 0}","(1,)"
-aclnnSplitTensor_float16,aclnnSplitTensor,"((6,3),((2,3),(2,3),(2,3)))","('float16',)","{'splitSections': 2, 'dim': 0}","(1,)"
-aclnnSplitTensor_split_dim1,aclnnSplitTensor,"((3,6),((3,2),(3,2),(3,2)))","('float32',)","{'splitSections': 2, 'dim': -1}","(1,)"
-aclnnSplitTensor_int32,aclnnSplitTensor,"((8,4),((3,4),(3,4),(2,4)))","('int32',)","{'splitSections': 3, 'dim': 0}","(1,)"

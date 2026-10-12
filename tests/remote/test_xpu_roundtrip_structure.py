@@ -38,7 +38,7 @@ def _sample():
 
 def test_input_direction_client_to_server(tmp_path):
     """方向 1: client 序列化 → server match_params_v1 恢复嵌套+None。"""
-    from ttk.remote.server.execution_container import match_params_v1
+    from ttk.remote.server.executor import match_params_v1
 
     A, B, C, D, E = _sample()
     inputs = [(A, B), C, None, (D, E)]
@@ -98,8 +98,7 @@ def _complex32_storage():
 def test_complex32_input_direction(tmp_path):
     """complex32 输入方向：schema logical_dtype → server 还原 torch.complex32 逻辑张量。"""
     torch = pytest.importorskip("torch")
-    from ttk.remote.server.execution_container import match_params_v1
-    from ttk.remote.server.executor import _to_vendor_tensor
+    from ttk.remote.server.executor import _to_vendor_tensor, match_params_v1
 
     storage = _complex32_storage()
     schema = _build_input_schema(inputs=[storage], input_names=["x"], input_dtypes=["complex32"])

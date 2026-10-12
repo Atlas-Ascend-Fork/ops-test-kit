@@ -1,3 +1,0 @@
-testcase_name,api_name,tensor_view_shapes,tensor_dtypes,precision_tolerances,absolute_precision,input_data_ranges
-aclnnMaskedSelect_elewise,aclnnMaskedSelect,"((2,4),(2,4),(8,))","('float32','bool','float32')","((0,0),)",0,"((-2,2),(0,0))"
-aclnnMaskedSelect_brc,aclnnMaskedSelect,"((2,4),(2,1),(8,))","('float32','bool','float32')","((0,0),)",0,"((-2,2),(0,1))"

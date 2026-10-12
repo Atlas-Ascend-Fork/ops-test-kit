@@ -39,9 +39,9 @@ from ttk.remote import DATA, ExecutionSpec, xpu_collector
 )
 def test_format_xpu_metrics(raw, expected_status, has_perf):
     """_format_xpu_metrics: PASS 带 perf / FAIL 不带 perf。"""
-    from ttk.core_modules.npu.op.profiling_structure import _format_xpu_metrics
+    from ttk.core_modules.common.result import format_xpu_metrics
 
-    result = _format_xpu_metrics(raw)
+    result = format_xpu_metrics(raw)
     for provider in raw:
         assert result[provider]["status"] == expected_status
         if has_perf:

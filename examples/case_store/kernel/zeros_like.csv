@@ -1,5 +1,0 @@
-testcase_name,op_name,input_shapes,input_dtypes,input_formats,output_shapes,output_dtypes,output_formats,input_data_ranges,precision_tolerances,absolute_precision
-zeros_like_3,zeros_like,"((1, 2, 6),)","('int32',)","('ND',)","((1, 2, 6),)","('int32',)","('ND',)","((None, None),)","((0, 0),)",0
-zeros_like_2,zeros_like,"((3, 3),)","('int32',)","('ND',)","((3, 3),)","('int32',)","('ND',)","((None, None),)","((0, 0),)",0
-zeros_like_1,zeros_like,"((1,),)","('int32',)","('ND',)","((1,),)","('int32',)","('ND',)","((None, None),)","((0, 0),)",0
-zeros_like_4,zeros_like,"((52, 10, 3, 56),)","('int32',)","('ND',)","((52, 10, 3, 56),)","('int32',)","('ND',)","((None, None),)","((0, 0),)",0

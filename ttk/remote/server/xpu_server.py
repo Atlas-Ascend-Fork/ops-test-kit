@@ -11,9 +11,9 @@
 """
 xpu_server - TTK Remote XPU Execution Server.
 
-Deployment constraint: MUST NOT import outside the ttk.remote.server package
-(no ttk.core_modules, no ttk.remote) — the server deploys standalone on the XPU
-box, which has no TTK framework installed.
+部署形态：整仓部署（ttk 与 server 同仓同源——executor 经
+ttk.core_modules.common.xpu / common.profiler 消费单份契约与共享引擎）。
+XPU 机器上克隆/拷贝整个 ttk 仓（或 pip 安装）后启动，命令见 Quick start。
 
 Quick start:
     python -m ttk.remote.server.xpu_server --port 9090
@@ -25,9 +25,6 @@ All options:
         --config xpu_server.yaml  # 配置文件路径
         --devices 0,1        # 设备 ID 列表（默认：0）
         --dry-run            # 空跑模式（返回随机数据）
-
-Full deployment guide (plain HTTP / mTLS / per-process / per-container):
-    ttk/remote/server/README.md
 """
 
 import argparse
@@ -49,10 +46,12 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from ttk.core_modules.common.xpu import XPU_DATA as DATA
+from ttk.core_modules.common.xpu import XPU_PERF as PERF
+
 from . import executor
 from .config import detect_hardware, get_framework, load_server_config
 from .container import _run_in_container
-from .execution_container import DATA, PERF
 
 CHUNK_SIZE = 64 * 1024  # 64KB
 
@@ -88,7 +87,7 @@ def _build_device_opts(handler, n):
       - env：sandbox=none 时 {visible_env: str(n)}（forkserver 不继承 os.environ，显式传）
 
     fail-fast：sandbox=docker + 非cpu 但 profile 缺 docker_args → 返回 ok=False/http_status=500
-    （检查在 render 前，防 .format(None) 崩）。执行隔离单测①-⑤覆盖此分支。
+    （检查在 render 前，防 .format(None) 崩）。执行隔离单测已覆盖此分支。
     """
     if not handler.use_device:
         return {"device_id": "cpu"}
@@ -180,7 +179,7 @@ def _is_device_healthy(device_id, cooldown_s):
     return ts is None or (time.time() - ts) >= cooldown_s
 
 
-SERVER_FEATURES = ["zero_upload", "keepalive"]
+SERVER_FEATURES = ["keepalive"]
 _FORKSERVER_CTX = None
 
 
@@ -458,10 +457,7 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
                     "device_count": self.device_count,
                     "hardware": self.hardware,
                     "providers": providers,
-                    # 能力声明: 客户端据此决定是否启用。免传输对旧服务端**不向后兼容**
-                    # —— 客户端不发 body, 旧服务端看到 Content-Length:0 却有 input_count>0,
-                    # 会报出一个看起来像参数绑定 bug 的 400(实测 SFL 性能档 200 例因此全废),
-                    # 所以必须先协商再启用, 不能靠"试了再回落"。
+                    # 能力声明（keepalive）：客户端连接复用协商依据。
                     "features": SERVER_FEATURES,
                 },
             )
@@ -643,9 +639,6 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
             attrs = json.loads(attrs_raw)
         except json.JSONDecodeError:
             attrs = {}
-        # 免上传：客户端只发生成配方 + 每片叶子的内容指纹，本端按配方重算再校验。
-        input_recipes = _parse_json_header(self._get_header("X-Input-Recipes", ""))
-        input_digests = _parse_json_header(self._get_header("X-Input-Digests", ""))
         param_order_raw = self._get_header("X-Param-Order", "")
         param_order = None
         if param_order_raw:
@@ -654,8 +647,6 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 param_order = None
         return {
-            "input_recipes": input_recipes,
-            "input_digests": input_digests,
             "tenant_id": tenant_id,
             "mode": mode,
             "exec_type": exec_type,
@@ -724,8 +715,6 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
             "attrs": parsed["attrs"],
             "tmp_in_path": tmp_in,
             "input_count": parsed["input_count"],
-            "input_recipes": parsed.get("input_recipes"),
-            "input_digests": parsed.get("input_digests"),
             "device_id": opts["device_id"],
             "use_device": self.use_device,
             "output_dir": req_dir,
@@ -882,7 +871,13 @@ def _apply_handler_config(handler, cfg, role, device_ids, use_device, dry_run, s
     handler.provider_framework = cfg["provider_framework"]
     handler.tenant_manager = TenantManager(sync_base_dir)
     handler.dry_run = dry_run
-    handler.frameworks = _detect_frameworks()
+    # providers 白名单（README：不配 = 探测到什么暴露什么；配置后仅保留
+    # 白名单 ∩ 已探测，未安装的条目静默忽略）。
+    detected = _detect_frameworks()
+    providers_whitelist = cfg.get("providers")
+    if providers_whitelist:
+        detected = {name: ok for name, ok in detected.items() if name in providers_whitelist}
+    handler.frameworks = detected
     handler.device_count = len([d for d in device_ids if d != "cpu"])
     handler.use_device = use_device
     handler.sandbox = cfg["sandbox"]

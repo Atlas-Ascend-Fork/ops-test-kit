@@ -18,7 +18,7 @@ TTK 的四种测试模式对应昇腾技术栈的不同层级，越往上覆盖�
 └──────────────────────────────────────────────────┘
 ```
 
-不同层级使用不同的测试用例结构，模式选错会导致用例解析失败。根据表头自动判断模式（详见各 skill）。输入支持 CSV 与 Excel(.xlsx)，详见 [用例生成](./docs/Test_Case_Generation.md)。
+不同层级使用不同的测试用例结构，**测试模式由 CLI 子命令唯一决定**（模式选错会导致用例解析失败；如何按 CSV 内容选择子命令详见各 skill）。输入支持 CSV、Excel(.xlsx/.xlsm) 与 zip（打包多个 csv 一次运行），详见 [用例生成](./docs/Test_Case_Generation.md)。
 
 ## 使用方式
 
@@ -26,9 +26,9 @@ TTK 的四种测试模式对应昇腾技术栈的不同层级，越往上覆盖�
 - Kernel 模式：`python3 -m ttk kernel -i cases.csv`
 - GEIR 模式：`python3 -m ttk geir -i cases.csv`
 - ACLNN 模式：`python3 -m ttk aclnn -i cases.csv`
-- E2E 模式：`python3 -m ttk e2e -i cases.csv`（默认自动探测 NPU；`--cpu` 强制 CPU）
+- E2E 模式：`python3 -m ttk e2e -i cases.csv`（默认自动探测 NPU；`--backend cpu` 强制 CPU）
 
-> 输入支持 CSV 与 Excel(.xlsx)；Excel 默认读首个工作表，用 `--sheet` 指定，如 `ttk kernel -i cases.xlsx --sheet T2`。详见 [任务执行](./docs/Task_Execution.md)。
+> 输入支持 CSV、Excel(.xlsx/.xlsm) 与 zip（打包多个 csv）；Excel 默认读首个工作表，用 `--sheet` 指定，如 `ttk kernel -i cases.xlsx --sheet T2`。详见 [任务执行](./docs/Task_Execution.md)。
 
 验证 NPU 环境：`python3 -m ttk info`
 
@@ -40,6 +40,7 @@ TTK 的四种测试模式对应昇腾技术栈的不同层级，越往上覆盖�
 | 编写用例 | ttk-how-write-case | 写用例、生成CSV、CSV字段、TensorList、动态shape |
 | 诊断失败 | ttk-how-diagnose | 测试失败、精度不通过、编译报错、执行超时、排障 |
 | 编写插件 | ttk-how-write-plugin | TestSpec、__spec__、算子测试规范编写 |
+| Profiling转用例 | ttk-prof2case | profiling报告、kernel_details.csv、真实业务shape转用例、msprof导出；支持 kernel/aclnn/e2e/geir 四种目标模式（由用户提示词决定） |
 
 > 读取 `.claude/skills/{技能名}/SKILL.md` 获取详细工作流程。
 
@@ -47,7 +48,7 @@ TTK 的四种测试模式对应昇腾技术栈的不同层级，越往上覆盖�
 
 - 用例示例：`examples/case_store/`
 - 详细文档：`docs/`
-- 插件示例：算子仓库 `tests/assets/` 目录下的 `golden.py` / `input.py`
+- 插件示例：本仓库 `examples/case_store/kernel/golden.py`、`examples/case_store/aclnn/golden.py`、`ttk/core_modules/common/plugin/examples/`；外部算子仓库的插件位于其 `tests/assets/` 目录（`golden.py` / `input.py`）
 
 ## Commit 规范
 

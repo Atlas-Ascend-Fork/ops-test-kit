@@ -50,12 +50,12 @@ C++ 源码和编译后的可执行文件默认保留在 `geir/` 目录下，输�
 
 | 目录/文件 | 说明 |
 |-----------|------|
-| `geir/const/` | 静态 shape（默认）模式生成的 C++ 源码 |
-| `geir/dynamic/` | 动态 shape 模式（`-d`）生成的 C++ 源码 |
-| `geir/const/binary/` | 静态 shape + 二进制复用（`-b release`）生成的 C++ 源码 |
-| `geir/<testcase_name>.cpp` | 每个用例生成的 C++ 测试程序源码 |
+| `geir/ops/<op_name>.cpp` | 每个算子生成的 C++ 测试程序源码（按算子缓存复用） |
+| `geir/const/<testcase_name>.json` | 静态 shape（默认）模式的图配置 |
+| `geir/dynamic/<testcase_name>.json` | 动态 shape 模式（`-d`）的图配置 |
+| `geir/const/binary/`、`geir/dynamic/binary/` | 二进制复用（`-b`）组合下对应模式的图配置目录 |
 
-源码文件以用例名命名，执行后输入 bin 文件自动清理；C++ 源码和可执行文件默认保留。
+C++ 源码按算子名生成并缓存，图配置以用例名命名；执行后输入 bin 文件自动清理，C++ 源码和可执行文件默认保留。
 
 ## 结果 CSV
 

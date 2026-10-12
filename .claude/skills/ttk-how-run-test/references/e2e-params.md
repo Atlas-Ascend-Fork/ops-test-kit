@@ -4,25 +4,27 @@
 
 | 参数 | 说明 | 默认 |
 |------|------|------|
-| `--cpu` | 强制 CPU 执行（跳过 NPU 自动探测） | 关闭 |
+| `--backend cpu` | 强制 CPU 执行（跳过 NPU 自动探测） | 关闭 |
 | `--no-prof` | 仅准备输入/golden，不执行主 API | 关闭 |
+| `--eager` | eager（单算子直调）执行模式；`--eager=false` 跳过 eager、精度主判据锚定图模式（需搭配 -c/-d/--aclgraph） | 开启 |
 | `--fullgraph` | Graph 模式（torch.compile）；0=禁用，1=启用 | 0 |
-| `--aclgraph` | aclgraph 模式（torch.compile reduce-overhead） | 关闭 |
+| `--aclgraph` | aclgraph 模式（`torch.compile(dynamic=False)` + npugraph_ex backend），算子编译模式随 `-b` | 关闭 |
+| `-b`/`--binary` | 二进制复用（默认开启，三种模式全生效）：eager `jitCompile=disable`、`-c`/`-d` GE 图 `ge.jit_compile=0`、aclgraph `static_kernel_compile=False`；`-b=false` 恢复在线编译。不能与 `--super-kernel` 显式同用；npusim 下强制在线 | 开启 |
 | `-d`/`--dynamic` | 动态图 | 默认关闭 |
 | `-c`/`--const` | 静态图 | 默认关闭 |
-| `--core-limit` | 限制核数上限：`N` 仅限 AI 核，`a,v` 分别限制。图模式映射 `ge.aicoreNum`（未设置侧回落物理核数）；aclgraph 模式经 `torch.npu.set_device_limit` 下发（每进程仅首次生效）；eager 不支持 | 无 |
-| `--super-kernel` | 被测算子走 SuperKernel 编译流程（功能验证）：以 api_name 为 scope 标定（GE 图模式 -c/-d 与 aclgraph 模式均适用）。需搭配 -c/-d/--aclgraph，不支持 --cpu | 关闭 |
+| `--core-limit` | 限制核数上限：`N` 仅限 AI 核，`a,v` 分别限制。图模式经 torchair `ge_config.aicore_num` 下发（未设置侧回落物理核数）；aclgraph 模式经 `torch_npu.npu.npugraph_ex.scope.limit_core_num` 下发（每次图捕获均生效）；eager 不支持 | 无 |
+| `--super-kernel` | 被测算子走 SuperKernel 编译流程（功能验证）：以 api_name 为 scope 标定（GE 图模式 -c/-d 与 aclgraph 模式均适用）。需搭配 -c/-d/--aclgraph，不支持 --backend cpu；要求在线编译（显式 `-b` 同用报错，隐式默认二进制自动回退在线并告警） | 关闭 |
 
-> **仿真**：E2E 支持 `--backend npusim` 无卡仿真，但仅 **eager** 执行（graph/aclgraph/fullgraph 禁用），且仅支持 aclnn 算子——非 aclnn 的 legacy 自定义算子（如 `torch_npu.npu_conv2d`）会被 torch_npu 拒绝。详见 `npusim-params.md`。
+> **仿真**：E2E 支持 `--backend npusim` 无卡仿真，建议仅用 **eager**（graph/aclgraph/fullgraph 未验证、可能失败），且仅支持 aclnn 算子——非 aclnn 的 legacy 自定义算子（如 `torch_npu.npu_conv2d`）会被 torch_npu 拒绝；仿真要求算子在线编译，`-b` 强制关闭。详见 `npusim-params.md`。
 
-使用 `--aclgraph --super-kernel` 时，SuperKernel 在线编译失败会将用例标记为失败，并在日志中报告 `SUPER_KERNEL_COMPILE_FAILURE` 和编译产物目录；即使后端回退到已有二进制并通过精度比较，也不能作为 SuperKernel 验证通过。允许复用已有的有效编译缓存。
+图模式在线编译一旦实际触发并失败（后端可能回退到已有二进制），用例仍标记为失败，并在日志中报告 `KERNEL_COMPILE_FAILURE` 和编译产物目录；即使回退产物通过精度比较，也不能作为 SuperKernel/在线编译验证通过。允许复用已有的有效编译缓存。
 
 ## 后端依赖
 
 | 后端 | 依赖 |
 |------|------|
 | NPU | `torch` + `torch_npu`（默认自动探测） |
-| CPU | `torch`（`--cpu` 强制） |
+| CPU | `torch`（`--backend cpu` 强制） |
 
 ## 执行流程
 

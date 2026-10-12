@@ -8,37 +8,38 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-from ttk.cli.bridge import args_to_switches, run_with_switches
-from ttk.cli.common import add_common_args, validate_xpu_perf_precondition
-from ttk.cli.device import add_device_args
+from ttk.cli.bridge import (
+    _apply_device_state_args,
+    args_to_switches,
+    configure_manual_data,
+    parse_cli_bool,
+    run_with_switches,
+)
+from ttk.cli.common import add_common_args, add_perf_args, normalize_xpu_options
+from ttk.cli.device import add_device_args, add_device_control_args
+from ttk.cli.sim_args import add_sim_args, apply_sim_args
 
 
 def register_geir_command(subparsers):
-    parser = subparsers.add_parser("geir", help="GEIR mode: GE graph compile + execute + compare")
+    parser = subparsers.add_parser(
+        "geir",
+        usage="ttk geir [OPTION]... -i FILE",
+        help="GEIR mode: GE graph compile + execute + compare",
+    )
     add_common_args(parser)
     add_device_args(parser)
+    add_device_control_args(parser)
+    add_perf_args(parser)
     _add_geir_args(parser)
+    # geir 无 npusim/cpu 形态——--backend 仅声明执行后端
+    add_sim_args(parser, backends=("npu",))
     parser.set_defaults(handler=_handle_geir)
+    return parser
 
 
 def _add_geir_args(parser):
-    parser.add_argument(
-        "-c",
-        "--const",
-        nargs="?",
-        const="true",
-        default=None,
-        help="Enable const (static) shape test. Default: enabled. -c=false to disable.",
-    )
-    parser.add_argument(
-        "-d",
-        "--dynamic",
-        nargs="?",
-        const="true",
-        default=None,
-        help="Enable dynamic shape test. Default: disabled. -d or -d=true to enable.",
-    )
-    parser.add_argument(
+    group = parser.add_argument_group("geir mode")
+    group.add_argument(
         "-b",
         "--binary",
         nargs="?",
@@ -46,26 +47,21 @@ def _add_geir_args(parser):
         default=None,
         help="Binary reuse: ge.jit_compile=0; use -b=release to reuse compiled kernel",
     )
-    parser.add_argument(
-        "--xpu-perf",
-        dest="xpu_perf",
-        action="store_true",
-        help="Collect 3rd-party (XPU) performance per case. "
-        "Requires remote XPU config (ttk.conf.yaml or --config). PERF-only.",
+    group.add_argument(
+        "-c",
+        "--const",
+        nargs="?",
+        const="true",
+        default=None,
+        help="Enable const (static) shape test. Default: enabled. -c=false to disable.",
     )
-    parser.add_argument(
-        "--geir-serve",
-        dest="geir_serve",
-        action="store_true",
-        help="Keep one long-lived GEIR executor process per device instead of spawning one per case, "
-        "so GEInitialize (measured ~8.5s) runs once per batch. Falls back to one-shot on any error.",
-    )
-    parser.add_argument(
-        "--xpu-zero-upload",
-        dest="xpu_zero_upload",
-        action="store_true",
-        help="Send input generation recipes + per-tensor sha256 instead of the input data itself; "
-        "the server regenerates and verifies each digest. Falls back to full upload on mismatch.",
+    group.add_argument(
+        "-d",
+        "--dynamic",
+        nargs="?",
+        const="true",
+        default=None,
+        help="Enable dynamic shape test. Default: disabled. -d or -d=true to enable.",
     )
 
 
@@ -76,15 +72,18 @@ def _handle_geir(args):
     sw.cst_switches.enabled = True
     sw.dyn_switches.enabled = False
     if args.const is not None:
-        sw.cst_switches.enabled = args.const.lower() not in ("false", "0", "no", "off")
+        sw.cst_switches.enabled = parse_cli_bool(args.const)
     if args.dynamic is not None:
-        sw.dyn_switches.enabled = args.dynamic.lower() not in ("false", "0", "no", "off")
+        sw.dyn_switches.enabled = parse_cli_bool(args.dynamic)
     if args.binary is not None:
         val = args.binary
         if isinstance(val, str):
-            val = val.lower() not in ("false", "0", "no", "off")
+            val = parse_cli_bool(val)
         sw.geir_binary = val
     else:
         sw.geir_binary = False
-    validate_xpu_perf_precondition(sw)
+    _apply_device_state_args(sw, args)
+    apply_sim_args(sw, args)
+    configure_manual_data(sw, args, "geir")
+    normalize_xpu_options(sw)
     run_with_switches(sw)

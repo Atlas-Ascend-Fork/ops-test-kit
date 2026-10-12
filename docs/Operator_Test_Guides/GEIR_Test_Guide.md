@@ -55,7 +55,7 @@ python3 -m ttk info
 
 确认设备信息正常后再执行测试。
 
-> **GEIR 复用 Kernel 的 CSV 用例与 TestSpec 插件**：GEIR 模式以 `op_name` 为注册名，可直接复用 Kernel 的基础 CSV 示例（27 列）和 Golden/插件资产，无需为 GEIR 单独编写用例或 golden。需要精确控制图编译动态维度时，可选在末尾追加 `dyn_input_shapes` 列。
+> **GEIR 复用 Kernel 的 CSV 用例与 TestSpec 插件**：GEIR 模式以 `op_name` 为注册名，可直接复用 Kernel 的 CSV 用例与 Golden/插件资产（标准字段共 31 列 = Kernel 的 30 列 + GEIR 专属 `dyn_input_shapes`；另可按需追加 `attributes1`～`attributes9`，全量 40 列；可选列可省略——示例 `cases.csv` 实际仅用 14 列基础子集），无需为 GEIR 单独编写用例或 golden。需要精确控制图编译动态维度时，可选在末尾追加 `dyn_input_shapes` 列。
 
 # 测试用例编写
 
@@ -64,8 +64,8 @@ GEIR 模式CSV字段说明详见 [GEIR用例编写](./GEIR_Case_Writing.md)。
 以 `add.csv` 为例（与 Kernel 指南同一份文件）：
 
 ```csv
-testcase_name,network_name,op_name,input_shapes,input_dtypes,input_formats,output_shapes,output_dtypes,output_formats,input_ori_shapes,input_ori_formats,output_ori_shapes,output_ori_formats,attributes,input_data_ranges,precision_tolerances,absolute_precision,output_inplace_indexes,output_shape_unknown_indexes,is_enabled,remark,soc_series,priority,dump_file_prefix,manual_input_binaries,manual_golden_binaries,manual_xpu_binaries
-add_01,,add,"((128, 1024), (1, 1024))","('float32', 'float32')","('ND',)","((128, 1024),)","('float32',)","('ND',)","((128, 1024), (1, 1024))","('ND',)","((128, 1024),)","('ND',)",{},"((0, 0), (0, 0))","((0.001, 0.001),)",1e-8,(),(),True,,,0,,(),(),()
+testcase_name,op_name,input_shapes,input_dtypes,input_formats,output_shapes,output_dtypes,output_formats,input_ori_shapes,input_ori_formats,output_ori_shapes,output_ori_formats,attributes,input_data_ranges,precision_tolerances,absolute_precision,output_inplace_indexes,output_shape_unknown_indexes,is_enabled,remark,soc_series,priority,dump_file_prefix,manual_input_binaries,manual_golden_binaries,manual_xpu_binaries
+add_01,add,"((128, 1024), (1, 1024))","('float32', 'float32')","('ND',)","((128, 1024),)","('float32',)","('ND',)","((128, 1024), (1, 1024))","('ND',)","((128, 1024),)","('ND',)",{},"((0, 0), (0, 0))","((0.001, 0.001),)",1e-8,(),(),True,,,0,,(),(),()
 ```
 
 # 精度测试
@@ -77,7 +77,7 @@ add_01,,add,"((128, 1024), (1, 1024))","('float32', 'float32')","('ND',)","((128
 python3 -m ttk geir -i add.csv
 
 # 指定设备
-python3 -m ttk geir -i add.csv --dev 0
+python3 -m ttk geir -i add.csv --devices=0
 
 # 输出结果
 python3 -m ttk geir -i add.csv -o results.csv
@@ -88,7 +88,7 @@ python3 -m ttk geir -i add.csv -o results.csv
 GEIR 模式的完整执行流程如下：
 
 ```
-读取CSV → 构建GE图 → 图编译（含Tiling） → 生成输入数据 → 生成Golden（CPU） → NPU执行图 → 精度比对 → 输出结果
+读取CSV → 生成输入数据 → 生成Golden（CPU） → 构建GE图并图编译（含Tiling） → NPU执行图 → 精度比对 → 输出结果
 ```
 
 与 Kernel 模式相比，GEIR 将算子组装为 GE 计算图后整体编译执行，覆盖 GE 图构建、图编译、算子调度等引擎层通路，验证算子在图模式下的行为。
@@ -127,19 +127,19 @@ python3 -m ttk geir -i add.csv -b
 GEIR 模式默认会采集Profiling性能数据：
 
 ```shell
-# 默认执行（含Profiling）
+# 默认执行（含Profiling，每用例图执行 1 次）
 python3 -m ttk geir -i add.csv
 
-# 设置执行次数（默认板端3次）
-python3 -m ttk geir -i add.csv --run=5
+# 设置图执行轮数（仅在 --dl 1 确定性校验下生效，默认 3 轮）
+python3 -m ttk geir -i add.csv --run=5 --dl=1
 ```
 
 ## 性能相关参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--run` | 执行次数 | 板端3次 |
-| `--warmup` | Profiling前预热 | 开启 |
+| `--run` | 图执行轮数，仅在 `--dl 1`（确定性校验）时生效；默认模式下每用例执行 1 次 | 3 |
+| `--task-prof` | 任务级 Profiling 开关 | 开启 |
 
 # 多卡并行
 
@@ -154,14 +154,14 @@ python3 -m ttk geir -i add.csv --dev=2
 python3 -m ttk geir -i add.csv --pc=2
 
 # 指定使用卡0和卡1
-python3 -m ttk geir -i add.csv --device-whitelist=0,1
+python3 -m ttk geir -i add.csv --devices=0,1
 ```
 
 # 调试
 
 ```shell
-# 调试单个用例
-python3 -m ttk geir -i add.csv -t add_01 --single-log
+# 调试单个用例（单用例独立日志目录自动生成，无需参数）
+python3 -m ttk geir -i add.csv -t add_01
 
 # 固定随机种子（可复现）
 python3 -m ttk geir -i add.csv --seed 42
@@ -176,20 +176,19 @@ Dump 调试详见[Dump 数据调试](../Dump_Debug.md)。
 
 ```shell
 # 用 Kernel 的 CSV 跑 GEIR 图模式
-python3 -m ttk geir -i examples/case_store/kernel/add.csv
+python3 -m ttk geir -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast
 
 # 动态 shape 编译
-python3 -m ttk geir -i examples/case_store/kernel/mat_mul_v3.csv -d
+python3 -m ttk geir -i examples/case_store/kernel/cases.csv -t matmul_v3_optional_inputs -d
 
 # 使用自定义Golden插件（与 Kernel 共用同一份插件）
 python3 -m ttk geir -i add.csv --plugin /path/to/my_golden.py
 
+# GEIR 通路示例用例（dyn_input_shapes + 历史缺陷回归）
+python3 -m ttk geir -i examples/case_store/geir/cases.csv --plugin examples/case_store/geir/golden.py -c -d
+
 # 重跑精度失败的用例
 python3 -m ttk geir -i add.csv --rerun=precision_status
-
-# Excel 多 sheet 用例（默认首个工作表；--sheet 指定工作表）
-python3 -m ttk geir -i examples/case_store/geir/add.xlsx
-python3 -m ttk geir -i examples/case_store/geir/add.xlsx --sheet T2
 ```
 
 > 通用参数（用例筛选/设备并行/精度控制/调试/结果输出）见[任务执行](../Task_Execution.md)

@@ -13,8 +13,8 @@ data generator
 Module constraints (do not violate in future changes):
 - numpy-only: do NOT import torch/tensorflow (or any other framework) here, not
   even inside functions. TTK must work in environments with only numpy
-  installed (e.g. tensorflow-only e2e without torch). A historical torch.rand
-  branch broke this and was removed in the fix for issue #169.
+  installed (e.g. tensorflow-only e2e without torch); a framework RNG branch
+  here once broke such environments and was removed.
 - _sample_distinct_positions must stay O(count) in time and memory regardless
   of `total`. Replacing it with numpy.random.choice(total, count,
   replace=False) regresses to O(total) (a full permutation: ~61MB temp for an
@@ -24,7 +24,7 @@ Module constraints (do not violate in future changes):
   unique+randint ~4ms; 40M fp32 generate end-to-end 77.8s -> 0.18s.
 """
 
-__all__ = ["RandomData", "fixed_np_array"]
+__all__ = ["RandomData", "constant_array"]
 
 
 # Standard Packages
@@ -34,16 +34,17 @@ from typing import Union
 import numpy
 
 # Third-party Packages
-from .container_utils import get
-from .dtypes import get_dtype_range, resolve_custom_numpy_dtypes
+from .container import get
+from .dtypes import get_dtype_range, is_float_dtype, resolve_numpy_dtype, resolve_numpy_dtypes
 from .math import is_negative_zero, is_positive_zero
+from .shape import shape_numel
 
 DEFAULT_LOW = -2
 DEFAULT_HIGH = 2
 CHUNK_ELEMS = 4_000_000
 
 
-def fixed_np_array(dtype, shape, init_value=1):
+def constant_array(dtype, shape, init_value=1):
     """Create a numpy array filled with a fixed value, handling complex32 specially.
 
     complex32 is stored as float16 with an extra trailing dim [2] (real, imag).
@@ -70,7 +71,7 @@ def _is_native_integer(dtype) -> bool:
 
 class RandomData:
     def __init__(self, dtype: str, shape: Union[list, tuple], data_range: Union[list, tuple]):
-        self._dtype = resolve_custom_numpy_dtypes([dtype])[0]
+        self._dtype = resolve_numpy_dtypes([dtype])[0]
         self._shape = list(shape)
         self._data_range = self._replace_none_in_data_range(data_range)
 
@@ -80,36 +81,43 @@ class RandomData:
 
     def generate(self, distribution: str = "uniform"):
         if self._dtype == "uint1":
-            np_uint8 = self._random("uint8", self._shape, distribution=distribution)
-            np_bool = np_uint8.astype("bool", copy=False)
-            np_array = numpy.packbits(np_bool)
-        elif "complex" in str(self._dtype):
-            if self._dtype == "complex32":
-                shape = list(self._shape) + [1]
-                real = self._random("float16", shape, distribution=distribution)
-                imag = self._random("float16", shape, distribution=distribution, is_complex_imag=True)
-                np_array = numpy.concatenate((real, imag), axis=-1)
-            else:  # complex64 / complex128
-                bits = int(str(self._dtype)[7:])
-                fp_dtype = f"float{bits // 2}"
-                real = self._random(fp_dtype, self._shape, distribution=distribution)
-                imag = self._random(fp_dtype, self._shape, distribution=distribution, is_complex_imag=True)
-                np_array = numpy.array(real + imag * 1j)
-        elif "e8m0" in str(self._dtype):
-            # float8_e8m0 only represents positive scale powers; generate a positive range.
-            low = float(self._data_range[0])
-            high = float(self._data_range[1])
-            if not numpy.isfinite(low) or low <= 0:
-                low = 2**-3
-            if not numpy.isfinite(high) or high <= low:
-                high = 2**7
-            f32 = self._gen_uniform_data(low, high, "float32", self._shape)
-            from .dtypes import numpy_float8_e8m0
+            return self._generate_uint1(distribution)
+        if "complex" in str(self._dtype):
+            return self._generate_complex(distribution)
+        if "e8m0" in str(self._dtype):
+            return self._generate_e8m0()
+        return self._random(self._dtype, self._shape, distribution=distribution)
 
-            np_array = f32.astype(numpy_float8_e8m0())
-        else:
-            np_array = self._random(self._dtype, self._shape, distribution=distribution)
-        return np_array
+    def _generate_uint1(self, distribution: str):
+        """uint1 packs one bit per element into a uint8 bitstream (via uint8 random)."""
+        np_uint8 = self._random("uint8", self._shape, distribution=distribution)
+        np_bool = np_uint8.astype("bool", copy=False)
+        return numpy.packbits(np_bool)
+
+    def _generate_complex(self, distribution: str):
+        """complex32 interleaves float16 (real, imag) pairs in a trailing dim [2];
+        complex64/complex128 build native complex arrays from their component dtype."""
+        if self._dtype == "complex32":
+            shape = list(self._shape) + [1]
+            real = self._random("float16", shape, distribution=distribution)
+            imag = self._random("float16", shape, distribution=distribution, is_complex_imag=True)
+            return numpy.concatenate((real, imag), axis=-1)
+        bits = int(str(self._dtype)[7:])
+        fp_dtype = f"float{bits // 2}"
+        real = self._random(fp_dtype, self._shape, distribution=distribution)
+        imag = self._random(fp_dtype, self._shape, distribution=distribution, is_complex_imag=True)
+        return numpy.array(real + imag * 1j)
+
+    def _generate_e8m0(self):
+        """float8_e8m0 only represents positive scale powers; generate a positive range."""
+        low = float(self._data_range[0])
+        high = float(self._data_range[1])
+        if not numpy.isfinite(low) or low <= 0:
+            low = 2**-3
+        if not numpy.isfinite(high) or high <= low:
+            high = 2**7
+        f32 = self._gen_uniform_data(low, high, "float32", self._shape)
+        return f32.astype(resolve_numpy_dtype("float8_e8m0"))
 
     @staticmethod
     def _replace_none_in_data_range(data_range: Union[list, tuple]) -> list:
@@ -122,6 +130,12 @@ class RandomData:
 
     @staticmethod
     def _digitize_inf_nan(r, dtype: str):
+        # Integer endpoints carry no inf/nan and must bypass float64 entirely:
+        # int64/uint64 bounds beyond 2^53 are not exactly representable there,
+        # and the rounded bound leaks into the RNG range / constant fill.
+        # Float endpoints and non-finite values keep the digitize semantics below.
+        if isinstance(r, (int, numpy.integer)):
+            return int(r)
         tmp = numpy.array([r], dtype="float64")
         if numpy.isinf(tmp):
             dtype_range = get_dtype_range(dtype)
@@ -130,7 +144,7 @@ class RandomData:
             return 0
         return tmp[0]
 
-    def _get_must_contain_dataset(self, dtype, is_complex_imag: bool) -> tuple:
+    def _must_contain_values(self, dtype, is_complex_imag: bool) -> tuple:
         # border value will always be included
         replace_list = list(set(self._data_range))
         if _is_native_integer(dtype):
@@ -142,11 +156,19 @@ class RandomData:
             ]
             replace_np_array = numpy.array(clamped, dtype=dtype)
         else:
-            replace_np_array = numpy.array(replace_list, dtype="float64").astype(dtype)
-        # remove duplicate 0 in replace_np_array
+            candidates = numpy.array(replace_list, dtype="float64")
+            if not is_float_dtype(dtype):
+                # int/bool cannot represent inf/nan: digitize to dtype bounds / 0,
+                # or the astype below yields undefined values (which rc>1 mixing
+                # would then inject into the output).
+                candidates = numpy.array([self._digitize_inf_nan(x, dtype) for x in candidates], dtype="float64")
+            replace_np_array = candidates.astype(dtype)
+        # dedupe again after the dtype cast: distinct declared values can
+        # collapse into one in a narrower dtype (e.g. 3.5 vs 3.6 in bfloat16)
         replace_list = list(set(replace_np_array))
-        if "float" in str(dtype):
-            # handle -float(0) & float(0)
+        if is_float_dtype(dtype):
+            # handle -float(0) & float(0): set() keeps only one signed zero
+            # (0.0 == -0.0), so restore the other when both were declared
             positive_zero = [is_positive_zero(x) for x in self._data_range]
             negative_zero = [is_negative_zero(x) for x in self._data_range]
             if any(positive_zero) and any(negative_zero):
@@ -158,22 +180,37 @@ class RandomData:
         return tuple(replace_list)
 
     @staticmethod
-    def _is_full_value_range(dtype, low, high) -> bool:
-        s = str(dtype)
-        if "float" not in s and "double" not in s and "bfloat" not in s:
+    def _spans_dtype_range(dtype, low, high) -> bool:
+        """True when BOTH endpoints reach (>=99% of) their dtype bounds AND straddle zero.
+
+        The range form that makes linear uniform waste the dtype's dynamic
+        range, switching _random's uniform family to log-uniform sampling.
+        Each side is checked separately: an asymmetric range like [-1, finfo.max]
+        must stay on the bounded path, because the log-uniform sampler ignores
+        the declared bounds and would emit values outside input_data_ranges'
+        closed-interval contract.
+        """
+        if not is_float_dtype(dtype):
             return False
         try:
             dtype_min, dtype_max = get_dtype_range(dtype)
         except Exception:
             return False
-        max_abs = max(abs(low), abs(high))
-        dtype_max_abs = max(abs(dtype_min), abs(dtype_max))
-        if dtype_max_abs == 0:
+        if dtype_min >= 0 or dtype_max <= 0:
             return False
-        return max_abs >= dtype_max_abs * 0.99 and low < 0 < high
+        return low < 0 < high and low <= dtype_min * 0.99 and high >= dtype_max * 0.99
 
     @staticmethod
     def _gen_exponential_data(dtype, shape) -> numpy.ndarray:
+        """Generate log-uniform full-range samples into a pre-allocated typed buffer chunk by chunk.
+
+        Values are sign(uniform) * 10^randint, capped below dtype max so the cast
+        never overflows to inf. Small path (<= 2*CHUNK_ELEMS) is bitwise identical
+        to a single full-size call. The chunked path interleaves the sign and
+        exponent draws per chunk (a single full-size call draws all signs first),
+        so under a fixed seed values above the threshold differ from one full-size
+        call — the log-uniform distribution itself is unchanged.
+        """
         try:
             info = numpy.finfo(dtype)
             max_v = float(info.max)
@@ -189,34 +226,22 @@ class RandomData:
                 tiny = float(numpy.finfo(numpy.float64).tiny)
         low_exp = int(numpy.log10(tiny)) + 1
         high_exp = int(numpy.log10(max_v)) + 1
-        elem_count = int(numpy.prod(shape)) if numpy.ndim(shape) else 1
-
-        # 全尺寸路径只对小张量保留：uniform/randint/power/multiply 四个全尺寸 float64|int64
-        # 临时量 = 32 倍元素数，dim0=2^30 的 fp32 用例要 34GB，容器 32G 必 OOM，主进程被
-        # 打掉后 heartbeat 报 "Parent died (ppid->1)"、rc 仍是 0，跑批**静默截断**(issue #169
-        # 同类问题，当时漏了这条路径)。阈值以下一个元素都不改，既有用例逐位不变。
+        if low_exp >= high_exp:
+            return RandomData._gen_uniform_data(-1.0, 1.0, dtype, shape)
+        elem_count = shape_numel(shape)
         if elem_count <= 2 * CHUNK_ELEMS:
             arr = numpy.random.uniform(low=-1.0, high=1.0, size=shape)
-            if low_exp >= high_exp:
-                return arr.astype(dtype, copy=False)
             arr_exp = numpy.random.randint(low=low_exp, high=high_exp, size=shape)
             arr_pow = numpy.power(10.0, arr_exp.astype(numpy.float64))
             result = numpy.multiply(arr, arr_pow)
             return result.astype(dtype, copy=False)
-
-        # 大张量：分块算进预分配的目标类型缓冲，峰值 = 输出本身 + 一个分块的 float64 临时量。
-        # 注意分块后 RandomState 的消费次序由"先全量 uniform 再全量 randint"变成逐块交替，
-        # 取到的随机值与全尺寸路径不同(分布与"同 seed 同数据"的确定性都不变)。这条路径原本
-        # 100% OOM、一条结果都出不来，不存在需要对齐的历史基线。
         out = numpy.empty(shape, dtype=dtype)
         flat = out.ravel()
         for start in range(0, elem_count, CHUNK_ELEMS):
             end = min(start + CHUNK_ELEMS, elem_count)
-            chunk = numpy.random.uniform(low=-1.0, high=1.0, size=end - start)
-            if low_exp < high_exp:
-                chunk_exp = numpy.random.randint(low=low_exp, high=high_exp, size=end - start)
-                chunk = numpy.multiply(chunk, numpy.power(10.0, chunk_exp.astype(numpy.float64)))
-            flat[start:end] = chunk
+            arr = numpy.random.uniform(low=-1.0, high=1.0, size=end - start)
+            arr_exp = numpy.random.randint(low=low_exp, high=high_exp, size=end - start)
+            flat[start:end] = numpy.multiply(arr, numpy.power(10.0, arr_exp.astype(numpy.float64)))
         return out
 
     @staticmethod
@@ -226,7 +251,7 @@ class RandomData:
         gen.rvs consumes one numpy RandomState stream element by element, so the chunked
         output is bitwise identical to a single full-size rvs(...).astype(dtype) call.
         """
-        elem_count = int(numpy.prod(shape)) if numpy.ndim(shape) else 1
+        elem_count = shape_numel(shape)
         if elem_count <= 2 * CHUNK_ELEMS:
             return gen.rvs(shape).astype(dtype, copy=False)
         out = numpy.empty(shape, dtype=dtype)
@@ -244,7 +269,7 @@ class RandomData:
         (low + (high-low) * next_double), so the chunked output is bitwise identical
         to a single full-size uniform(...).astype(dtype) call.
         """
-        elem_count = int(numpy.prod(shape)) if numpy.ndim(shape) else 1
+        elem_count = shape_numel(shape)
         if elem_count <= 2 * CHUNK_ELEMS:
             return numpy.random.uniform(low, high, shape).astype(dtype, copy=False)
         out = numpy.empty(shape, dtype=dtype)
@@ -278,23 +303,26 @@ class RandomData:
     def _random(
         self, dtype, shape: Union[list, tuple], is_complex_imag: bool = False, distribution: str = "uniform"
     ) -> numpy.ndarray:
+        """Scalar-engine sampling: one decision level per orthogonal concern.
+
+        L0 range form:      constant (single value / both-nan) → constant fill
+        L1 distribution:    normal → truncated normal; otherwise the uniform family
+        L2 uniform family:  dtype overflow clamp (float64) → range form:
+                            spans dtype range → log-uniform, else linear uniform
+        Tail:               must-contain border values mixed in (_mix_must_contain_values)
+
+        The float64 full-range shadowing is emergent, not ordering-dependent:
+        the /2 clamp leaves max_abs at 50% of dtype max, failing the 0.99
+        full-range threshold on its own.
+        """
         low, high = self._data_range[:2]
-        tmp = numpy.array([low, high], dtype="float64")
-        if low == high or all(numpy.isnan(tmp)):
-            if dtype == "hifloat4":
-                dtype = "float4_e1m2"
-            fill_val = 0 if is_complex_imag and not numpy.isfinite(low) else low
-            array = numpy.full(shape, fill_value=fill_val, dtype=dtype)
+        if self._is_constant_range(low, high):
+            array = self._fill_constant(low, dtype, shape, is_complex_imag)
         else:
             low = self._digitize_inf_nan(low, dtype)
             high = self._digitize_inf_nan(high, dtype)
             if distribution == "normal":
-                from scipy.stats import truncnorm
-
-                mean = (high + low) / 2
-                sigma = (high - mean) / 3
-                gen = truncnorm((low - mean) / sigma, (high - mean) / sigma, loc=mean, scale=sigma)
-                array = self._gen_normal_data(gen, dtype, shape)
+                array = self._gen_truncated_normal(low, high, dtype, shape)
             elif dtype == "hifloat4":
                 dtype = "float4_e1m2"
                 array = numpy.random.uniform(low, high, shape).astype(dtype, copy=False)
@@ -303,13 +331,55 @@ class RandomData:
                 low = max(low, finfo.min / 2)
                 high = min(high, finfo.max / 2)
                 array = numpy.random.uniform(low, high, shape).astype(dtype, copy=False)
-            elif distribution == "uniform" and self._is_full_value_range(dtype, low, high):
+            elif distribution == "uniform" and self._spans_dtype_range(dtype, low, high):
                 array = self._gen_exponential_data(dtype, shape)
             elif _is_native_integer(dtype):
                 array = self._gen_integer_data(low, high, dtype, shape)
             else:
-                array = self._gen_uniform_data(low, high, dtype, shape)
-        return self._mix_expect_data(array, dtype, shape, is_complex_imag)
+                low, high = self._clamp_overflow(low, high, dtype)
+                if distribution == "uniform" and self._spans_dtype_range(dtype, low, high):
+                    array = self._gen_exponential_data(dtype, shape)
+                else:
+                    array = self._gen_uniform_data(low, high, dtype, shape)
+        return self._mix_must_contain_values(array, dtype, shape, is_complex_imag)
+
+    @staticmethod
+    def _is_constant_range(low, high) -> bool:
+        """Constant-fill condition: the CSV 固定值 convention (min == max) or both endpoints nan.
+
+        Note -0.0 == 0.0 counts: fills -0.0 (sign kept), mixing can re-add +0.0.
+        A single nan endpoint is NOT constant — the sampling path digitizes it to 0.
+        """
+        return low == high or all(numpy.isnan(numpy.array([low, high], dtype="float64")))
+
+    def _fill_constant(self, value, dtype, shape, is_complex_imag: bool) -> numpy.ndarray:
+        fill_val = 0 if is_complex_imag and not numpy.isfinite(value) else value
+        if not is_float_dtype(dtype):
+            # int/bool cannot represent inf/nan: digitize like the sampling
+            # path does (inf -> dtype bound, nan -> 0), or numpy.full casts
+            # them to undefined values with only a RuntimeWarning.
+            fill_val = self._digitize_inf_nan(fill_val, dtype)
+        return numpy.full(shape, fill_value=fill_val, dtype=dtype)
+
+    @staticmethod
+    def _clamp_overflow(low, high, dtype):
+        """float64 uniform overflows computing high-low at ±finfo.max; halve the bounds.
+
+        This clamp is also what shadows the full-value-range log-uniform path for
+        float64 (max_abs drops to 50% of dtype max, below the 0.99 threshold).
+        """
+        if dtype in ("float64", "double"):
+            finfo = numpy.finfo(numpy.float64)
+            return max(low, finfo.min / 2), min(high, finfo.max / 2)
+        return low, high
+
+    def _gen_truncated_normal(self, low, high, dtype, shape) -> numpy.ndarray:
+        from scipy.stats import truncnorm
+
+        mean = (high + low) / 2
+        sigma = (high - mean) / 3
+        gen = truncnorm((low - mean) / sigma, (high - mean) / sigma, loc=mean, scale=sigma)
+        return self._gen_normal_data(gen, dtype, shape)
 
     @staticmethod
     def _sample_distinct_positions(total: int, count: int) -> numpy.ndarray:
@@ -319,7 +389,7 @@ class RandomData:
         do not "simplify" this back to numpy.random.choice(total, count,
         replace=False): choice internally builds a full permutation of `total`
         (~61MB temp for 8M elements, ~320MB for 40M) where this stays at KB
-        scale; see the module docstring for the benchmark history (issue #169).
+        scale; see the module docstring for the benchmark reference.
 
         Collision-driven retries converge in ~count^2/2total expected rounds,
         which is negligible while per_count stays capped (2048) — keep the cap
@@ -334,12 +404,12 @@ class RandomData:
         # not concentrate each must-contain value in one region of the tensor.
         return numpy.random.permutation(positions)
 
-    def _mix_expect_data(
+    def _mix_must_contain_values(
         self, np_array: numpy.ndarray, dtype, shape: Union[list, tuple], is_complex_imag: bool
     ) -> numpy.ndarray:
-        replace_list = self._get_must_contain_dataset(dtype, is_complex_imag)
+        replace_list = self._must_contain_values(dtype, is_complex_imag)
         replace_count = len(replace_list)
-        if replace_count > 1 and np_array.size > 0:  # not only low == high
+        if replace_count > 1 and np_array.size > 0:  # more than one distinct must-contain value
             if np_array.size <= replace_count:
                 # replace_list 先落成 np_array.dtype：直接 concatenate typed 数组与
                 # Python float 列表会被 numpy 提升成 float64（如 bf16 输入 + range(-0,+0)
@@ -353,7 +423,6 @@ class RandomData:
                     1 if np_array.size <= 4 * replace_count else min(int(0.25 * np_array.size / replace_count), 2048)
                 )
                 replace_idx = self._sample_distinct_positions(np_array.size, per_count * replace_count)
-                for idx, x in enumerate(replace_list):
-                    start, end = idx * per_count, (idx + 1) * per_count
-                    np_array.flat[replace_idx[start:end]] = x
+                values = numpy.repeat(numpy.array(replace_list, dtype=np_array.dtype), per_count)
+                np_array.flat[replace_idx] = values
         return np_array

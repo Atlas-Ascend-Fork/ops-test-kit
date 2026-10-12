@@ -5,24 +5,24 @@
 
 # 简介
 
-TTK使用表格文件（CSV 或 Excel .xlsx）批量定义测试用例。第一行为表头（列名），后续每行代表一个测试用例。不同测试模式使用不同的列定义。
+TTK使用表格文件（CSV 或 Excel .xlsx/.xlsm）批量定义测试用例。第一行为表头（列名），后续每行代表一个测试用例。不同测试模式使用不同的列定义。
 
-**模式自动识别逻辑**（基于CSV表头 + 子命令）：
-- 表头包含 `api_name`：第一个非空 `api_name` 值不以 `aclnn` 开头 → **E2E模式**；以 `aclnn` 开头或全部为空 → **ACLNN模式**
-- 表头不包含 `api_name`：由子命令决定 — `ttk geir` → **GEIR模式**，`ttk kernel` → **Kernel模式**
+**模式选择**（由子命令唯一决定，TTK 不按表头自动切换模式）：
+- 表头包含 `api_name` 且值以 `aclnn` 开头 → 用 `ttk aclnn`（**ACLNN模式**）；`api_name` 不以 `aclnn` 开头 → 用 `ttk e2e`（**E2E模式**）
+- 表头不包含 `api_name` → 用 `ttk kernel`（**Kernel模式**）或 `ttk geir`（**GEIR模式**）
 
-各模式的执行命令见 [任务执行](./Task_Execution.md)。
+模式选错会导致用例解析失败。各模式的执行命令见 [任务执行](./Task_Execution.md)。
 
 ---
 
 # 输入文件格式（CSV / Excel）
 
-TTK 支持两种等价的输入文件格式，表头与字段定义完全相同：
+TTK 支持两种等价的输入文件格式，表头与字段定义完全相同（另有 `.zip` 容器可打包多个 csv，一次运行按多张表展开）：
 
 | 格式 | 后缀 | 多工作表 | 说明 |
 |------|------|---------|------|
 | CSV | `.csv` | — | 文本表格，逗号分隔；含特殊字符（括号、逗号、引号）的字段须用双引号包裹。 |
-| Excel | `.xlsx` | 支持 | 工作簿，每个工作表（Sheet）是一张表。 |
+| Excel | `.xlsx` / `.xlsm` | 支持 | 工作簿，每个工作表（Sheet）是一张表。 |
 
 ## Excel（.xlsx）用法
 
@@ -31,7 +31,7 @@ TTK 支持两种等价的输入文件格式，表头与字段定义完全相同�
   python3 -m ttk kernel -i cases.xlsx              # 首个工作表
   python3 -m ttk kernel -i cases.xlsx --sheet T2   # 指定工作表
   ```
-- **单元格一律按文本处理**：读取时每个单元格被转为字符串并去除首尾空白，与 CSV 单元格行为完全一致，后续字段解析逻辑（`input_shapes`、`attributes` 等的 `eval`）原样复用。因此 **xlsx 与 csv 的用例可互换**，模式自动识别、字段回退、TensorList 嵌套等规则完全相同。
+- **单元格一律按文本处理**：读取时每个单元格被转为字符串并去除首尾空白，与 CSV 单元格行为完全一致，后续字段解析逻辑（`input_shapes`、`attributes` 等的 `eval`）原样复用。因此 **xlsx 与 csv 的用例可互换**，字段回退、TensorList 嵌套等规则完全相同。
 - **数值列建议设为文本格式**：Excel 会自动推断数字类型（如把 `01` 存为 `1`、`1e-8` 存为浮点）。为保证与 CSV 完全一致，建议把 `input_shapes`/`input_dtypes`/`attributes`/`input_data_ranges`/`output_shapes` 等列的单元格格式预设为「文本」。
 - **空行处理**：整行空白的行会被跳过（与 CSV 空行一致）。
 - **结果文件仍为 CSV**：无论输入是 csv 还是 xlsx，结果输出始终是 CSV，便于 diff 与版本管理。默认命名：csv 为 `{stem}_result.csv`；xlsx 为 `{stem}_{sheet}_result.csv`（`sheet` 为实际读取的工作表名，默认首页时也带上首页名，如 `cases_T1_result.csv`），同一文件多 sheet 跑测互不覆盖。
@@ -42,38 +42,42 @@ TTK 支持两种等价的输入文件格式，表头与字段定义完全相同�
 
 # 公共字段（所有模式通用）
 
-以下9个字段为Kernel、GEIR、ACLNN、E2E四种模式共有。
+以下13个字段为Kernel、GEIR、ACLNN、E2E四种模式共有。
 
 | 字段 | 类型 | 是否必填 | 默认值 | 说明 |
 |------|------|---------|--------|------|
-| `testcase_name` | STRING | **是** | 自动生成 | 用例唯一名称。缺失时自动生成为 `auto_testcase_name_N`。 |
-| `network_name` | STRING | 否 | `None` | 网络/模型名称标签（如 `llama3_70b_train`）。 |
-| `input_data_ranges` | FLOAT_RANGE_NESTED | 否 | `((None, None),)` | 每个输入张量的随机数据范围。每个元素为 `[min, max]`（闭区间，min 和 max 为边界值），None 时 min=-2、max=2。第 3 个及以上的值为必现值，会混入随机数据中保证出现（每个必现值按 tensor 规模混入，小 tensor 约 25% 比例、大 tensor 每值封顶 2048 次，避免边界值淹没正常分布）。min==max 时生成固定值。支持TensorList嵌套。如 `"((-1, 1), (0, 10))"` 或 `"((-1, 1, 0), (0, 10))"` |
-| `precision_tolerances` | FLOAT_RANGE_NESTED | 否 | `None` | 每个输出的精度容差对 `(rtol, ptol)`。如 `"((0.001, 0.001),)"`。legacy 字段，仅 `--compare close`/`cosine` 读取；默认 `mix_tolerance` 的容差在 TestSpec `tolerance` 中调整 |
-| `absolute_precision` | FLOAT_OR_NESTED | 否 | `1e-8` | 默认绝对精度容差。可以是单个浮点数或嵌套容器实现逐输出控制。legacy 字段，仅 `--compare close` 读取 |
+| `testcase_name` | STRING | **是** | 自动生成 | 用例唯一名称。仅当整列缺失时自动生成为 `auto_testcase_name_N`；列存在但某行留空会导致整表解析报错。 |
+| `input_data_ranges` | SHAPELIKE_FLOAT_SIGNED_NESTED | 否 | `((None, None),)` | 每个输入张量的随机数据范围。每个元素为 `[min, max]`（闭区间，min 和 max 为边界值），None 时 min=-2、max=2。min/max 边界值与第 3 个及以上的值均为必现值，会强制混入随机数据中保证出现（所有必现值合计约占 tensor 规模的 25%，即每个值约 25%÷必现值个数；大 tensor 每值封顶 2048 次，避免边界值淹没正常分布）。min==max 时生成固定值。支持TensorList嵌套。如 `"((-1, 1), (0, 10))"` 或 `"((-1, 1, 0), (0, 10))"` |
+| `precision_tolerances` | SHAPELIKE_FLOAT_NESTED | 否 | `None` | 每个输出的精度容差对 `(rtol, ptol)`。如 `"((0.001, 0.001),)"`。legacy 字段，仅 `--compare close`/`cosine`/`requant` 读取（requant 只读其中的 ptol，作为允许超差元素占比；经 TestSpec `tolerance` 声明的 `quant` 判据同样读取 ptol）；默认 `mix_tolerance` 的容差在 TestSpec `tolerance` 中调整 |
+| `absolute_precision` | FLOAT_SCALAR_NESTED | 否 | `1e-8` | 默认绝对精度容差。可以是单个浮点数或嵌套容器实现逐输出控制。legacy 字段，仅 `--compare close` 读取 |
 | `is_enabled` | BOOL | 否 | `True` | 设为 `False` 跳过此用例。 |
 | `remark` | STRING | 否 | `None` | 自由备注信息。 |
-| `soc_series` | STRING_TUPLE | 否 | `None` | SoC过滤。前缀 `-` 表示排除。如 `('Ascend910A', '-Ascend310P')` |
+| `soc_series` | STRING_CONTAINER | 否 | `None` | SoC过滤。前缀 `-` 表示排除。如 `('Ascend910A', '-Ascend310P')` |
 | `priority` | INT | 否 | `0` | 优先级，用于选择性执行。 |
+| `attributes` | DICT | 否 | `{}` | 算子/API 属性参数，语义随模式不同（Kernel 为算子属性，ACLNN 为标量参数，E2E 为 API 参数），详见各模式用例编写文档。 |
+| `device_ids` | STRING | 否 | `None` | 用例级设备指定（与 `--devices`/`--dev` 可用池取交集）。 |
+| `batch_axis` / `batch_slice_info` / `batch_seed` | — | 否 | `None` | 批一致性三字段（all-or-nothing），详见[确定性计算与批一致性](./Deterministic_Compute.md)。 |
 
 ---
 
 # 各模式特殊字段
 
-三种模式在公共字段基础上各有专属字段。
+四种模式在公共字段基础上各有专属字段（不含 `attributes1`~`attributes9` 扩展列）。
 
 | 模式 | 子命令 | 专属字段数 | 核心标识字段 | 详见 |
 |------|--------|-----------|------------|------|
 | Kernel | `ttk kernel` | 17 | `op_name`、`input_shapes`、`output_shapes`、`attributes` | [Kernel用例编写](./Operator_Test_Guides/Kernel_Case_Writing.md) |
 | GEIR | `ttk geir` | 18 | `op_name`、`input_shapes`、`dyn_input_shapes` | [GEIR用例编写](./Operator_Test_Guides/GEIR_Case_Writing.md) |
-| ACLNN | `ttk aclnn` | 18 | `api_name`、`tensor_view_shapes`、`output_tensor_indexes`、`scalar_dtypes` | [ACLNN用例编写](./Operator_Test_Guides/ACLNN_Case_Writing.md) |
-| E2E | `ttk e2e` | 14 | `api_name`、`tensor_view_shapes`、`golden_api` | [E2E用例编写](./Operator_Test_Guides/E2E_Case_Writing.md) |
+| ACLNN | `ttk aclnn` | 15 | `api_name`、`tensor_view_shapes`、`output_tensor_indexes`、`scalar_dtypes` | [ACLNN用例编写](./Operator_Test_Guides/ACLNN_Case_Writing.md) |
+| E2E | `ttk e2e` | 10 | `api_name`、`tensor_view_shapes`、`golden_api` | [E2E用例编写](./Operator_Test_Guides/E2E_Case_Writing.md) |
 
 > GEIR 继承 Kernel 的字段，额外多 `dyn_input_shapes` 用于控制图编译时的动态 shape 描述。
 
 ---
 
 # 数据类型字符串
+
+常用数据类型如下（另支持 `int4`/`uint1`/`float4_e2m1`/`float4_e1m2`/`float8_e8m0`/`float8_e5m2`/`float8_e4m3fn`/`hifloat8`/`hifloat4` 等，完整映射见 `ttk/utilities/dtypes.py` 的 `DTYPE_MAP`）：
 
 | 数据类型 | 字符串表示 |
 |---------|-----------|

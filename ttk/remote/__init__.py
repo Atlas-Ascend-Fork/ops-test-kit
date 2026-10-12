@@ -62,6 +62,10 @@ class ExecutionSpec:
     type == 'api':      call ``api`` (a dotted callable string) on the server.
     type == 'spec':  sync ``spec_file`` and invoke ``spec_class``
                         (whose ``third_party[provider]`` is the impl) on the server.
+
+    Context data fields (default None — remote flow untouched):
+    inputs/testcase_name/attrs carry the caller's context alongside the
+    execution description (ExecutionSpec = 执行描述+数据一体)。
     """
 
     provider: str
@@ -70,6 +74,9 @@ class ExecutionSpec:
     spec_module: Optional[str] = None
     spec_file: Optional[str] = None
     spec_class: Optional[str] = None
+    inputs: Optional[list] = None
+    attrs: Optional[dict] = None
+    testcase_name: Optional[str] = None
 
 
 def _derive_provider_from_api(api: Optional[str], fallback: str) -> str:

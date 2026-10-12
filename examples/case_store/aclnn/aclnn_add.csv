@@ -1,2 +1,0 @@
-testcase_name,api_name,tensor_view_shapes,tensor_dtypes,scalar_dtypes
-aclnnAdd_00,aclnnAdd,"((1,2,3,4),(1,2,3,4), (1,2,3,4))","('float32',)","('float32',)"

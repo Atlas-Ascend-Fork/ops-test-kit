@@ -10,15 +10,32 @@
 # ----------------------------------------------------------------------------
 
 import numpy as np
+import pytest
 
 from ttk.remote import DATA, client
-from ttk.utilities.classes import SWITCHES
+from ttk.switches import SWITCHES
+
+
+@pytest.fixture(autouse=True)
+def _clear_plugin_func_cache():
+    """monkeypatch spec_manager.get_spec_attr 前后清 get_plugin_function 查询缓存。
+
+    dispatch_xpu 经 SpecResolver→get_plugin_function 查询 third_party，模块级
+    _func_cache 会把本文件的 patch 结果残留给后续用例。"""
+    from ttk.core_modules.common.plugin.loader import clear_plugin_cache
+
+    clear_plugin_cache()
+    yield
+    clear_plugin_cache()
 
 
 def _switches(tmp_path):
+    from ttk.core_modules.common.dump import DumpConfig
+
     switches = SWITCHES()
     switches.root_path = str(tmp_path)
-    switches.dump_config.enable_xpu()
+    switches.dump_config = DumpConfig()
+    switches.dump_config.dump_xpu = True
     switches.dump_config.file_format = "bin"
     return switches
 
@@ -83,8 +100,12 @@ def test_dispatch_xpu_requests_data_when_only_dump_is_enabled(monkeypatch, tmp_p
 
     monkeypatch.setattr("ttk.remote.endpoint_view.EndpointView", FakeEndpointView)
     monkeypatch.setattr("ttk.remote.xpu_collector.collect_xpu_results", fake_collect)
-    monkeypatch.setattr("ttk.test_spec.get_spec_attr", lambda *_args, **_kwargs: {"torch": "torch.add"})
-    monkeypatch.setattr("ttk.test_spec.get_spec_class_meta", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "ttk.core_modules.common.plugin.spec_manager.get_spec_attr", lambda *_args, **_kwargs: {"torch": "torch.add"}
+    )
+    monkeypatch.setattr(
+        "ttk.core_modules.common.plugin.spec_manager.get_spec_class_meta", lambda *_args, **_kwargs: None
+    )
 
     client.dispatch_xpu(
         op_name="add",

@@ -3,7 +3,7 @@
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
-# THIS FILE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
@@ -27,7 +27,7 @@ def test_server_config_reads_all_fields(monkeypatch):
         yaml.dump(
             {
                 "server": {
-                    "bind": "0.0.0.0",
+                    "bind": "0.0.0.0",  # noqa: S104 测试数据：断言 YAML 配置读回
                     "port": 9999,
                     "max_concurrent": 20,
                     "run_deadline_s": 600,
@@ -50,7 +50,7 @@ def test_server_config_reads_all_fields(monkeypatch):
         config = load_server_config(config_path)
 
         # Verify all fields are read from YAML
-        assert config["bind"] == "0.0.0.0"
+        assert config["bind"] == "0.0.0.0"  # noqa: S104 测试数据
         assert config["port"] == 9999
         assert config["max_concurrent"] == 20
         assert config["run_deadline_s"] == 600

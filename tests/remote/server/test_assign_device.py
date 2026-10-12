@@ -34,7 +34,7 @@ def _make_handler(device_ids, gpu_locks):
 
 
 def test_concurrent_two_requests_different_devices():
-    """2 个线程同时 _assign_device → 分到不同 device（spec §6 多卡并发）。"""
+    """2 个线程同时 _assign_device → 分到不同 device（多卡并发约束）。"""
     locks = {0: threading.Lock(), 1: threading.Lock()}
     h = _make_handler([0, 1], locks)
     results = []
@@ -55,7 +55,7 @@ def test_concurrent_two_requests_different_devices():
 
 
 def test_data_does_not_concurrent_with_perf_same_device():
-    """PERF 占 device 0 → DATA try-lock 0 失败 → 跳到 device 1（spec §6 DATA+PERF 不并发）。"""
+    """PERF 占 device 0 → DATA try-lock 0 失败 → 跳到 device 1（DATA+PERF 不并发约束）。"""
     locks = {0: threading.Lock(), 1: threading.Lock()}
     locks[0].acquire()  # 模拟 PERF 占 device 0
     h = _make_handler([0, 1], locks)

@@ -1,7 +1,7 @@
 # Kernel 模式用例编写
 
 子命令：`python3 -m ttk kernel`
-结构类：`TestcaseOp`（共 26 个字段：9 公共 + 17 专有）
+结构类：`TestcaseKernel`（标准字段 30 个：13 公共 + 17 专有；另有 `attributes1`～`attributes9` 扩展列，全量 39 个）
 
 ## 用例配置依据
 
@@ -9,9 +9,9 @@
 
 1. **算子定义**：`xxx_def.cpp`（如 `add_def.cpp`），定义 INPUT/OUTPUT/ATTR 声明
 2. **算子信息库**：`aic-{芯片系列号}-ops-info-{算子仓[4:]}.json`，包含每个输入/输出的 name、支持 dtype、支持 format、paramType（optional/dynamic）、ValueDepend 等
-  - builtin 算子信息库路径：`{ASCEND_OPP_PATH}/built-in/op_impl/ai_core/tbe/config/{芯片系列号}/{算子仓}/aic-{芯片系列号}-ops-info-{算子仓[4:]}.json`
+  - builtin 算子信息库路径：`{ASCEND_OPP_PATH}/built-in/op_impl/ai_core/tbe/config/{芯片系列号}/aic-{芯片系列号}-ops-info-{算子仓[4:]}.json`
   - 自定义算子信息库路径：`{ASCEND_OPP_PATH}/vendors/customize/op_impl/ai_core/tbe/config/{芯片系列号}/aic-{芯片系列号}-ops-info.json`
-  - 例如 add 算子在 `ascend910b` 芯片上的 builtin 信息库：`$ASCEND_OPP_PATH/built-in/op_impl/ai_core/tbe/config/ascend910b/ops_math/aic-ascend910b-ops-info-math.json`
+  - 例如 add 算子在 `ascend910b` 芯片上的 builtin 信息库：`$ASCEND_OPP_PATH/built-in/op_impl/ai_core/tbe/config/ascend910b/aic-ascend910b-ops-info-math.json`
 
 ## 必填字段
 
@@ -137,7 +137,7 @@ MatMulV3 有 4 个输入，其中第 3、4 个为可选输入（bias 和 offset�
 
 ```csv
 testcase_name,op_name,input_shapes,input_dtypes,output_shapes,output_dtypes,attributes
-matmul_01,mat_mul_v3,"((512,1792),(1792,256),None,None)","('bfloat16','bfloat16',None,None)","(512,256)","('bfloat16',)",{'transpose_x1':False,'transpose_x2':False,'offset_x':0}
+matmul_01,mat_mul_v3,"((512,1792),(1792,256),None,None)","('bfloat16','bfloat16',None,None)","(512,256)","('bfloat16',)","{'transpose_x1':False,'transpose_x2':False,'offset_x':0}"
 ```
 
 ### ValueDepend 张量输入（ReduceMin）

@@ -4,12 +4,12 @@
 
 | 方法 | 参数 | 原理 | 适用场景 |
 |------|------|------|---------|
-| 混合容差（生态算子开源精度标准） | `--compare mixed` | `|a-g| <= atol + rtol*\|g\|` 逐元素 + 通过率 ≥ 0.99 + 绝对误差硬上限 | 浮点运算常规测试（默认） |
+| 混合容差（生态算子开源精度标准） | `--compare mixed` | `\|a-g\| <= atol + rtol*\|g\|` 逐元素 + 通过率 ≥ 0.99 + 绝对误差硬上限 | 浮点运算常规测试（默认） |
 | 统计相对误差（社区标准） | `--compare stat_rel_err` | 按 dtype 统计相对误差，社区标准阈值 | 统计误差均值/最大值 |
 | 数值近似 | `--compare close` | `np.allclose(a, b, rtol, atol)` | 逐点 isclose 比对 |
 | 余弦相似度 | `--compare cosine` | 向量余弦距离 | 大规模向量整体趋势验证 |
 | 二进制精确 | `--compare binary` | 逐字节比对 | 整型运算、需要完全一致的结果 |
-| 重量化 | `--compare requant` | 重量化后比对 | 量化数据类型（hifloat8 自动启用；float8 默认混合容差，可显式指定 requant） |
+| 重量化 | `--compare requant` | 重量化后比对 | 量化数据类型（hifloat8 自动启用；float8 e4m3fn/e5m2 默认混合容差，可显式指定 requant；float8 e8m0 默认二进制比对） |
 | 三方交叉校验 | `--compare cross_check` | output/golden/third_party 误差比值 | 有 third_party 参考实现时（fp16/bf16/fp32） |
 
 > 默认未设 `--compare` 时，按 `Spec.tolerance` 逐输出路由（需 `--plugin`），否则 `mixed`。
@@ -65,10 +65,12 @@ python3 -m ttk kernel -i cases.csv -t case_name \
 ```python
 import numpy as np
 
-# 加载 dump 数据
-input_data = np.load('dump_input_0.npy')
-output_data = np.load('dump_output_0.npy')
-golden_data = np.load('dump_golden_0.npy')
+# 加载 dump 数据：目录 <root>/dump/<case_name>/
+# 文件名格式 {role}[_{segment}]_{idx}_{dtype}.npy（Kernel 输入/输出带 dyn/cst/bin 段）
+# 先用 ls 确认实际文件名，例如：
+input_data = np.load('dump/case_name/input_dyn_0_float32.npy')
+output_data = np.load('dump/case_name/output_dyn_0_float32.npy')
+golden_data = np.load('dump/case_name/golden_0_float32.npy')
 
 # 计算差异
 diff = np.abs(output_data - golden_data)
@@ -103,8 +105,8 @@ print(f"Inf 数量: {np.sum(np.isinf(output_data))}")
 
 ## 调试最佳实践
 
-1. **先跑内置示例**：`python3 -m ttk kernel -i examples/case_store/kernel/add.csv` 确认环境正常
+1. **先跑内置示例**：`python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast` 确认环境正常
 2. **固定种子**：`--seed 42` 确保可复现
 3. **逐步放大**：先用小 shape 验证逻辑，再放大测试性能
-4. **锁定单用例**：`-t case_name --single-log` 隔离问题
+4. **锁定单用例**：`-t case_name` 隔离问题（日志在 `log/<mode>/<用例名>/ttk.log`）
 5. **对比 Golden**：先确认 Golden 函数正确，再比对算子输出

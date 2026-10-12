@@ -25,6 +25,9 @@
                 <!--filteritem type="filepath" name="projectroot/[a-zA-Z0-9]{20,}.sh" desc="Temp files"/-->
                 <filteritem type="filename" name="*.csv" desc="skip csv files"/>
                 <filteritem type="filename" name="*.yaml" desc="skip yaml files"/>
+                <filteritem type="filename" name="*.xlsx" desc="binary test assets (case store), no license header required"/>
+                <filteritem type="filename" name="THIRD_PARTY_NOTICES" desc="third-party notices file, carries upstream licenses"/>
+                <filteritem type="filepath" name="csrc/third_party/.*" desc="vendored third-party code, carries upstream license"/>
                 <filteritem type="filename" name="pyproject.toml" desc="build config, no license header required"/>
             </filefilter>
             <filefilter name="defaultPolicyFilter" desc="Filters for compatibility，license header policies">

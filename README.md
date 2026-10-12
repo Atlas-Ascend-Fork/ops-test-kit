@@ -43,17 +43,17 @@ pip install -r requirements.txt
 # 查看设备信息
 python3 -m ttk info
 
-# Kernel：编译 + 执行 + 精度比对
-python3 -m ttk kernel -i examples/case_store/kernel/add.csv
+# Kernel：编译 + 执行 + 精度比对（--plugin 提供部分用例的 golden）
+python3 -m ttk kernel -i examples/case_store/kernel/cases.csv --plugin examples/case_store/kernel/golden.py
 
 # GEIR：GE 图编译 + 执行
-python3 -m ttk geir -i examples/case_store/kernel/add.csv
+python3 -m ttk geir -i examples/case_store/kernel/cases.csv --plugin examples/case_store/kernel/golden.py
 
 # ACLNN：aclnn* C API
-python3 -m ttk aclnn -i examples/case_store/aclnn/aclnn_cat.csv
+python3 -m ttk aclnn -i examples/case_store/aclnn/cases.csv --plugin examples/case_store/aclnn/golden.py
 
-# E2E：框架端到端（--cpu 强制 CPU 后端）
-python3 -m ttk e2e -i examples/case_store/e2e/torch_add.xlsx
+# E2E：框架端到端（--backend cpu 强制 CPU 后端）
+python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv
 ```
 
 运行后终端输出每个用例的精度状态和整体通过率，加 `-o` 可输出结果 CSV。参数帮助执行 `python3 -m ttk kernel --help`。
@@ -85,7 +85,7 @@ python3 -m ttk e2e -i examples/case_store/e2e/torch_add.xlsx
 
 - [mssanitizer 适配方法](./docs/Operator_Test_Guides/mssanitizer_guide.md) — 内存/竞争/同步检测
 - [msopprof 适配方法](./docs/Operator_Test_Guides/msopprof_guide.md) — 算子性能 Profiling
-- [msdebug 适配方法](./docs/Operator_Test_Guides/msdebug适配方法指南.md) — 算子源码级调试
+- [msdebug 适配方法](./docs/Operator_Test_Guides/msdebug_guide.md) — 算子源码级调试
 
 ### FAQ
 

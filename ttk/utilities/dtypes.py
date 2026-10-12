@@ -11,18 +11,21 @@
 dtype utils
 """
 
-import copy
+import importlib
 import logging
 import re
-import struct
-from typing import Optional, Union
+from typing import Dict, Union
 
 import numpy
 
-BFP16_NEEDS_FP32_FOR_NPY: Optional[bool] = None
+# Canonical TTK dtype name -> actual attribute name on torch/torch_npu
+# (torch spells float8_e8m0 as float8_e8m0fnu).
+_TORCH_DTYPE_ALIAS = {
+    "float8_e8m0": "float8_e8m0fnu",
+}
 
 # Numpy 4-bit dtypes (unpacked, 1 byte/element) -> torch packed dtype names.
-# Torch stores two values per byte (x2 suffix); numpy en_dtypes stores one.
+# Torch stores two values per byte (x2 suffix); numpy stores one.
 _NUMPY_TO_TORCH_4BIT_DTYPE = {
     "float4_e2m1": "float4_e2m1fn_x2",
     "float4_e1m2": "float4_e1m2fn_x2",
@@ -32,6 +35,12 @@ _NUMPY_TO_TORCH_4BIT_DTYPE = {
     "int4": "int4",
 }
 
+# Numpy float8 dtypes -> torch dtype attribute names.
+_NUMPY_TO_TORCH_FLOAT8_DTYPE = {
+    "float8_e4m3fn": "float8_e4m3fn",
+    "float8_e5m2": "float8_e5m2",
+    "float8_e8m0": "float8_e8m0fnu",
+}
 
 # Shared dtype promotion map for golden "Promote" mode.
 #
@@ -43,7 +52,7 @@ _NUMPY_TO_TORCH_4BIT_DTYPE = {
 # higher precision, against which the low-precision NPU output is compared.
 # Kept here (not in either flow module) to avoid a cross-flow import dependency
 # and duplication.
-DTYPE_PROMOTE_MAP: dict = {
+DTYPE_PROMOTE_MAP: Dict[str, str] = {
     "float16": "float32",
     "bfloat16": "float32",
     "float32": "float64",
@@ -55,8 +64,7 @@ DTYPE_PROMOTE_MAP: dict = {
     "hifloat8": "float32",
 }
 
-
-dtype_width_map = {
+DTYPE_WIDTH_MAP = {
     "complex32": 4,
     "complex64": 8,
     "complex128": 16,
@@ -82,10 +90,9 @@ dtype_width_map = {
     "float8_e5m2": 1,
     "float8_e4m3fn": 1,
     "hifloat8": 1,
-    None: 0,
 }
 
-dtype_map = {
+DTYPE_MAP = {
     "c32": "complex32",
     "c64": "complex64",
     "complex32": "complex32",
@@ -157,8 +164,8 @@ dtype_map = {
     None: None,
 }
 
-
-DATA_TYPE_DICT = {
+# ACL (Ascend Computing Language) dtype enum id -> canonical dtype name
+ACL_DTYPE_TO_ID = {
     "float32": 0,
     "float16": 1,
     "int8": 2,
@@ -199,8 +206,7 @@ DATA_TYPE_DICT = {
     "hifloat4": 42,
 }
 
-
-DATA_TYPE_INT_TO_STR = {
+ACL_ID_TO_DTYPE = {
     0: "float32",
     1: "float16",
     2: "int8",
@@ -238,46 +244,53 @@ DATA_TYPE_INT_TO_STR = {
     42: "hifloat4",
 }
 
+# Custom numpy dtypes (not provided by numpy itself) -> provider package:
+# (module_name, attr_name, min_version); min_version None means no version check.
+# hifloat4 uses FP4 E1M2 as its logical storage dtype.
+_NUMPY_DTYPE_SOURCES: Dict[str, tuple] = {
+    "bfloat16": ("ml_dtypes", "bfloat16", None),
+    "int4": ("ml_dtypes", "int4", None),
+    "float8_e5m2": ("ml_dtypes", "float8_e5m2", None),
+    "float8_e4m3fn": ("ml_dtypes", "float8_e4m3fn", None),
+    "float8_e8m0": ("en_dtypes", "float8_e8m0", "0.0.4"),
+    "float4_e2m1": ("en_dtypes", "float4_e2m1", "0.0.4"),
+    "float4_e1m2": ("en_dtypes", "float4_e1m2", "0.0.4"),
+    "hifloat8": ("en_dtypes", "hifloat8", "0.0.4"),
+    "hifloat4": ("en_dtypes", "float4_e1m2", "0.0.4"),
+}
 
-def str_to_torch_dtype(dtype_str: str):
-    """Convert dtype string to torch.dtype/torch_npu.dtype object.
 
-    Args:
-        dtype_str: string like 'float16', 'int8', 'fp16', 'bf16', etc.
+def normalize_dtype(dtype_str: str):
+    """Normalize a dtype alias ('fp16', 'bf16', ...) to its canonical name ('float16', ...)."""
+    return DTYPE_MAP[dtype_str]
 
-    Returns:
-        torch.dtype/torch_npu object, or original value if not recognized.
+
+def dtype_to_name(dtype) -> str:
+    """Robustly extract a dtype name string ('float16', 'bfloat16', ...).
+
+    Accepts numpy dtypes, torch dtypes, ml_dtypes class objects/dtypes and
+    plain names.  numpy.dtype(...).name is authoritative when parseable;
+    direct str().split('.')[-1] on a class object yields "bfloat16'>" (the
+    trailing "'>" makes name-keyed lookups silently miss), so it is only the
+    fallback.
     """
-    if not isinstance(dtype_str, str):
-        return dtype_str
-    splited = dtype_str.split(".")
-    if len(splited) > 2:
-        return None
-    module = splited[0]
-    canonical = splited[-1]
-    if len(splited) == 1:
-        if is_torch_native_dtype(canonical):
-            import torch
-
-            return getattr(torch, canonical, None)
-        import torch_npu
-
-        npu_attr_name = "float8_e8m0fnu" if canonical == "float8_e8m0" else canonical
-        return getattr(torch_npu, npu_attr_name, None)
-    if module not in ("torch", "torch_npu"):
-        return None
     try:
-        if module == "torch":
-            import torch
-
-            dtype_module = torch
-        else:
-            import torch_npu
-
-            dtype_module = torch_npu
-        return getattr(dtype_module, canonical, None)
+        return numpy.dtype(dtype).name
     except Exception:
-        return None
+        return str(dtype).split(".")[-1].rstrip("'>\" ")
+
+
+def is_float_dtype(dtype_name) -> bool:
+    """True for floating-point dtypes: float*/bfloat*/hifloat* families, double, half.
+
+    Accepts dtype names (canonical or alias like 'fp16'/'bf16') and dtype
+    objects; complex, integer and bool types are not floating-point.
+    """
+    if dtype_name is None:
+        return False
+    name = dtype_to_name(dtype_name)
+    canonical = DTYPE_MAP.get(name, name)
+    return canonical.startswith(("float", "bfloat", "hifloat")) or canonical in ("double", "half")
 
 
 def get_dtype_range(dt):
@@ -320,29 +333,20 @@ def is_4bit_dtype(dtype) -> bool:
 
 
 def get_dtype_width(dt: str) -> Union[int, float]:
-    """
-    Dtype string to byte width mapping
-    """
-    str_dtype = ""
-    if isinstance(dt, str):
-        str_dtype = dt
-    elif hasattr(dt, "name"):
-        str_dtype = dt.name
+    """Dtype string to byte width mapping."""
+    if dt is None:
+        return 0
+    str_dtype = dt if isinstance(dt, str) else getattr(dt, "name", "")
     if is_4bit_dtype(str_dtype):
         return 0.5
     try:
-        dtype = numpy.dtype(dt)
-        return dtype.itemsize
+        return numpy.dtype(dt).itemsize
     except TypeError:
-        return dtype_width_map[dt]
-
-
-def parse_dtype(_dtype: str):
-    """
-    Dtype string to valid dtype mapping
-    """
-
-    return dtype_map[_dtype]
+        pass
+    try:
+        return DTYPE_WIDTH_MAP[dt]
+    except KeyError:
+        raise RuntimeError(f"Unknown dtype [{dt}]") from None
 
 
 def numpy_int4():
@@ -357,90 +361,12 @@ def numpy_int4():
         ) from None
 
 
-def numpy_bfloat16():
-    try:
-        # noinspection PyUnresolvedReferences
-        from ml_dtypes import bfloat16
-    except ModuleNotFoundError:
-        try:
-            # noinspection PyUnresolvedReferences
-            import tensorflow
-
-            bfloat16 = tensorflow.bfloat16.as_numpy_dtype
-        except ModuleNotFoundError:
-            raise RuntimeError(
-                "ml-dtypes or tensorflow is needed to support bfloat16 dtype!!! "
-                "Please install with `pip3 install ml-dtypes` "
-                "or `pip3 install tensorflow`"
-            ) from None
-    # some older TF version (v1.15.0) bfp16 needs to convert to fp32 to calculate in numpy
-    global BFP16_NEEDS_FP32_FOR_NPY
-    if BFP16_NEEDS_FP32_FOR_NPY is None:
-        test_array = numpy.array([1, 2, 3], dtype=bfloat16)
-        try:
-            numpy.max(test_array)
-        except TypeError:
-            # TypeError: No loop matching the specified signature
-            # and casting was found for ufunc maximum
-            BFP16_NEEDS_FP32_FOR_NPY = True
-        else:
-            BFP16_NEEDS_FP32_FOR_NPY = False
-    return bfloat16
-
-
-def numpy_float8_e5m2():
-    try:
-        # noinspection PyUnresolvedReferences
-        from ml_dtypes import float8_e5m2
-
-        return float8_e5m2
-    except ModuleNotFoundError:
-        raise RuntimeError(
-            "ml_dtypes is needed to support float8_e5m2 dtype!!! Please install with `pip3 install ml-dtypes`"
-        ) from None
-
-
-def numpy_float8_e4m3fn():
-    try:
-        # noinspection PyUnresolvedReferences
-        from ml_dtypes import float8_e4m3fn
-
-        return float8_e4m3fn
-    except ModuleNotFoundError:
-        raise RuntimeError(
-            "ml_dtypes is needed to support float8_e4m3fn dtype!!! Please install with `pip3 install ml-dtypes`"
-        ) from None
-
-
-def ensure_en_dtypes_version(version):
-    import en_dtypes
-
-    cur_ver = list(map(int, en_dtypes.__version__.split("."))) + [0, 0]
-    min_ver = list(map(int, version.split("."))) + [0, 0]
-    if (cur_ver[0], cur_ver[1], cur_ver[2]) >= (min_ver[0], min_ver[1], min_ver[2]):
-        return
-    raise RuntimeError(f"Please upgrade en-dtypes to at least {version}")
-
-
-def numpy_float8_e8m0():
-    try:
-        # noinspection PyUnresolvedReferences
-        from en_dtypes import float8_e8m0
-
-        ensure_en_dtypes_version("0.0.4")
-        return float8_e8m0
-    except ModuleNotFoundError:
-        raise RuntimeError(
-            "en_dtypes is needed to support float8_e8m0 dtype!!! Please install with `pip3 install en-dtypes`"
-        ) from None
-
-
 def numpy_float4_e2m1():
     try:
         # noinspection PyUnresolvedReferences
         from en_dtypes import float4_e2m1
 
-        ensure_en_dtypes_version("0.0.4")
+        _ensure_en_dtypes_version("0.0.4")
         return float4_e2m1
     except ModuleNotFoundError:
         raise RuntimeError(
@@ -448,376 +374,89 @@ def numpy_float4_e2m1():
         ) from None
 
 
-def numpy_float4_e1m2():
-    try:
-        # noinspection PyUnresolvedReferences
-        from en_dtypes import float4_e1m2
+def _ensure_en_dtypes_version(min_version: str):
+    import en_dtypes
 
-        ensure_en_dtypes_version("0.0.4")
-        return float4_e1m2
-    except ModuleNotFoundError:
-        raise RuntimeError(
-            "en_dtypes is needed to support float4_e1m2 dtype!!! Please install with `pip3 install en-dtypes`"
-        ) from None
+    cur_ver = list(map(int, en_dtypes.__version__.split("."))) + [0, 0]
+    min_ver = list(map(int, min_version.split("."))) + [0, 0]
+    if (cur_ver[0], cur_ver[1], cur_ver[2]) < (min_ver[0], min_ver[1], min_ver[2]):
+        raise RuntimeError(f"Please upgrade en-dtypes to at least {min_version}")
 
 
-def numpy_hifloat4():
-    try:
-        # noinspection PyUnresolvedReferences
-        from en_dtypes import float4_e1m2
+def resolve_numpy_dtype(dtype_name: str):
+    """Resolve a custom dtype name (bfloat16/int4/fp8/fp4/hifloat) to its numpy dtype object.
 
-        ensure_en_dtypes_version("0.0.4")
-        return float4_e1m2
-    except ModuleNotFoundError:
-        raise RuntimeError(
-            "en_dtypes is needed to support hifloat4 dtype!!! Please install with `pip3 install en-dtypes`"
-        ) from None
-
-
-def IsRoundOne(sign, man, truncLen):
-    roundingTruncLen = 64
-    mask0 = 0 if truncLen >= roundingTruncLen else 1 << truncLen
-    mask1 = 0 if truncLen > roundingTruncLen else 1 << truncLen - 1
-
-    mask2 = mask1 - 1
-
-    # ROUND_TO_NEAREST
-    lastBit = (man & mask0) > 0  # Last bit after conversion
-    truncHighBit = (man & mask1) > 0  # Highest bit in the truncated part
-    truncLeft = (man & mask2) > 0  # Truncated left part (except for the highest bit)
-    return truncHighBit and (truncLeft or lastBit)
-
-
-def float_to_hex(f):
-    return hex(struct.unpack("<I", struct.pack("<f", f))[0])
-
-
-def cvt_bfloat16_to_fp4_e2m1(x):
-    import math
-
-    sRet = 0
-    if x < 0.0:
-        sRet = 1
-
-    x_abs = math.fabs(x)
-    x = int(float_to_hex(x_abs), 16)
-    x = x >> 16
-
-    ef = (x >> 7) & 0xFF
-    mf = x & 0x7F
-    mLenDelta = 7 - 1
-    maxExp = 3  # max E encoding value of e2m1 is 3
-    expBias = 1  # Exponent Bias value of e2m1/e1m2 is 1
-    eRet = 0
-    mRet = 0
-    eNorm = ef - 127 + 1 if ef == 0 and mf != 0 else ef - 127
-
-    if (eNorm > (maxExp - expBias)) or ((eNorm == (maxExp - expBias)) and ((mf >> mLenDelta) == 1)):
-        return (sRet << 3) | 0b111
-    if eNorm <= -(expBias):
-        eRet = 0
-        mf = mf | 0x80
-        mLenDelta -= eNorm + expBias - 1
-        needRound = IsRoundOne(sRet, mf, mLenDelta)  # determine if need to carry
-        mRet = mf >> mLenDelta
-        if needRound:
-            mRet += 1
-    else:
-        eRet = eNorm + expBias
-        needRound = IsRoundOne(sRet, mf, mLenDelta)
-        mRet = mf >> mLenDelta
-        if needRound:
-            mRet += 1
-
-        if ((mRet & 0b10) != 0) and (needRound):
-            eRet += 1
-            mRet = 0
-
-    if eRet >= 3:
-        eRet = 3
-    elif eRet == 0 and mRet == 0b10:
-        eRet += 1
-        mRet = 0
-
-    return ((sRet) << 3) | ((eRet) << 1) | ((mRet) & 1)
-
-
-def cvt_bfloat16_to_fp4_e1m2(x):
-    import math
-
-    sRet = 0
-    if x < 0.0:
-        sRet = 1
-
-    x_abs = math.fabs(x)
-    x = int(float_to_hex(x_abs), 16)
-    x = x >> 16
-
-    ef = x >> 7 & 0xFF
-    mf = x & 0x7F
-    mLenDelta = 7 - 2
-    maxExp = 1  # max E encoding value of e1m2 is 3
-    expBias = 1  # Exponent Bias value of e2m1/e1m2 is 1
-
-    eRet = 0
-    mRet = 0
-    eNorm = ef - 127 + 1 if ef == 0 and mf != 0 else ef - 127
-
-    if (eNorm > (maxExp - expBias)) or ((eNorm == (maxExp - expBias)) and ((mf >> mLenDelta) == 0b11)):
-        return (sRet << 3) | 0b111
-    if eNorm <= -(expBias):
-        eRet = 0
-        mf = mf | 0x80
-        mLenDelta -= eNorm + expBias - 1
-        needRound = IsRoundOne(sRet, mf, mLenDelta)  # determine if need to carry
-        mRet = mf >> mLenDelta
-        if needRound:
-            mRet += 1
-    else:
-        eRet = eNorm + expBias
-        needRound = IsRoundOne(sRet, mf, mLenDelta)
-        mRet = mf >> mLenDelta
-        if needRound:
-            mRet += 1
-        if ((mRet & 0b100) != 0) and (needRound):
-            eRet += 1
-            mRet = 0
-
-    if eRet >= 1:
-        eRet = 1
-    elif eRet == 0 and mRet == 0b100:
-        eRet += 1
-        mRet = 0
-
-    return ((sRet) << 3) | ((eRet) << 2) | ((mRet) & 3)
-
-
-def trans_np_bfloat16_tensor_to_fp4_e2m1(in_tensor):
-    import numpy as np
-
-    shape_tensor = in_tensor.shape
-    multi_shape = np.prod(shape_tensor)
-    out_tensor = np.zeros(multi_shape).astype(np.uint8)
-    in_tensor = in_tensor.reshape(multi_shape)
-
-    for i in range(multi_shape):
-        out_tensor[i] = cvt_bfloat16_to_fp4_e2m1(in_tensor[i])
-
-    out_tensor = out_tensor.astype(np.uint8)
-
-    # 每两个fp4拼成一个uint8保存
-    fp4_shape = list(shape_tensor)
-    fp4_shape[-1] = fp4_shape[-1] // 2
-    fp4_tensor = np.zeros(multi_shape // 2).astype(np.uint8)
-    for i in range(multi_shape // 2):
-        # fp4_tensor[i] = (out_tensor[i*2] << 4) | out_tensor[i*2+1]      # 按常规顺序保存b4
-        fp4_tensor[i] = (out_tensor[i * 2 + 1] << 4) | out_tensor[
-            i * 2
-        ]  # 按两两交叉顺序保存b4，比如b4两个数：0100 0010 存为b8后为0010 0100
-
-    fp4_tensor = fp4_tensor.reshape(fp4_shape)
-    return fp4_tensor
-
-
-def trans_np_bfloat16_tensor_to_fp4_e1m2(in_tensor):
-    import numpy as np
-
-    shape_tensor = in_tensor.shape
-    multi_shape = np.prod(shape_tensor)
-    out_tensor = np.zeros(multi_shape).astype(np.uint8)
-    in_tensor = in_tensor.reshape(multi_shape)
-
-    for i in range(multi_shape):
-        out_tensor[i] = cvt_bfloat16_to_fp4_e1m2(in_tensor[i])
-
-    out_tensor = out_tensor.astype(np.uint8)
-
-    # 每两个fp4拼成一个uint8保存
-    fp4_shape = list(shape_tensor)
-    fp4_shape[-1] = fp4_shape[-1] // 2
-    fp4_tensor = np.zeros(multi_shape // 2).astype(np.uint8)
-    for i in range(multi_shape // 2):
-        # fp4_tensor[i] = (out_tensor[i*2] << 4) | out_tensor[i*2+1] # 按常规顺序保存b4
-        fp4_tensor[i] = (out_tensor[i * 2 + 1] << 4) | out_tensor[
-            i * 2
-        ]  # 按两两交叉顺序保存b4，比如b4两个数：0100 0010 存为b8后为0010 0100
-    fp4_tensor = fp4_tensor.reshape(fp4_shape)
-    return fp4_tensor
-
-
-def cvt_fp4_e2m1_to_bfloat16(x):
-    Fp4e2m1ToBf16 = {
-        "0": 0x0,
-        "1": 0x3F00,
-        "2": 0x3F80,
-        "3": 0x3FC0,
-        "4": 0x4000,
-        "5": 0x4040,
-        "6": 0x4080,
-        "7": 0x40C0,
-        "8": 0x8000,
-        "9": 0xBF00,
-        "10": 0xBF80,
-        "11": 0xBFC0,
-        "12": 0xC000,
-        "13": 0xC040,
-        "14": 0xC080,
-        "15": 0xC0C0,
-    }
-
-    x = int(x)
-    first_fp4val = x & 0x0F
-    second_fp4val = (x >> 4) & 0x0F
-    first_fp4str = str(first_fp4val)
-    second_fp4str = str(second_fp4val)
-
-    return Fp4e2m1ToBf16[first_fp4str], Fp4e2m1ToBf16[second_fp4str]
-
-
-def cvt_fp4_e1m2_to_bfloat16(x):
-    Fp4e1m2ToBf16 = {
-        "0": 0x0,
-        "1": 0x3E80,
-        "2": 0x3F00,
-        "3": 0x3F40,
-        "4": 0x3F80,
-        "5": 0x3FA0,
-        "6": 0x3FC0,
-        "7": 0x3FE0,
-        "8": 0x8000,
-        "9": 0xBE80,
-        "10": 0xBF00,
-        "11": 0xBF40,
-        "12": 0xBF80,
-        "13": 0xBFA0,
-        "14": 0xBFC0,
-        "15": 0xBFE0,
-    }
-
-    x = int(x)
-    first_fp4val = x & 0x0F
-    second_fp4val = (x >> 4) & 0x0F
-    first_fp4str = str(first_fp4val)
-    second_fp4str = str(second_fp4val)
-
-    return Fp4e1m2ToBf16[first_fp4str], Fp4e1m2ToBf16[second_fp4str]
-
-
-def trans_np_fp4_e1m2_tensor_to_bfloat16(in_tensor):
-    import numpy as np
-
-    shape_tensor = in_tensor.shape
-    multi_shape = np.prod(shape_tensor)
-    in_tensor = in_tensor.reshape(multi_shape)
-
-    # 1个uint8包含两个fp4, 先拆成两个uint8
-    bfloat16_shape = list(shape_tensor)
-    bfloat16_shape[-1] = bfloat16_shape[-1] * 2
-    bfloat16_tensor = np.zeros(multi_shape * 2).astype(np.uint16)
-    fp32_tensor = np.zeros(multi_shape * 2).astype(np.float32)
-
-    for i in range(multi_shape):
-        bfloat16_tensor[i * 2], bfloat16_tensor[i * 2 + 1] = cvt_fp4_e1m2_to_bfloat16(in_tensor[i])
-        fp32_tensor[i * 2] = struct.unpack("!f", struct.pack("!I", bfloat16_tensor[i * 2] << 16))[0]
-        fp32_tensor[i * 2 + 1] = struct.unpack("!f", struct.pack("!I", bfloat16_tensor[i * 2 + 1] << 16))[0]
-
-    fp32_tensor = fp32_tensor.reshape(bfloat16_shape)
-    return fp32_tensor
-
-
-def trans_np_fp4_e2m1_tensor_to_bfloat16(in_tensor):
-    import numpy as np
-
-    shape_tensor = in_tensor.shape
-    multi_shape = np.prod(shape_tensor)
-    in_tensor = in_tensor.reshape(multi_shape)
-
-    # 1个uint8包含两个fp4, 先拆成两个uint8
-    bfloat16_shape = list(shape_tensor)
-    bfloat16_shape[-1] = bfloat16_shape[-1] * 2
-    bfloat16_tensor = np.zeros(multi_shape * 2).astype(np.uint16)
-    fp32_tensor = np.zeros(multi_shape * 2).astype(np.float32)
-
-    for i in range(multi_shape):
-        bfloat16_tensor[i * 2], bfloat16_tensor[i * 2 + 1] = cvt_fp4_e2m1_to_bfloat16(in_tensor[i])
-        fp32_tensor[i * 2] = struct.unpack("!f", struct.pack("!I", bfloat16_tensor[i * 2] << 16))[0]
-        fp32_tensor[i * 2 + 1] = struct.unpack("!f", struct.pack("!I", bfloat16_tensor[i * 2 + 1] << 16))[0]
-
-    fp32_tensor = fp32_tensor.reshape(bfloat16_shape)
-    return fp32_tensor
-
-
-def numpy_hifloat8():
-    try:
-        # noinspection PyUnresolvedReferences
-        from en_dtypes import hifloat8
-
-        ensure_en_dtypes_version("0.0.4")
-        return hifloat8
-    except ModuleNotFoundError:
-        raise RuntimeError(
-            "en_dtypes is needed to support hifloat8 dtype!!! Please install with `pip3 install en-dtypes`"
-        ) from None
-    except ImportError:
-        raise RuntimeError(
-            "Please upgrade en_dtypes to v0.0.4 at least to support hifloat8 dtype!!! "
-            "Command is `pip3 install --upgrade en-dtypes`"
-        ) from None
-
-
-def _resolve_numpy_custom_dtype(dtype_name: str):
-    resolvers = {
-        "bfloat16": numpy_bfloat16,
-        "int4": numpy_int4,
-        "float8_e5m2": numpy_float8_e5m2,
-        "float8_e4m3fn": numpy_float8_e4m3fn,
-        "float8_e8m0": numpy_float8_e8m0,
-        "float4_e2m1": numpy_float4_e2m1,
-        "float4_e1m2": numpy_float4_e1m2,
-        "hifloat8": numpy_hifloat8,
-        "hifloat4": numpy_hifloat4,
-    }
-    try:
-        resolver = resolvers[dtype_name]
-    except KeyError as exc:
-        raise RuntimeError(f"Unsupported custom numpy dtype [{dtype_name}]") from exc
-    return resolver()
-
-
-def resolve_custom_numpy_dtypes(container):
+    These dtypes are provided by third-party packages (ml_dtypes/en_dtypes).
+    Raises RuntimeError with install/upgrade instructions when the package is
+    missing or too old; bfloat16 falls back to tensorflow when ml_dtypes is
+    absent.
     """
-    Convert custom numpy dtype strings (bfloat16/int4/fp8/fp4/hifloat) to numpy dtype objects.
-    TF quantized dtypes (quint8/qint8/...) are aliased to their numpy storage dtypes
-    (uint8/int8/...); the declared dtype string stays on the testcase for tf conversion.
-    Supports nested structures (tuples within tuples).
+    spec = _NUMPY_DTYPE_SOURCES.get(dtype_name)
+    if spec is None:
+        raise RuntimeError(f"Unsupported custom numpy dtype [{dtype_name}]")
+    module_name, attr_name, min_version = spec
+    try:
+        module = importlib.import_module(module_name)
+        np_dtype = getattr(module, attr_name)
+    except ModuleNotFoundError:
+        if dtype_name == "bfloat16":
+            try:
+                import tensorflow
+
+                return tensorflow.bfloat16.as_numpy_dtype
+            except ModuleNotFoundError:
+                raise RuntimeError(
+                    "ml-dtypes or tensorflow is needed to support bfloat16 dtype!!! "
+                    "Please install with `pip3 install ml-dtypes` or `pip3 install tensorflow`"
+                ) from None
+        raise RuntimeError(
+            f"{module_name} is needed to support {dtype_name} dtype!!! "
+            f"Please install with `pip3 install {module_name.replace('_', '-')}`"
+        ) from None
+    except AttributeError:
+        raise RuntimeError(
+            f"Please upgrade {module_name} to at least {min_version} to support {dtype_name} dtype!!! "
+            f"Command is `pip3 install --upgrade {module_name.replace('_', '-')}`"
+        ) from None
+    if min_version is not None:
+        _ensure_en_dtypes_version(min_version)
+    return np_dtype
+
+
+def map_dtypes(container, fn):
+    """Recursively apply fn to each dtype in a nested tuple/list structure.
+
+    Nesting depth is preserved; sequence levels are returned as tuples.
     """
     if not container:
         return container
-    special_dtypes = (
-        "bfloat16",
-        "int4",
-        "float8_e5m2",
-        "float8_e4m3fn",
-        "float8_e8m0",
-        "float4_e2m1",
-        "float4_e1m2",
-        "hifloat8",
-        "hifloat4",
-    )
 
     def _convert(item):
         if isinstance(item, (tuple, list)):
-            converted = [_convert(e) for e in item]
-            return tuple(converted) if isinstance(item, tuple) else list(converted)
-        if isinstance(item, str):
-            for sd in special_dtypes:
-                if sd == item:
-                    return _resolve_numpy_custom_dtype(sd)
-            if item in TF_QUANTIZED_DTYPE_NUMPY_STORAGE:
-                return TF_QUANTIZED_DTYPE_NUMPY_STORAGE[item]
-        return item
+            return tuple(_convert(e) for e in item)
+        return fn(item)
 
     return _convert(container)
+
+
+def resolve_numpy_dtypes(container):
+    """Convert custom dtype names to numpy dtype objects, supporting nested tuples/lists.
+
+    TF quantized dtypes (quint8/qint8/...) are aliased to their numpy storage
+    dtypes (uint8/int8/...); the declared dtype string stays on the testcase
+    for tf conversion (!297).
+    """
+
+    def _resolve(name):
+        if not isinstance(name, str):
+            return name
+        if name in TF_QUANTIZED_DTYPE_NUMPY_STORAGE:
+            return TF_QUANTIZED_DTYPE_NUMPY_STORAGE[name]
+        if name in _NUMPY_DTYPE_SOURCES:
+            return resolve_numpy_dtype(name)
+        return name
+
+    return map_dtypes(container, _resolve)
 
 
 def pack_4bits(src: numpy.ndarray):
@@ -843,25 +482,9 @@ def unpack_4bits(src: numpy.ndarray, dst_dtype):
     Unpack uint8 numpy array to int4 array
     """
     if isinstance(dst_dtype, str):
-        dst_dtype = _resolve_numpy_custom_dtype(dst_dtype)
+        dst_dtype = resolve_numpy_dtype(dst_dtype)
     shift = numpy.array([0, 4], dtype=numpy.uint8)
     return numpy.bitwise_and(src.reshape([-1, 1]) >> shift, 0b00001111).view(dst_dtype).reshape([-1])
-
-
-def encode_float8_e8m0(fp_array: numpy.ndarray):
-    if not isinstance(fp_array, numpy.ndarray):
-        raise NotImplementedError("only support numpy array.")
-    if fp_array.dtype.name not in ("bfloat16", "float16", "float32"):
-        raise RuntimeError(f"Dtype of input tensor to be quantized is not supported: {fp_array.dtype.name}")
-    if fp_array.dtype.name == "float16":
-        fp_array = fp_array.astype("float32")
-    if fp_array.dtype.name == "float32":
-        uint_array = fp_array.view(numpy.uint32)
-        uint_array = (uint_array << 1) >> 24
-    else:  # bfloat16
-        uint_array = fp_array.view(numpy.uint16)
-        uint_array = (uint_array << 1) >> 8
-    return uint_array.astype(numpy_float8_e8m0())
 
 
 # TF quantized dtypes (tf.quint8/qint8/...) have no numpy counterpart: numpy
@@ -895,117 +518,152 @@ def normalize_to_tf_dtype(np_array: numpy.ndarray):
     return np_array
 
 
-def tf_dtype_revert(tf_tensor):
+def normalize_from_tf_dtype(tf_tensor):
+    """Inverse of normalize_to_tf_dtype: re-view TF's bfloat16 as TTK's numpy bfloat16 if they differ."""
     if tf_tensor.dtype.name == "bfloat16":
-        ttk_bf16 = numpy_bfloat16()
+        ttk_bf16 = resolve_numpy_dtype("bfloat16")
         if ttk_bf16.dtype.type != tf_tensor.dtype.type:
             return tf_tensor.view(ttk_bf16)
     return tf_tensor
 
 
-def torch_dtype_conversion(container):
-    # convert string dtype to torch dtype
+def acl_to_torch_dtype(container):
+    """Convert a sequence of ACL dtype enum ids to torch dtype objects."""
     import torch
 
-    return tuple([getattr(torch, c) if isinstance(c, str) else c for c in container])
-
-
-def acl_to_torch_dtype(container):
-    return torch_dtype_conversion([DATA_TYPE_INT_TO_STR[ad] for ad in container])
+    names = [ACL_ID_TO_DTYPE[acl_id] for acl_id in container]
+    return tuple(getattr(torch, name) if isinstance(name, str) else name for name in names)
 
 
 def numpy_to_torch_tensor(np_array: numpy.ndarray, is_complex32: bool = False):
-    import torch
-
+    """Convert a numpy array to a torch tensor, keeping non-native dtypes (bf16/fp8/fp4/complex32)."""
     if np_array is None:
         return None
     np_dtype = np_array.dtype.name
     if "bfloat16" in np_dtype:
-        np_int16 = np_array.view(dtype=numpy.int16)
-        t_int16 = torch.from_numpy(np_int16)
-        return t_int16.view(torch.bfloat16)
+        return _numpy_bfloat16_to_torch(np_array)
     if is_4bit_dtype(np_dtype):
-        if np_dtype == "int4":
-            raise RuntimeError(f"Can only transfer numpy.ndarray to torch.Tensor with dtype [{np_dtype}]")
-        torch_dtype_name = _NUMPY_TO_TORCH_4BIT_DTYPE.get(np_dtype)
-        torch_dtype = None if torch_dtype_name is None else getattr(torch, torch_dtype_name, None)
-        if torch_dtype is not None and not isinstance(torch_dtype, torch.dtype):
-            torch_dtype = None
-        if np_array.ndim == 0 or np_array.shape[-1] % 2:
-            raise RuntimeError(f"4-bit tensor must have an even last dimension, got shape {tuple(np_array.shape)}")
-        packed_shape = (*np_array.shape[:-1], np_array.shape[-1] // 2)
-        packed = pack_4bits(numpy.ascontiguousarray(np_array)).reshape(packed_shape)
-        if torch_dtype is None:
-            # torch_npu exposes some 4-bit identifiers as ACL enum integers,
-            # not torch.dtype objects.  Keep their packed storage as uint8;
-            # the operator's dtype attribute supplies the device semantics.
-            logging.warning(
-                "Torch dtype %s is unavailable for %s; using packed uint8 storage with shape %s. "
-                "The operator must supply the device dtype semantics.",
-                torch_dtype_name,
-                np_dtype,
-                packed_shape,
-            )
-            return torch.from_numpy(packed)
-        return torch.from_numpy(packed).view(torch_dtype)
+        return _numpy_4bit_to_torch(np_array)
     if "float8" in np_dtype:
-        if np_dtype not in ("float8_e4m3fn", "float8_e5m2", "float8_e8m0"):
-            raise RuntimeError(f"Dtype [{np_dtype}] is not supported to convert to torch.Tensor yet.")
-        # numpy float8_e8m0 has no suffix; torch dtype is float8_e8m0fnu
-        torch_dtype_name = {
-            "float8_e4m3fn": "float8_e4m3fn",
-            "float8_e5m2": "float8_e5m2",
-            "float8_e8m0": "float8_e8m0fnu",
-        }[np_dtype]
-        if not hasattr(torch, torch_dtype_name):
-            raise RuntimeError(
-                f"Current pytorch version [{torch.__version__}] is too old. {torch_dtype_name} is not supported."
-            )
-        return torch.from_numpy(np_array.view(dtype=numpy.uint8)).view(getattr(torch, torch_dtype_name))
+        return _numpy_float8_to_torch(np_array)
     if is_complex32:
-        if np_dtype != "float16":
-            raise RuntimeError(f"Can only transfer numpy.float16 to torch.complex32 rather than {np_dtype}")
-        if not hasattr(torch, "complex32"):
-            raise RuntimeError(
-                f"Current pytorch version [{torch.__version__}] is too old. Please update to at least v1.13.1"
-            )
-        ret = torch.from_numpy(np_array)
-        return ret.view(torch.complex32)
+        return _numpy_complex32_to_torch(np_array)
+    import torch
+
     return torch.from_numpy(np_array)
 
 
+def _numpy_bfloat16_to_torch(np_array: numpy.ndarray):
+    import torch
+
+    return torch.from_numpy(np_array.view(dtype=numpy.int16)).view(torch.bfloat16)
+
+
+def _numpy_4bit_to_torch(np_array: numpy.ndarray):
+    import torch
+
+    np_dtype = np_array.dtype.name
+    if np_dtype == "int4":
+        raise RuntimeError("int4 numpy arrays cannot be converted to torch.Tensor (no functional torch.int4)")
+    torch_dtype_name = _NUMPY_TO_TORCH_4BIT_DTYPE.get(np_dtype)
+    torch_dtype = None if torch_dtype_name is None else getattr(torch, torch_dtype_name, None)
+    if torch_dtype is not None and not isinstance(torch_dtype, torch.dtype):
+        torch_dtype = None
+    if np_array.ndim == 0 or np_array.shape[-1] % 2:
+        raise RuntimeError(f"4-bit tensor must have an even last dimension, got shape {tuple(np_array.shape)}")
+    packed_shape = (*np_array.shape[:-1], np_array.shape[-1] // 2)
+    packed = pack_4bits(numpy.ascontiguousarray(np_array)).reshape(packed_shape)
+    if torch_dtype is None:
+        # torch_npu exposes some 4-bit identifiers as ACL enum integers,
+        # not torch.dtype objects.  Keep their packed storage as uint8;
+        # the operator's dtype attribute supplies the device semantics.
+        logging.warning(
+            "Torch dtype %s is unavailable for %s; using packed uint8 storage with shape %s. "
+            "The operator must supply the device dtype semantics.",
+            torch_dtype_name,
+            np_dtype,
+            packed_shape,
+        )
+        return torch.from_numpy(packed)
+    return torch.from_numpy(packed).view(torch_dtype)
+
+
+def _numpy_float8_to_torch(np_array: numpy.ndarray):
+    import torch
+
+    torch_dtype_name = _NUMPY_TO_TORCH_FLOAT8_DTYPE.get(np_array.dtype.name)
+    if torch_dtype_name is None:
+        raise RuntimeError(f"Dtype [{np_array.dtype.name}] is not supported to convert to torch.Tensor yet.")
+    if not hasattr(torch, torch_dtype_name):
+        raise RuntimeError(
+            f"Current pytorch version [{torch.__version__}] is too old. {torch_dtype_name} is not supported."
+        )
+    return torch.from_numpy(np_array.view(dtype=numpy.uint8)).view(getattr(torch, torch_dtype_name))
+
+
+def _numpy_complex32_to_torch(np_array: numpy.ndarray):
+    import torch
+
+    if np_array.dtype.name != "float16":
+        raise RuntimeError(f"Can only transfer numpy.float16 to torch.complex32 rather than {np_array.dtype.name}")
+    if not hasattr(torch, "complex32"):
+        raise RuntimeError(
+            f"Current pytorch version [{torch.__version__}] is too old. Please update to at least v1.13.1"
+        )
+    return torch.from_numpy(np_array).view(torch.complex32)
+
+
 def torch_to_numpy_tensor(torch_tensor) -> numpy.ndarray:
+    """Convert a torch tensor to a numpy array, keeping non-native dtypes (bf16/fp8/fp4/complex32)."""
     import torch
 
     if torch_tensor is None:
         return None
     if not isinstance(torch_tensor, torch.Tensor):
         raise RuntimeError(f"Only support torch.Tensor. But got {type(torch_tensor)}")
-    torch_dtype = torch_tensor.dtype
-    torch_dtype_str = str(torch_dtype)
-    if torch_dtype == torch.bfloat16:
-        t_int16 = torch_tensor.view(torch.int16)
-        np_int16 = t_int16.numpy()
-        return np_int16.view(dtype=numpy_bfloat16())
-    if "complex32" in torch_dtype_str:
-        t_fp16 = torch_tensor.view(torch.float16)
-        return t_fp16.numpy()
-    if "float8" in torch_dtype_str:
-        np_func_suffix = torch_dtype_str.rsplit(".", maxsplit=1)[-1].replace("fnu", "")
-        np_dtype = _resolve_numpy_custom_dtype(np_func_suffix)
-        np_uint8 = torch_tensor.view(torch.uint8).numpy()
-        return np_uint8.view(np_dtype)
-    if is_4bit_dtype(torch_dtype_str):
-        np_uint8 = torch_tensor.view(torch.uint8).numpy()
-        torch_dtype_name = torch_dtype_str.rsplit(".", maxsplit=1)[-1]
-        for np_name, torch_name in _NUMPY_TO_TORCH_4BIT_DTYPE.items():
-            if torch_name == torch_dtype_name:
-                unpacked = unpack_4bits(np_uint8, _resolve_numpy_custom_dtype(np_name))
-                if np_uint8.ndim == 0:
-                    return unpacked
-                return unpacked.reshape(*np_uint8.shape[:-1], np_uint8.shape[-1] * 2)
-        raise RuntimeError(f"Unsupported torch 4-bit dtype [{torch_dtype_str}]")
+    dtype_str = str(torch_tensor.dtype)
+    if torch_tensor.dtype == torch.bfloat16:
+        return _torch_bfloat16_to_numpy(torch_tensor)
+    if "complex32" in dtype_str:
+        return torch_tensor.view(torch.float16).numpy()
+    if "float8" in dtype_str:
+        return _torch_float8_to_numpy(torch_tensor)
+    if is_4bit_dtype(dtype_str):
+        return _torch_4bit_to_numpy(torch_tensor)
     return torch_tensor.numpy()
+
+
+def _torch_bfloat16_to_numpy(torch_tensor):
+    import torch
+
+    np_int16 = torch_tensor.view(torch.int16).numpy()
+    return np_int16.view(dtype=resolve_numpy_dtype("bfloat16"))
+
+
+def _torch_float8_to_numpy(torch_tensor):
+    import torch
+
+    suffix = str(torch_tensor.dtype).rsplit(".", maxsplit=1)[-1].replace("fnu", "")
+    np_uint8 = torch_tensor.view(torch.uint8).numpy()
+    return np_uint8.view(resolve_numpy_dtype(suffix))
+
+
+def _torch_4bit_to_numpy(torch_tensor):
+    import torch
+
+    np_uint8 = torch_tensor.view(torch.uint8).numpy()
+    torch_dtype_name = str(torch_tensor.dtype).rsplit(".", maxsplit=1)[-1]
+    for np_name, torch_name in _NUMPY_TO_TORCH_4BIT_DTYPE.items():
+        if torch_name == torch_dtype_name:
+            unpacked = unpack_4bits(np_uint8, resolve_numpy_dtype(np_name))
+            if np_uint8.ndim == 0:
+                return unpacked
+            return unpacked.reshape(*np_uint8.shape[:-1], np_uint8.shape[-1] * 2)
+    raise RuntimeError(f"Unsupported torch 4-bit dtype [{torch_dtype_name}]")
+
+
+# MX quantization element dtypes (the target formats mx_quantize supports).
+MX_ELEMENT_DTYPES = ("float4_e2m1", "float4_e1m2", "float8_e4m3fn", "float8_e5m2")
 
 
 def _mx_reshape_to_blocks(fp_array: numpy.ndarray, axis: int, block_size: int):
@@ -1048,21 +706,20 @@ def _mx_calculate_share_exp(fp_array: numpy.ndarray, scale_axis: int, mx_ele_dty
 
 
 def _mx_calculate_share_exp_nv(fp_array: numpy.ndarray, scale_axis: int, mx_ele_dtype: str):
-    import numpy
-
     max_norm = get_dtype_range(mx_ele_dtype)[1]
     fp_abs_max = numpy.max(numpy.abs(fp_array), axis=scale_axis, keepdims=True).astype(numpy.float32)
     s_fp32 = fp_abs_max / max_norm
     binary_ints = numpy.array(s_fp32.view(numpy.uint32))
-    exponent_mask = numpy.uint32(0x7F800000)  # 二进制：01111111100000000000000000000000
-    mantissa_mask = numpy.uint32(0x007FFFFF)  # 二进制：00000000011111111111111111111111
-    # 提取指数部分并转换为uint16
+    exponent_mask = numpy.uint32(0x7F800000)
+    mantissa_mask = numpy.uint32(0x007FFFFF)
+    # Extract the exponent bits and convert to int16
     exponents = (binary_ints & exponent_mask) >> 23
     exponents_int16 = exponents.astype(numpy.int16)
-    # 提取尾数部分并转换为float
+    # Extract the mantissa bits
     mantissas = binary_ints & mantissa_mask
     condition_1 = (exponents_int16 > 0) & (exponents_int16 < 254) & (mantissas > 0)
-    # 2 ** 23 fp32的尾数位值0.5，即：二进制：0 00000000 10000000000000000000000
+    # A mantissa >= 2**22 with zero exponent means the fp32 value rounds up to
+    # the next power of two when ties are broken away from zero.
     condition_2 = (exponents_int16 == 0) & (mantissas > 2**22)
     exponents_int16 = numpy.where((condition_1 | condition_2), exponents_int16 + 1, exponents_int16)
     res = (exponents_int16 - 127).astype(numpy.float32)
@@ -1126,68 +783,47 @@ def _mx_quantize_to_element_format(
     return ret
 
 
-def pad_to_even(tensor: numpy.ndarray, axis: int) -> numpy.ndarray:
+def _pad_scale_to_even(tensor: numpy.ndarray, axis: int) -> numpy.ndarray:
+    """Pad `axis` to an even length.
+
+    The pad value is 2**-127 (the smallest representable E8M0 scale), NOT
+    zero: E8M0 is a pure exponent format and cannot encode 0, so a zero pad
+    would corrupt the scale stream.
     """
-    在指定的 axis 上将 tensor 对齐到偶数长度（即按 2 对齐），不足补 0。
-
-    参数:
-        tensor (numpy.ndarray): 输入数组
-        axis (int): 要对齐的轴（从 0 开始）
-
-    返回:
-        numpy.ndarray: 对齐后的数组
-    """
-    if not isinstance(tensor, numpy.ndarray):
-        raise ValueError("Input must be a numpy ndarray.")
-    if axis < 0 or axis >= tensor.ndim:
-        raise ValueError(f"Axis {axis} is out of bounds for tensor with {tensor.ndim} dimensions.")
-
-    shape = tensor.shape
-    length = shape[axis]
-
-    # 如果已经是偶数，直接返回原数组
-    if length % 2 == 0:
+    if tensor.shape[axis] % 2 == 0:
         return tensor
-
-    # 构造 pad_width：仅对目标 axis 补一个 0
     pad_width = [(0, 0)] * tensor.ndim
-    pad_width[axis] = (0, 1)  # 在 axis 维度末尾补一个 0
-
-    padded_tensor = numpy.pad(tensor, pad_width, mode="constant", constant_values=2**-127)
-    return padded_tensor
+    pad_width[axis] = (0, 1)
+    return numpy.pad(tensor, pad_width, mode="constant", constant_values=2**-127)
 
 
-def interleave(tensor: numpy.ndarray, axis: int, n_group: int = 2) -> numpy.ndarray:
-    if not isinstance(tensor, numpy.ndarray):
-        raise ValueError("Input must be a numpy ndarray.")
-    if axis < 0 or axis >= tensor.ndim:
-        raise ValueError(f"Axis {axis} is out of bounds for tensor with {tensor.ndim} dimensions.")
-    # 获取目标轴的长度
-    length = tensor.shape[axis]
-    # 检查是否可整除
-    if length % n_group != 0:
-        raise ValueError(f"Axis length ({length}) must be divisible by n_group ({n_group})")
+def _interleave_pairs(tensor: numpy.ndarray, axis: int) -> numpy.ndarray:
+    """Make `axis`-adjacent elements contiguous in a trailing pair dimension.
 
-    group_length = length // n_group  # 每组长度
+    (..., n, ...) with even n along `axis` becomes (..., n//2, ..., 2).
+    """
+    if tensor.shape[axis] % 2:
+        raise ValueError(f"Axis length ({tensor.shape[axis]}) must be even")
     shape = list(tensor.shape)
+    new_shape = shape[:axis] + [shape[axis] // 2, 2] + shape[axis + 1 :]
+    transpose_order = list(range(axis + 1)) + list(range(axis + 2, len(new_shape))) + [axis + 1]
+    return tensor.reshape(new_shape).transpose(transpose_order)
 
-    # 重塑形状：在目标轴后插入组维度
-    new_shape = shape[:axis] + [group_length, 2] + shape[axis + 1 :]
-    reshaped = tensor.reshape(new_shape)
 
-    # 构建转置顺序：交换组维度和组内维度
-    transpose_order = (
-        list(range(axis + 1))  # 目标轴之前的维度
-        + list(range(axis + 2, len(new_shape)))
-        + [
-            axis + 1,
-        ]
-    )  # 后续维度
+def _mx_pack_scales(scale_array: numpy.ndarray, axis: int) -> numpy.ndarray:
+    """Pack float32 scales into the NPU MX scale layout: pairs along `axis` as a trailing dim of 2.
 
-    # 执行转置
-    transposed = reshaped.transpose(transpose_order)
-
-    return transposed
+    Cube units require an even number of scales, so odd tails are padded first.
+    For non-last axes, axis-adjacent scales are interleaved so that each pair
+    becomes memory-contiguous before the final (..., n//2, 2) reshape.
+    """
+    scale_array = _pad_scale_to_even(scale_array, axis=axis)
+    result_shape = list(scale_array.shape)
+    result_shape[axis] //= 2
+    result_shape.append(2)
+    if axis != len(scale_array.shape) - 1:
+        scale_array = _interleave_pairs(scale_array, axis=axis)
+    return scale_array.reshape(result_shape).astype(resolve_numpy_dtype("float8_e8m0"), copy=False)
 
 
 def mx_quantize(
@@ -1218,7 +854,7 @@ def mx_quantize(
         raise RuntimeError(f"Input tensor to be quantized should be numpy array. But got {type(fp_array)}")
     if fp_array.dtype.name not in ("bfloat16", "float16", "float32"):
         raise RuntimeError(f"Dtype of input tensor to be quantized is not supported: {fp_array.dtype.name}")
-    if mx_ele_dtype not in ("float4_e2m1", "float4_e1m2", "float8_e4m3fn", "float8_e5m2"):
+    if mx_ele_dtype not in MX_ELEMENT_DTYPES:
         raise NotImplementedError(f"Not support {mx_ele_dtype} yet!")
 
     axis = len(fp_array.shape) + axis if axis < 0 else axis
@@ -1238,254 +874,21 @@ def mx_quantize(
     # undo reshape
     ele_array = _mx_undo_reshape_to_blocks(ele_array, axis, orig_shape, padded_shape)
     share_exp = numpy.squeeze(share_exp, axis=axis + 1)
-    # convert to fp8_e8m0 & fp4/fp8 dtype
-    ele_dtype_np = _resolve_numpy_custom_dtype(mx_ele_dtype)
+
+    ele_dtype_np = resolve_numpy_dtype(mx_ele_dtype)
     # share_exp is always float32
     scale_array = 2**share_exp
     if ele_array.dtype.name == "bfloat16":
         ele_array = ele_array.astype("float32", copy=False)
-
     # NPU will cast NaN (with or without sign) to positive ZERO (sign is dropped)
     ele_array = numpy.nan_to_num(ele_array, nan=0.0, copy=False)
     ele_array = ele_array.astype(ele_dtype_np, copy=False)
-    # Cube only supports even scales. need to pad zero.
-    scale_array_pad = pad_to_even(scale_array, axis=axis)
-
-    result_shape = copy.deepcopy(list(scale_array_pad.shape))
-    result_shape.append(2)
-
-    result_shape[axis] = scale_array_pad.shape[axis] // 2
-    # when axis is -1, do not need interleave
-    if axis != (len(fp_array.shape) - 1):
-        scale_array_pad = interleave(scale_array_pad, axis=axis)
-    scale_array_pad = scale_array_pad.reshape(result_shape)
-
-    scale_array = scale_array_pad.astype(numpy_float8_e8m0(), copy=False)
+    scale_array = _mx_pack_scales(scale_array, axis=axis)
 
     return scale_array, ele_array
 
 
-def _grouped_mx_undo_reshape_to_blocks(
-    fp_array: numpy.ndarray, group_index: numpy.ndarray, axis: int, padded_group_index: list, padded_shape: tuple
-) -> numpy.ndarray:
-    """
-    根据 group_index 和 padded_group_index 还原被分组补 Pad 的数组
-
-    Args:
-        fp_array: 输入数组（已分块和补 Pad）
-        axis: 原始分组轴
-        group_index: 原始分组索引（未补 Pad）
-        padded_group_index: 补 Pad 后的分组索引
-        padded_shape: 补 Pad 后的形状（含 expand_dims）
-
-    Returns:
-        restored_array: 还原后的原始数组（未补 Pad）
-    """
-    # Step 1: Undo reshape to blocks
-    print(padded_shape)
-    fp_array = fp_array.reshape(padded_shape)
-
-    # Step 2: Remove the expanded dimension (axis+1)
-    fp_array = numpy.squeeze(fp_array, axis=axis + 1)
-
-    # Step 3: Split into padded groups
-    split_indices = padded_group_index[:-1]  # 获取分割点（排除最后一个总长度）
-    groups = numpy.split(fp_array, split_indices, axis=axis)
-
-    # Step 4: Trim padding from each group
-    trimmed_groups = []
-    prev = 0
-    for i, end in enumerate(group_index):
-        # 计算原始组长度
-        original_length = end - prev
-        # 沿 axis 轴截取原始数据（去掉 Pad 部分）
-        slices = [slice(None)] * fp_array.ndim
-        slices[axis] = slice(0, original_length)
-        trimmed_group = groups[i][tuple(slices)]
-        trimmed_groups.append(trimmed_group)
-        prev = end
-
-    # Step 5: Concatenate trimmed groups
-    restored_array = numpy.concatenate(trimmed_groups, axis=axis)
-    return restored_array
-
-
-def _grouped_mx_reshape_to_blocks(fp_array: numpy.ndarray, group_index: numpy.ndarray, axis: int, block_size: int):
-    """
-    根据 group_index 对 fp_array 按轴分组，每个组内按 block_size 对齐补 Pad
-
-    Args:
-        fp_array: 输入数组
-        group_index: 分组索引，定义每个组的结束位置
-        axis: 需要分组的轴
-        block_size: 块大小，每个组内长度需对齐到此值的整数倍
-
-    Returns:
-        reshaped_array: 分块后的数组
-        padded_group_index: 补 Pad 后的 group_index
-        padded_shape: 补 Pad 后的形状（包含 expand_dims 后的维度）
-    """
-    # Step 1: Split into groups based on group_index
-    groups = []
-    padded_group_index = []
-    prev = 0
-
-    for end in group_index:
-        # 沿 axis 轴切片
-        slices = [slice(None)] * fp_array.ndim
-        slices[axis] = slice(prev, end)
-        group = fp_array[tuple(slices)]
-        groups.append(group)
-        prev = end
-
-    # Step 2: Pad each group to align with block_size
-    padded_groups = []
-    padded_index = 0
-    for group in groups:
-        group_len = group.shape[axis]
-        pad_size = (block_size - (group_len % block_size)) % block_size
-        if pad_size > 0:
-            # 构造 Pad 宽度，仅在 axis 轴补 Pad
-            pad_width = [(0, 0)] * group.ndim
-            pad_width[axis] = (0, pad_size)
-            padded_group = numpy.pad(group, pad_width, mode="constant")
-        else:
-            padded_group = group
-        padded_index = padded_index + group_len + pad_size
-        padded_groups.append(padded_group)
-        padded_group_index.append(padded_index)
-
-    # Step 3: Concatenate all groups along axis
-    padded_array = numpy.concatenate(padded_groups, axis=axis)
-    # Step 4: Expand dimensions as in original function
-    expanded_array = numpy.expand_dims(padded_array, axis=axis + 1)
-    # Step 5: Reshape into blocks
-    # 总块数 = 总长度（已对齐）// block_size
-    total_blocks = padded_array.shape[axis] // block_size
-    reshape = list(expanded_array.shape)
-    reshape[axis] = total_blocks  # 替换原轴为块数
-    reshape.insert(axis + 1, block_size)  # 插入块大小维度
-
-    reshaped_array = expanded_array.reshape(reshape)
-    padded_shape = expanded_array.shape  # 补 Pad 后的形状（包含 expand_dims）
-
-    return reshaped_array, padded_group_index, padded_shape
-
-
-def reshape_scale_array_pad(scale_array: numpy.ndarray, group_index: numpy.ndarray, axis):
-    import math
-
-    scale_array = numpy.squeeze(scale_array, 1)
-    cur_idx = 0
-    pre_element = 0
-    for idx, element in enumerate(group_index):
-        next_group_start = (element // 64 + idx + 1) * 2  # 下一个group的初始地址
-        real_idx = cur_idx + math.ceil((element - pre_element) / 32)  # 实际计算到多少行
-        pad_idx = math.ceil(real_idx / 2) * 2  # 需要pad到多少行
-        zero_row = numpy.full((1, scale_array.shape[1]), 2**-127)
-        one_row = numpy.full((1, scale_array.shape[1]), 1)
-        for i in range(real_idx, pad_idx):
-            scale_array = numpy.insert(scale_array, i, zero_row, axis=0)
-        for i in range(pad_idx, next_group_start):
-            scale_array = numpy.insert(scale_array, i, one_row, axis=0)
-        pre_element = element  # 前一个element
-        cur_idx = next_group_start  # 当前计算到多少行
-
-    scale_array = (
-        scale_array.reshape(int(scale_array.shape[0] / 2), 2, scale_array.shape[1])
-        .transpose(0, 2, 1)
-        .reshape(int(scale_array.shape[0] / 2), scale_array.shape[1], 2)
-    )
-
-    return scale_array
-
-
-def grouped_mx_quantize(
-    fp_array: numpy.ndarray,
-    group_index: numpy.ndarray,
-    mx_ele_dtype: str = "float8_e5m2",
-    axis: int = -2,
-    block_size: int = 32,
-    round_mode: str = "rint",
-) -> tuple:
-    """
-    quantize BFP16/FP16 to MX dtypes
-    :parameter fp_array: input numpy array with dtype BFP16/FP16
-    :parameter mx_ele_dtype: dtype of element in MX dtype.
-               support float8_e4m3fn/float8_e5m2
-    :parameter axis: specify the axis across which shared scales/exponents are calculated.
-    :parameter block_size: each block_size shares the same mx scale along the axis
-    :parameter round_mode: round mode. support rint/floor/round/nearest
-    :return: mx-scale-exponents & mx-elements
-
-    NOTE: Scenarios below should be considered and tested when TRYING to modify this code:
-    1. block with only subnormal floats
-    2. block with only one nan
-    3. block with only one inf or -inf
-    """
-    if not isinstance(fp_array, numpy.ndarray):
-        raise RuntimeError(f"Input tensor to be quantized should be numpy array. But got {type(fp_array)}")
-    if fp_array.dtype.name not in ("bfloat16", "float16"):
-        raise RuntimeError(f"Dtype of input tensor to be quantized is not supported: {fp_array.dtype.name}")
-    if mx_ele_dtype not in ("float8_e4m3fn", "float8_e5m2"):
-        raise NotImplementedError(f"Not support {mx_ele_dtype} yet!")
-
-    def is_non_reverse_order(arr):
-        if len(arr) <= 1:
-            return True  # 空数组或单元素数组视为逆序
-        diff = numpy.diff(arr)
-        return numpy.all(diff >= 0)
-
-    if not is_non_reverse_order(group_index):
-        raise RuntimeError("Input tensor group_index should be non-reverse order.")
-
-    axis = len(fp_array.shape) + axis if axis < 0 else axis
-    if axis not in (-2, 0):
-        raise RuntimeError(f"Not support {axis} yet!")
-
-    if group_index[-1] != fp_array.shape[axis]:
-        raise RuntimeError("The last element of group_index should match the dimension size of the input x axis.")
-
-    # padding & reshape to block_size
-    fp_array, padded_group_index, padded_shape = _grouped_mx_reshape_to_blocks(fp_array, group_index, axis, block_size)
-    # get mx scale exponents
-    share_exp = _mx_calculate_share_exp(fp_array, scale_axis=axis + 1, mx_ele_dtype=mx_ele_dtype)
-    scale_emax = 2 ** (8 - 1) - 1  # 8 for E8M0
-    share_exp[share_exp > scale_emax] = float("NaN")
-    share_exp[share_exp < -scale_emax] = -scale_emax
-
-    # quantize mx element
-    ele_array = _mx_quantize_to_element_format(fp_array, share_exp, mx_ele_dtype, round_mode)
-    # undo reshape
-    ele_array = _grouped_mx_undo_reshape_to_blocks(ele_array, group_index, axis, padded_group_index, padded_shape)
-    share_exp = numpy.squeeze(share_exp, axis=axis + 1)
-    # convert to fp8_e8m0 & fp8 dtype
-    ele_dtype_np = _resolve_numpy_custom_dtype(mx_ele_dtype)
-    # share_exp is always float32
-    scale_array = 2**share_exp
-    if ele_array.dtype.name == "bfloat16":
-        ele_array = ele_array.astype("float32", copy=False)
-
-    # NPU will cast NaN (with or without sign) to positive ZERO (sign is dropped)
-    ele_array = numpy.nan_to_num(ele_array, nan=0.0, copy=False)
-    ele_array = ele_array.astype(ele_dtype_np, copy=False)
-    scale_array = reshape_scale_array_pad(scale_array, group_index, axis)
-    scale_array = scale_array.astype(numpy_float8_e8m0(), copy=False)
-
-    return scale_array, ele_array
-
-
-def fp32_to_hf32(torch_tensor):
-    import torch
-
-    data_hf32 = torch_tensor.numpy().view(numpy.int32)
-    data_hf32 = numpy.right_shift(numpy.right_shift(data_hf32, 12) + 1, 1)
-    data_hf32 = numpy.left_shift(data_hf32, 13)
-    data_hf32 = data_hf32.view(numpy.float32)
-    return torch.from_numpy(data_hf32)
-
-
-def is_torch_native_dtype(dtype_name):
+def is_torch_native_dtype(dtype_name) -> bool:
     """Check if a dtype name is natively supported by the current torch version.
 
     Uses ``hasattr(torch, dtype_name)`` to dynamically detect support,
@@ -1502,10 +905,39 @@ def is_torch_native_dtype(dtype_name):
     name = str(dtype_name)
     if name == "int4":
         return False
-    torch_alias = {"float8_e8m0": "float8_e8m0fnu"}.get(name)
-    if torch_alias is not None:
-        return hasattr(torch, torch_alias)
-    return hasattr(torch, name)
+    return hasattr(torch, _TORCH_DTYPE_ALIAS.get(name, name))
+
+
+def _import_module_safe(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
+
+
+def str_to_torch_dtype(dtype_str: str):
+    """Convert a dtype string to a torch/torch_npu dtype object.
+
+    Accepts bare names ('float16') and qualified names ('torch.float16',
+    'torch_npu.hifloat8').  A bare name resolves against torch first, then
+    torch_npu.  Returns None when the name is not recognized (including when
+    the required module is not installed); non-str input is returned unchanged.
+    """
+    if not isinstance(dtype_str, str):
+        return dtype_str
+    parts = dtype_str.split(".")
+    if len(parts) > 2:
+        return None
+    canonical = parts[-1]
+    if len(parts) == 2 and parts[0] not in ("torch", "torch_npu"):
+        return None
+    if len(parts) == 1 and is_torch_native_dtype(canonical):
+        module = _import_module_safe("torch")
+    else:
+        module = _import_module_safe(parts[0] if len(parts) == 2 else "torch_npu")
+    if module is None:
+        return None
+    return getattr(module, _TORCH_DTYPE_ALIAS.get(canonical, canonical), None)
 
 
 _TF_DTYPE_MAP = {
@@ -1546,7 +978,7 @@ def str_to_tf_dtype(dtype_str: str):
         return dtype_str
     import tensorflow as tf
 
-    canonical = dtype_map.get(dtype_str, dtype_str)
+    canonical = DTYPE_MAP.get(dtype_str, dtype_str)
     tf_name = _TF_DTYPE_MAP.get(canonical)
     if tf_name is None:
         return None
@@ -1555,33 +987,5 @@ def str_to_tf_dtype(dtype_str: str):
 
 def is_tf_native_dtype(dtype_name) -> bool:
     """Check if a dtype name is natively supported by TensorFlow."""
-    canonical = dtype_map.get(str(dtype_name), str(dtype_name))
+    canonical = DTYPE_MAP.get(str(dtype_name), str(dtype_name))
     return canonical in _TF_DTYPE_MAP
-
-
-def np_as_strided_safe(base, shape, strides):
-    """numpy as_strided that handles non-native dtypes (e.g. ml_dtypes.float8_e5m2).
-
-    numpy.as_strided internally calls np.asarray which fails with
-    ``TypeError: data type '<f1' not understood`` for certain third-party
-    dtypes (kind='f' but internal type code conflicts with numpy reserved codes).
-    Workaround: view the array as numpy.void with same itemsize, apply as_strided,
-    then view back to original dtype.
-
-    Native numpy dtypes (kind in 'biufcmMOSUV') skip the try/except overhead.
-    Third-party dtypes with kind='V' work natively and also skip the fallback.
-    Only the problematic case (kind='f' but non-standard, like ml_dtypes.float8_e5m2)
-    triggers the void-proxy workaround.
-    """
-    from numpy.lib.stride_tricks import as_strided as _np_as_strided
-
-    dtype = base.dtype
-    if dtype.kind != "f" or dtype.char in ("f", "d", "e", "g"):
-        return _np_as_strided(base, shape=shape, strides=strides)
-    try:
-        return _np_as_strided(base, shape=shape, strides=strides)
-    except (TypeError, ValueError):
-        proxy = numpy.dtype((numpy.void, dtype.itemsize))
-        base_proxy = base.view(proxy)
-        view_proxy = _np_as_strided(base_proxy, shape=shape, strides=strides)
-        return view_proxy.view(dtype)

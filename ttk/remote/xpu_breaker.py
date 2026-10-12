@@ -7,9 +7,9 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""三方腿连续失败熔断器。
+"""三方采集连续失败熔断器。
 
-三方腿失败在 collector 里被收成 ``{"status": "FAIL", ...}`` 后跑批照常推进 ——
+三方采集失败在 collector 里被收成 ``{"status": "FAIL", ...}`` 后跑批照常推进 ——
 对**偶发**抖动这是对的。但配置性故障(免传输打到不支持的服务端、端点整段不可
 用、服务端缺 spec 依赖)每一例都会失败，降级就成了跑满全程产出空数据：判据带
 ``--compare close`` 的档甚至照报 PASS，只有事后数 ``device_us`` 才看得出来。
@@ -33,7 +33,7 @@ _STATE_NAME = "xpu_breaker.json"
 
 
 class XpuLegBrokenError(RuntimeError):
-    """三方腿连续失败到阈值 —— 这一轮的三方数据不可用, 跑批以非零码退出。"""
+    """三方采集连续失败到阈值 —— 这一轮的三方数据不可用, 跑批以非零码退出。"""
 
 
 def limit() -> int:
@@ -44,7 +44,7 @@ def limit() -> int:
     try:
         return int(raw)
     except ValueError:
-        logging.warning("TTK_XPU_FAIL_LIMIT=%r 不是整数, 用默认值 %d", raw, DEFAULT_LIMIT)
+        logging.warning("TTK_XPU_FAIL_LIMIT=%r is not an integer, using default %d", raw, DEFAULT_LIMIT)
         return DEFAULT_LIMIT
 
 
@@ -69,9 +69,9 @@ def reset(root_path: str) -> None:
 
 
 def record(root_path: str, ok: bool, reason: str = "") -> None:
-    """记一例三方腿结果。ok=False 累加连续计数, ok=True 清零。
+    """记一例三方采集结果。ok=False 累加连续计数, ok=True 清零。
 
-    只在三方腿**被请求过**的用例上调用(见 client.dispatch_xpu)；没有三方腿的
+    只在三方采集**被请求过**的用例上调用(见 client.dispatch_xpu)；没有三方采集的
     跑批不会进这里, 因此不存在"没配三方也熔断"的问题。
     """
     if limit() <= 0:
@@ -105,6 +105,7 @@ def tripped(root_path: str) -> tuple:
     if not st.get("tripped"):
         return False, ""
     return True, (
-        f"三方腿连续 {st.get('consec_fail', 0)} 例失败(累计失败 {st.get('total_fail', 0)} / "
-        f"成功 {st.get('total_ok', 0)}), 最后一条: {st.get('reason', '')}"
+        f"third-party leg failed {st.get('consec_fail', 0)} case(s) in a row "
+        f"(total fail {st.get('total_fail', 0)} / ok {st.get('total_ok', 0)}), "
+        f"last reason: {st.get('reason', '')}"
     )

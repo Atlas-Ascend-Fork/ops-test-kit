@@ -1,0 +1,25 @@
+testcase_name,api_name,tensor_view_shapes,tensor_dtypes,tensor_formats,tensor_storage_shapes,tensor_view_strides,tensor_view_offsets,attributes,output_tensor_indexes,golden_api,input_data_ranges,precision_tolerances,absolute_precision,remark
+add_f32_alpha,torch.add,"((2,3,4),(2,3,4))","('float32','float32')",,,,,{'alpha':1.0},,,,,,基础双输入算子：f32 基线精度 + alpha 属性
+add_f16,torch.add,"((128,256),(128,256))","('float16','float16')",,,,,{'alpha':1.0},,,,,,dtype 覆盖：float16 + f16 低精度容差档
+add_bf16,torch.add,"((64,32),(64,32))","('bfloat16','bfloat16')",,,,,{'alpha':1.0},,,,,,dtype 覆盖：bfloat16
+add_int32,torch.add,"((8,),(8,))","('int32','int32')",,,,,{'alpha':1},,,,,,dtype 覆盖：int32（整型 binary_equal 精确比对）
+add_int8,torch.add,"((8,),(8,))","('int8','int8')",,,,,{'alpha':1},,,,,,dtype 覆盖：int8（整型 binary_equal 精确比对）
+add_int16,torch.add,"((8,),(8,))","('int16','int16')",,,,,{'alpha':1},,,,,,dtype 覆盖：int16（整型 binary_equal 精确比对）
+add_int64,torch.add,"((8,),(8,))","('int64','int64')",,,,,{'alpha':1},,,,,,dtype 覆盖：int64（整型 binary_equal 精确比对）
+add_uint8,torch.add,"((8,),(8,))","('uint8','uint8')",,,,,{'alpha':1},,,,,,dtype 覆盖：uint8（整型 binary_equal 精确比对）
+add_bool,torch.add,"((8,),(8,))","('bool','bool')",,,,,,,,,,,dtype 覆盖：bool（logical or 语义，binary_equal）
+add_f64,torch.add,"((2,3),(2,3))","('float64','float64')",,,,,{'alpha':1.0},,,,,,dtype 覆盖：float64（双精度走 mix_tolerance）
+add_complex64,torch.add,"((4,),(4,))","('complex64','complex64')",,,,,{'alpha':1.0},,,,,,dtype 覆盖：complex64（isclose 比对）
+pad_fp8_e5m2,torch.nn.functional.pad,"((2, 8),)","('float8_e5m2',)",,,,,"{'pad': [1, 2], 'mode': 'constant', 'value': 0.0}",,,,,,低比特 dtype：float8_e5m2 常量零填充（mix 按 fp8 分档容差）
+pad_fp8_e4m3,torch.nn.functional.pad,"((2, 8),)","('float8_e4m3fn',)",,,,,"{'pad': [1, 2], 'mode': 'constant', 'value': 0.0}",,,,,,低比特 dtype：float8_e4m3fn 常量零填充（mix 按 fp8 分档容差）
+pad_fp8_e8m0,torch.nn.functional.pad,"((2, 8),)","('float8_e8m0fnu',)",,,,,"{'pad': [1, 2], 'mode': 'constant', 'value': 1.0}",,,,,,低比特 dtype：float8_e8m0fnu 填充 1（e8m0 无 0 表示，value=0 双端 overflow，binary_equal）
+add_range_mustappear,torch.add,"((16,),(16,))","('float32','float32')",,,,,{'alpha':2.0},,,"((-1,1,0),(-1,1,0))",,,input_data_ranges 值域定制 + 第 3 元必现值 0（alpha=2 时 0 保持 0）
+add_broadcast,torch.add,"((4,1,3),(1,5,3))","('float32','float32')",,,,,{'alpha':2.0},,,,,,"广播语义：输入 shape 自动推导输出 (4,5,3)"
+add_out,torch.add,"((2,3),(2,3),(2,3))","('float32','float32','float32')",,,,,{'alpha':1.0},"(2,)",,,,,"out= 输出参数位：CSV 声明输出槽，output_tensor_indexes=(2,)"
+add_strided_view,torch.add,"((32,),(32,))","('float32','float32')",,"((64,),(64,))","((2,),(2,))","(0,1)",{'alpha':1.0},,,,,,"非连续视图：双侧 stride=2、存储 (64,)、视图 (32,)，offset 0/1 各取奇偶元素"
+cat_tensorlist,torch.cat,"(((2,3),(4,3)),)","('float32',)",,,,,{'dim':0},,,,,,TensorList 嵌套输入（2 张量变长拼接）+ dim 属性
+abs_01,torch.abs,"((2,3,4),)","('float32',)",,,,,,,,,,,单输入、无属性算子
+relu_f16,torch.nn.functional.relu,"((64,128),)","('float16',)",,,,,{'inplace':False},,,,,,functional API + 属性传递 + f16 低精度容差档
+relu_inp,torch.Tensor.relu_,"((2,3),)","('float32',)",,,,,,,,,,,"inplace 方法：自动 output_tensor_indexes=(0,)，输入原地改写"
+npu_gelu_f16,torch_npu.npu_gelu,"((64,128),)","('float16',)",,,,,,,torch.nn.functional.gelu,,,,NPU 专属算子 + golden_api 交叉参照（CPU golden 用 F.gelu，实测 f16 最大偏差 ~6e-5）；CPU 环境预期 FAIL-fast
+causal_conv1d_fn_basic,torch.ops.cann_ops_transformer.causal_conv1d_fn,"((2,4,64),(4,64),(64,),(2,4,64),(3,))","('float16','float16','float16','float16','int32')",,,,,{},,disable,,,,"torch.ops 扩展命名空间 + 整型索引输入混排；golden_api=disable（自定义算子无 CPU 参照，执行验证为主）；aclnn 约束 dim∈[64,16384]"

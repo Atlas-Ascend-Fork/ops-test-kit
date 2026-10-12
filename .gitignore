@@ -19,12 +19,15 @@ log/
 # TTK runtime outputs
 kernel_meta/
 # 三方腿熔断器状态 + 各 endpoint 健康快照, 每次跑批重写
-/.ttk/
+.ttk/
 /geir/
 msprof/
+dump/
 sim_output/
 **/*_result.csv
 fusion_result.json
+# GE 编译器 unknown-shape 检查报告（libge_compiler 动态图编译时写 CWD，与 TTK 无关）
+ge_check_op.json
 
 # Models & data
 *.bin
@@ -49,5 +52,6 @@ tests/**/*.html
 lib/
 LLMAnalysisTool/
 examples/case_store/generate_xlsx_examples.py
-oat_reports/
-.ttk/
+
+# ttk工具插件自动生成
+.arts/

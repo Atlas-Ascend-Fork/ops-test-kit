@@ -11,7 +11,8 @@
 Aclnn & Acl interface.
 """
 
-__all__ = ["AclInterface", "OpApiInfoKeeper", "OpApiInfo"]
+__all__ = ["AclInterface", "AclnnInstance", "OpApiInfoKeeper", "OpApiInfo"]
 
-from .acl_interface import AclInterface
-from .op_api_info_keeper import OpApiInfo, OpApiInfoKeeper
+from .info_keeper import OpApiInfo, OpApiInfoKeeper
+from .instance import AclnnInstance
+from .runtime import AclInterface

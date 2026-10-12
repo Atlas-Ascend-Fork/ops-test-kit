@@ -104,13 +104,12 @@ def main():
             else:
                 print(f"[FAIL] {op.decode():<15} expected gen_simplifiedkey but find returned {ret}")
                 failed += 1
+        elif ret != 0:
+            print(f"[PASS] {op.decode():<15} no gen_simplifiedkey (find returned {ret})")
+            passed += 1
         else:
-            if ret != 0:
-                print(f"[PASS] {op.decode():<15} no gen_simplifiedkey (find returned {ret})")
-                passed += 1
-            else:
-                print(f"[INFO] {op.decode():<15} has gen_simplifiedkey (find=0)")
-                passed += 1
+            print(f"[INFO] {op.decode():<15} has gen_simplifiedkey (find=0)")
+            passed += 1
 
     # Step 4: Test param validation
     r1 = find_fn(None, None)

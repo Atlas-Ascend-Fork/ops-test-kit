@@ -1,7 +1,7 @@
 # ACLNN 模式用例编写
 
 子命令：`python3 -m ttk aclnn`
-结构类：`TestcaseAclnn`（共 24 个字段：9 公共 + 15 专有）
+结构类：`TestcaseAclnn`（标准字段 28 个：13 公共 + 15 专有；另有 `attributes1`～`attributes9` 扩展列，全量 37 个）
 
 ## 用例配置依据
 
@@ -45,7 +45,7 @@ ACLNN 用例的参数（张量数量/顺序/dtype、标量、属性等）来自 
 
 | 字段 | 必填 | 默认 | 说明 |
 |------|------|------|------|
-| `output_tensor_indexes` | 否 | *(自动)* | 输出张量索引。未设置时自动填充：参数名以 `Ref`/`Out`/`Output`/`OutOptional`/`OutputOptional` 结尾或等于 `output` 的张量识别为输出；Backward/Grad API 会排除 `gradOutput`/`gradOut`/`grad_output`/`attentionOut`/`dOut` 以及非末位的 `output`；无匹配时回退到最后一个张量 |
+| `output_tensor_indexes` | 否 | *(自动)* | 输出张量索引。未设置时自动填充：参数名以 `Ref`/`Out`/`Output`/`OutOptional`/`OutputOptional` 结尾或等于 `output` 的张量识别为输出；Backward/Grad API 会排除 `gradOutput`/`gradOut`/`grad_output`/`attentionOut` 以及非末位的 `output`；无匹配时回退到最后一个张量 |
 | `output_inplace_indexes` | 否 | `()` | 原地输出索引（覆写输入）。从 `*Ref` 参数自动填充 |
 
 ### 属性与标量
@@ -55,6 +55,7 @@ ACLNN 用例的参数（张量数量/顺序/dtype、标量、属性等）来自 
 | `attributes` | 否 | `{}` | API 属性参数。如 `{'dim': -1}` |
 | `scalar_dtypes` | 否 | `()` | 标量参数 dtype。支持 ScalarList 嵌套。**不支持压缩/广播**（标量无 shape，数量只能通过 dtypes 元素数体现），必须逐个显式指定。如 `('int64',)` 或 `(('int32','int32'),)` |
 | `scalar_data_ranges` | 否 | `((None,None),)` | 标量数据范围 `(min,max)`。None 时 min=-2、max=2 |
+| `my_rank` | 否 | None | HCCL 多卡用例的本卡 rank 序号 |
 
 ### Dump 与手动数据
 

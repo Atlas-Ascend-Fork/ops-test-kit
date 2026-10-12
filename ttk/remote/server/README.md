@@ -9,24 +9,25 @@
 ## 快速开始
 
 ```bash
-# 1. 拷贝 server 包到 XPU 机器（只需要这个目录）
-scp -r ttk/remote/server/ user@xpu-box:/opt/xpu_server/
+# 1. 在 XPU 机器上准备整仓（git clone / pip install / 拷贝整个仓库皆可）
+git clone <ttk-repo> ~/ttk && cd ~/ttk
 
-# 2. 在 XPU 机器上启动
-#    xpu-server 是 ttk-free 独立包，按 xpu_server 跑；包的**父目录**需在 PYTHONPATH 上或作为 cwd
-#    （部署在 /opt/xpu_server/ → cd 到 /opt，或 PYTHONPATH=/opt）
-ssh user@xpu-box
-cd /opt
-python -m xpu_server.xpu_server --port 9090
+# 2. 启动（唯一对外入口）
+python -m ttk.remote.server.xpu_server --port 9090
 ```
 
 TTK worker 端通过 `ttk.conf.yaml`（或 `--config`）配置 `remote.endpoints` 连过来。到此就通了。
+
+> **部署形态说明**：server 与 TTK 同仓同源（整仓部署）——executor 消费
+> `ttk.core_modules.common` 的单份契约代码（bind_params）与 profiler 共享引擎，
+> 因此不再支持"只拷 `ttk/remote/server/` 子目录独立运行"的旧方式
+> （旧命令 `python -m xpu_server.xpu_server` 已废止）。
 
 ---
 
 ## 两个概念
 
-- **provider**：用什么框架/库执行算子。用户通过 `--provider=torch` 指定，server 通过 `/v1/heartbeat` 声明自己能提供哪些。常见值：`torch`、`tf`、`flash_attn`、`vllm`
+- **provider**：用什么框架/库执行算子。用户通过 `--provider=torch` 指定，server 通过 `/v1/heartbeat` 声明自己能提供哪些。自动探测的常见值：`torch`、`tf`（其余可经 `provider_framework` 映射为别名，如 `flash_attn`→torch）
 - **hardware**：底层硬件类型，决定设备字符串格式（如 torch 的 `mlu:0`、tf 的 `/device:MLU:0`）。启动时 /dev 自动探测，也可手动覆盖
 
 ---
@@ -80,7 +81,7 @@ providers:
 TTK 和 xpu-server 在同一台机器，零配置，最快。
 
 ```bash
-python -m xpu_server.xpu_server --port 9090
+python -m ttk.remote.server.xpu_server --port 9090
 # TTK worker 端
 ttk kernel -i case.csv --config ttk.conf.yaml
 ```
@@ -105,9 +106,9 @@ ttk kernel -i case.csv --config ttk.conf.yaml
 docker run -dit --device /dev/cambricon0 --name tf-server -p 9090:9090 \
     cambricon/tensorflow:latest
 
-# 拷贝 xpu-server 包到容器（目录名用合法 Python 包名 xpu_server——带连字符的 xpu-server 无法被 python -m）
-scp -r ttk/remote/server/ user@xpu-box:/tmp/xpu_server/
-docker cp /tmp/xpu_server/ tf-server:/opt/          # 容器内 /opt/xpu_server/（ttk-free 独立包）
+# 拷贝整个 ttk 仓进容器（server 消费 ttk.core_modules.common 同源契约，不能只拷 server 子目录）
+scp -r <ttk-repo-root>/ttk user@xpu-box:/tmp/ttk
+docker cp /tmp/ttk tf-server:/opt/ttk
 # 容器内安装依赖
 docker exec tf-server pip install numpy pyyaml
 
@@ -116,9 +117,9 @@ docker exec tf-server pip install numpy pyyaml
 echo 'providers: [tf]' > /tmp/xpu_server.yaml
 docker cp /tmp/xpu_server.yaml tf-server:/opt/xpu_server.yaml
 
-# 容器内启动：xpu-server 是 ttk-free（无 ttk.* 依赖），按独立包名跑，不是 ttk.remote.server.xpu_server
+# 容器内启动（PYTHONPATH 指向 ttk 包根的父目录）
 docker exec -d -e PYTHONPATH=/opt tf-server \
-    python -m xpu_server.xpu_server --port 9090 --bind 0.0.0.0 --config /opt/xpu_server.yaml
+    python -m ttk.remote.server.xpu_server --port 9090 --bind 0.0.0.0 --config /opt/xpu_server.yaml
 ```
 
 同理，torch 容器用 `cambricon/pytorch:latest` 镜像，配 `providers: [torch]`。镜像天然隔开了框架环境——tf 镜像里没有 torch，反之亦然。
@@ -129,11 +130,11 @@ Server 直接跑在 Host，有完整的 framework 探测能力：
 
 ```bash
 # per-Process（默认，最快）
-python -m xpu_server.xpu_server --port 9090
+python -m ttk.remote.server.xpu_server --port 9090
 
 # 或 per-Container（需要 Docker，~300ms 额外开销）
-python -m xpu_server.xpu_server --port 9090 \
-    --config <(sed 's/sandbox: none/sandbox: docker/' xpu_server.yaml)
+python -m ttk.remote.server.xpu_server --port 9090 \
+    --config <(sed 's/sandbox: none/sandbox: docker/' ttk/remote/server/xpu_server.yaml)
 ```
 
 **注意**：per-Container 模式下 server 必须在 Host 上运行，不能在容器内再起子容器（Docker-in-Docker 需要 `--privileged`，安全上不推荐）。
@@ -145,14 +146,16 @@ python -m xpu_server.xpu_server --port 9090 \
 TTK 和 XPU 在不同机器，团队内部代码可信，传输加密但执行从简。
 
 ```bash
-# 1. 生成证书
-bash scripts/gen_tls_certs.sh /opt/ttk-certs
+# 1. 生成证书（三步：CA 一次；server 证书每个 XPU 一次；client 证书每个租户按需）
+./scripts/gen_tls_certs.sh init-ca /opt/ttk-certs
+./scripts/gen_tls_certs.sh server /opt/ttk-certs IP:<xpu-box 的 IP>   # 或 DNS:<主机名>
+./scripts/gen_tls_certs.sh client /opt/ttk-certs <tenant-name>
 
 # 2. 分发
 scp /opt/ttk-certs/ca.crt /opt/ttk-certs/server.* user@xpu-box:/opt/ttk-certs/
-# client.{crt,key} 留在 TTK worker 机器
+# ca.crt + <tenant-name>.client.crt/.key 发给 TTK worker 机器；ca.key 只留在 CA 机器
 
-# 3. XPU 机器配置 + 启动
+# 3. XPU 机器配置 + 启动（cwd = ttk 仓根，或 PYTHONPATH 指向仓根）
 cat > /opt/xpu_server/xpu_server.yaml << 'EOF'
 server:
   bind: "0.0.0.0"
@@ -165,7 +168,7 @@ tls:
   server_cert: "/opt/ttk-certs/server.crt"
   server_key: "/opt/ttk-certs/server.key"
 EOF
-python -m xpu_server.xpu_server --port 9090 --config /opt/xpu_server/xpu_server.yaml
+cd <ttk-repo-root> && python -m ttk.remote.server.xpu_server --port 9090 --config /opt/xpu_server/xpu_server.yaml
 
 # 4. TTK worker 端：default.yaml 配 TLS 证书路径
 ```
@@ -177,9 +180,10 @@ python -m xpu_server.xpu_server --port 9090 --config /opt/xpu_server/xpu_server.
 不可信的用户代码。Server 部署在 Host 上，每个请求一个隔离容器。
 
 ```bash
-# 1. 构建 executor 镜像
-docker build -f Dockerfile.torch -t xpu-executor-torch:latest .
-docker build -f Dockerfile.tf   -t xpu-executor-tf:latest .
+# 1. 构建 executor 镜像（注意：构建上下文 = 仓库根，Dockerfile 里的 COPY ttk 依赖它；
+#    executor 镜像与 server 需同仓同版本——旧镜像与新版 server 的入口/布局不兼容）
+docker build -f ttk/remote/server/Dockerfile.torch -t xpu-executor-torch:latest .
+docker build -f ttk/remote/server/Dockerfile.tf   -t xpu-executor-tf:latest   .
 
 # 2. 配置
 cat > /opt/xpu_server/xpu_server.yaml << 'EOF'
@@ -202,7 +206,7 @@ docker:
 EOF
 
 # 3. 启动（必须在 Host 上，不能在容器内）
-python -m xpu_server.xpu_server --port 9090 --config /opt/xpu_server/xpu_server.yaml
+cd <ttk-repo-root> && python -m ttk.remote.server.xpu_server --port 9090 --config /opt/xpu_server/xpu_server.yaml
 ```
 
 容器防护矩阵：
@@ -236,7 +240,8 @@ python -m xpu_server.xpu_server --port 9090 --config /opt/xpu_server/xpu_server.
 启动时不配 `hardware` 且不传 `--devices` 则 /dev 自动探测：
 
 ```
-/dev 设备文件 → /dev/cambricon0 → mlu, /dev/davinci0 → npu, ...（毫秒级,不依赖框架）
+按 yaml `hardware:` 各段（shipped：gpu/nvidia、mlu/cambricon）匹配 /dev 设备文件
+（毫秒级,不依赖框架；如需 NPU 需自行加段：dev_prefix: davinci + visible_env: ASCEND_RT_VISIBLE_DEVICES）
 Fallback: "cpu"
 ```
 
@@ -245,7 +250,7 @@ Fallback: "cpu"
 手动指定（覆盖探测，直接给 device id 列表）：
 
 ```bash
-python -m xpu_server.xpu_server --devices 0,1
+python -m ttk.remote.server.xpu_server --devices 0,1
 ```
 
 ---
@@ -253,7 +258,7 @@ python -m xpu_server.xpu_server --devices 0,1
 ## 命令行参考
 
 ```
-python -m xpu_server.xpu_server \
+python -m ttk.remote.server.xpu_server \
     --port 9090          # 监听端口（默认：配置或 9090）
     --bind 127.0.0.1     # 绑定地址（默认：127.0.0.1）
     --config ./xpu_server.yaml  # 配置文件路径
@@ -268,7 +273,7 @@ python -m xpu_server.xpu_server \
 ```bash
 # /v1/heartbeat 合并了探活 + 服务发现 + tenant 注册（旧 /health、/v1/detect、/heartbeat 已并入此端点）
 curl http://127.0.0.1:9090/v1/heartbeat
-# → {"status":"ok","hardware":"gpu","device_count":2,"providers":["torch","tf"]}
+# → {"status":"ok","hardware":"gpu","device_count":2,"providers":["torch","tf"],"features":["keepalive"]}
 # device_count = 实际检测到的 device 数（多卡时 >1）
 ```
 
@@ -304,15 +309,17 @@ X-API: AddSpec            # spec 模式（回传 spec_class 名）
 ## 文件结构
 
 ```
-ttk/remote/server/          ← 独立部署包（无 ttk.* 依赖，stdlib + numpy + 框架）
+ttk/remote/server/          ← server 本体（整仓部署：依赖 ttk.core_modules.common
+│                              的 bind_params 契约与 profiler 共享引擎，单份同源）
 ├── README.md               本文件
-├── xpu_server.py           主进程（HTTP + 子进程/容器派发）
+├── xpu_server.py           主进程（HTTP + 子进程/容器派发）——对外唯一入口
 ├── xpu_server.yaml         服务端配置
-├── executor.py             子进程入口（算子执行）
-├── execution_container.py  参数绑定 + device 格式化
-├── executor_main.py        Docker 容器入口
-├── container.py            Docker 后端
+├── executor.py             子进程入口（算子执行 + perf 双 pass）
+├── _framework_preload.py   forkserver 预载 shim（RTLD_DEEPBIND，torch/tf 共存）
+├── xpu_profiler.py         XPU 采集层（torch/tf pass，引擎与 common/profiler 同源）
+├── executor_main.py        Docker 沙箱入口（python -m ttk.remote.server.executor_main）
+├── container.py            Docker 后端（per-Container 派发）
 ├── config.py               配置加载器
-├── Dockerfile.torch        Torch executor 镜像（示例）
-└── Dockerfile.tf            TF executor 镜像（示例）
+├── Dockerfile.torch        Torch executor 镜像（示例，构建上下文 = 仓库根）
+└── Dockerfile.tf           TF executor 镜像（示例，构建上下文 = 仓库根）
 ```

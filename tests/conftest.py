@@ -42,7 +42,7 @@ def make_testcase():
     overrides locally with TestcaseE2e)."""
 
     def _make(api_name="aclnnDummy", **kwargs):
-        from ttk.core_modules.testcase_manager.testcase_aclnn import TestcaseAclnn
+        from ttk.core_modules.aclnn.testcase import TestcaseAclnn
 
         case = TestcaseAclnn()
         case.api_name = api_name

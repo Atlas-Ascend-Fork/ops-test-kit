@@ -1,2 +1,0 @@
-testcase_name,op_name,input_shapes,input_dtypes,input_formats,output_shapes,output_dtypes,output_formats,attributes,input_data_ranges,precision_tolerances,absolute_precision
-concat_d_example_00,concat_d,"(((29, 128), (754, 128), (518, 128)),)","(('bfloat16',),)","(('ND',),)","((1301, 128),)","('bfloat16',)","('ND',)",{'concat_dim': -2},"((-10, 10),)","((0, 0),)",0

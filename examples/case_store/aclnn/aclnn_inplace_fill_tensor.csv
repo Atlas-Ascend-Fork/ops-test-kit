@@ -1,2 +1,0 @@
-testcase_name,api_name,tensor_view_shapes,tensor_dtypes,input_data_ranges,precision_tolerances,absolute_precision
-aclnnInplaceFillTensor_00,aclnnInplaceFillTensor,"((8,),(),)","('int32','int64')","((-2,2), (9223372036854775807,))","((0,0),)",0

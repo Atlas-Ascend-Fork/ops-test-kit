@@ -28,11 +28,11 @@ TTK 启动时自动检测并 source CANN 环境（`setenv.bash`），通常无�
 
 ## Step 3: 锁定单个用例调试
 
-多用例并行运行时日志互相覆盖，用 `-t` 锁定单个失败用例可以隔离输出。`--single-log` 为每个用例生成独立日志文件，`--dump-on-fail` 在精度失败时自动保存输入/输出/Golden 数据。
+每个用例自动生成独立日志（`log/<mode>/<用例名>/ttk.log`），并行运行不会互相覆盖；用 `-t` 锁定单个失败用例可以隔离输出。`--dump-on-fail` 在精度失败时自动保存输入/输出/Golden 数据。
 
 ```shell
-# 单用例 + 独立日志 + 失败时dump
-python3 -m ttk kernel -i cases.csv -t case_name --single-log --dump-on-fail
+# 单用例 + 失败时dump（日志自动落 log/<mode>/<用例名>/ttk.log）
+python3 -m ttk kernel -i cases.csv -t case_name --dump-on-fail
 
 # 指定 dump 内容和格式
 python3 -m ttk kernel -i cases.csv -t case_name --dump in,out,golden --dump-format npy
@@ -44,7 +44,7 @@ python3 -m ttk kernel -i cases.csv -t case_name --dump in,out,golden --dump-form
 
 ```shell
 python3 -m ttk info                                    # 设备状态
-python3 -m ttk kernel -i examples/case_store/kernel/add.csv  # 内置示例验证
+python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast  # 内置示例验证
 ```
 
 **执行超时/OOM**：
@@ -59,7 +59,7 @@ python3 -m ttk kernel -i cases.csv --reserve-hbm=512   # 预留 HBM 512MB
 
 ```shell
 python3 -m ttk info                        # 检查设备
-python3 -m ttk kernel -i cases.csv --device-blacklist=2,3  # 排除设备
+python3 -m ttk kernel -i cases.csv --devices=^2,^3  # 排除设备 2、3
 python3 -m ttk kernel -i cases.csv --pc=1  # 减少进程数
 ```
 

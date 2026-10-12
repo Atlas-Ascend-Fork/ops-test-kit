@@ -145,6 +145,7 @@ class MyOpTestSpec:
 | `full_soc_version` | SoC 版本全称 |
 | `short_soc_version` | SoC 版本简称，如 `Ascend910B3` |
 | `testcase_name` | 当前用例名称 |
+| `golden_mode` | 本次调用的 golden 精度模式（`Enable`/`Disable`/`Promote`/`XPU`）。`Promote` 下输入已被框架抬一档精度（fp16/bf16→fp32、fp32→fp64），golden 可据此分支处理，避免把已抬精度再砍回来 |
 
 ## CSV 数据范围替代
 

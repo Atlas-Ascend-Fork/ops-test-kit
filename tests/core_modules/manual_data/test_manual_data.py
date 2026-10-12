@@ -16,21 +16,17 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from ttk.core_modules.framework_api.input_generation import generate_inputs
-from ttk.core_modules.manual_data import (
+from ttk.core_modules.aclnn.input_generate import InputGenerator
+from ttk.core_modules.aclnn.testcase import TestcaseAclnn
+from ttk.core_modules.common.dump import (
     ManualDataError,
     ManualDataStore,
     load_manual_data_case,
-    manual_data_store,
-    prepare_manual_data_store,
-    register_manual_data_directory_provider,
-    replay_manual_data_store,
-    unregister_manual_data_directory_provider,
+    manual_data_dump_store,
 )
-from ttk.core_modules.npu.op_api.input_generation import InputGenerator
-from ttk.core_modules.testcase_manager.testcase_aclnn import TestcaseAclnn
-from ttk.core_modules.testcase_manager.testcase_e2e import TestcaseE2e
-from ttk.utilities import resolve_custom_numpy_dtypes
+from ttk.core_modules.framework_api.input_generate import generate_inputs
+from ttk.core_modules.framework_api.testcase import TestcaseE2e
+from ttk.utilities import resolve_numpy_dtypes
 
 
 def _e2e_case(name="case/with spaces"):
@@ -111,7 +107,7 @@ def test_round_trip_uses_only_typed_data_files(tmp_path, file_format):
     assert {path.name for path in case_dir.iterdir()} == {
         f"input_0_float32.{file_format}",
         f"scalar_0_float32.{file_format}",
-        ("golden_0_float32__shape_2.bin" if file_format == "bin" else f"golden_0_float32.{file_format}"),
+        f"golden_0_float32.{file_format}",
     }
 
 
@@ -161,7 +157,7 @@ def test_e2e_and_aclnn_share_compact_inputs(tmp_path, file_format):
 def test_raw_bin_uint8_reinterprets_portable_storage(tmp_path, custom_dtype, e2e_shape, aclnn_shape):
     """Raw bins may exchange uint8 storage with ACLNN custom dtypes."""
     try:
-        dtype = resolve_custom_numpy_dtypes((custom_dtype,))[0]
+        dtype = resolve_numpy_dtypes((custom_dtype,))[0]
     except RuntimeError as exc:
         pytest.skip(str(exc))
 
@@ -253,7 +249,7 @@ def test_npy_round_trip_restores_custom_bfloat16_dtype(tmp_path):
     """npy 格式往返后自定义 bfloat16 dtype 仍可还原。"""
     case = _e2e_case("bfloat16_npy")
     case.tensor_dtypes = ("bfloat16", "bfloat16")
-    dtype = resolve_custom_numpy_dtypes(("bfloat16",))[0]
+    dtype = resolve_numpy_dtypes(("bfloat16",))[0]
     inputs = [np.arange(9, dtype=np.float32).astype(dtype).reshape(3, 3), np.zeros((2, 2), dtype=dtype)]
     golden = [np.ones((2, 2), dtype=dtype)]
     store = ManualDataStore(tmp_path)
@@ -281,7 +277,7 @@ def test_special_physical_storage_round_trip(tmp_path, file_format, logical_dtyp
     elif logical_dtype == "uint1":
         storage = np.array([0x55, 0x01], dtype=np.uint8)
     else:
-        dtype = resolve_custom_numpy_dtypes((logical_dtype,))[0]
+        dtype = resolve_numpy_dtypes((logical_dtype,))[0]
         storage = np.arange(-4, 5, dtype=np.int8).astype(dtype).reshape(3, 3)
     store = ManualDataStore(tmp_path)
 
@@ -393,7 +389,12 @@ def test_extra_goldens_are_loaded_for_operator_specific_compare(tmp_path, file_f
 
     assert len(restored) == len(goldens)
     for actual, expected in zip(restored, goldens):
-        np.testing.assert_array_equal(actual, expected)
+        if file_format == "bin":
+            # 当前协议：golden 数 > 设备 output 数时无位置 shape 映射，bin 无
+            # 文件内 shape → 读一维流，交 custom compare hook 解释
+            np.testing.assert_array_equal(actual, expected.reshape(-1))
+        else:
+            np.testing.assert_array_equal(actual, expected)
 
 
 def test_tensor_list_grouping_is_rebuilt_from_csv_structure(tmp_path):
@@ -433,11 +434,10 @@ def test_tensor_list_grouping_is_rebuilt_from_csv_structure(tmp_path):
         ("corrupt_file", "byte size"),
         ("unknown_sidecar", "unexpected file"),
         ("extra_slot", "slot count"),
-        ("golden_no_suffix", "must include a shape suffix"),
     ],
 )
 def test_invalid_manual_data_is_rejected(tmp_path, scenario, expected_match):
-    """各类数据完整性违规（dtype 改写/文件损坏/未知 sidecar/多余槽位/缺 shape 后缀）均在 load_case 阶段被拒绝。"""
+    """各类数据完整性违规（dtype 改写/文件损坏/未知 sidecar/多余槽位）均在 load_case 阶段被拒绝。"""
     case = _e2e_case(f"reject_{scenario}")
     store = ManualDataStore(tmp_path)
     case_dir = store.write_case(
@@ -456,9 +456,6 @@ def test_invalid_manual_data_is_rejected(tmp_path, scenario, expected_match):
         (case_dir / "manifest.json").write_text("{}", encoding="utf-8")
     elif scenario == "extra_slot":
         (case_dir / "input_2_float32.bin").write_bytes(b"")
-    elif scenario == "golden_no_suffix":
-        current = case_dir / "golden_0_float32__shape_2x2.bin"
-        current.rename(case_dir / "golden_0_float32.bin")
 
     with pytest.raises(ManualDataError, match=expected_match):
         store.load_case(case, "e2e")
@@ -513,7 +510,7 @@ def test_self_describing_format_rejects_same_size_wrong_dtype(tmp_path, file_for
     """npy/pt 自描述格式在同字节数但 dtype 不符时被拒绝。"""
     case = _e2e_case(f"wrong_{file_format}_dtype")
     case.tensor_dtypes = ("bfloat16", "bfloat16")
-    dtype = resolve_custom_numpy_dtypes(("bfloat16",))[0]
+    dtype = resolve_numpy_dtypes(("bfloat16",))[0]
     inputs = [
         np.zeros((3, 3), dtype=dtype),
         np.zeros((2, 2), dtype=dtype),
@@ -752,7 +749,7 @@ def test_incomplete_high_priority_format_does_not_fall_back(tmp_path):
     for source_dir in (bin_dir, npy_dir):
         for path in source_dir.iterdir():
             shutil.copy2(path, target_dir / path.name)
-    (target_dir / "golden_0_float32__shape_2x2.bin").unlink()
+    (target_dir / "golden_0_float32.bin").unlink()
 
     loaded = target_store.load_case(case, "e2e")
     assert loaded.file_format == "bin"
@@ -778,7 +775,7 @@ def test_long_case_name_maps_stably_within_directory_limit(tmp_path):
     assert store.case_dir(name + "changed") != case_dir
 
 
-@pytest.mark.parametrize("filename", ["input_1_float32.bin", "golden_0_float32__shape_2x2.bin"])
+@pytest.mark.parametrize("filename", ["input_1_float32.bin", "golden_0_float32.bin"])
 def test_missing_data_slot_is_rejected(tmp_path, filename):
     """缺少任一数据槽位文件时加载报错。"""
     case = _e2e_case("missing_slot")
@@ -830,13 +827,30 @@ def test_bin_golden_filename_shape_matches_device_output(tmp_path):
     restored = loaded.load_goldens(references=[np.zeros((2, 2), np.float32)])
 
     assert restored[0].shape == (2, 2)
-    assert (case_dir / "golden_0_float32__shape_2x2.bin").is_file()
+    assert (case_dir / "golden_0_float32.bin").is_file()
     np.testing.assert_array_equal(restored[0], golden)
 
 
-def test_bin_golden_rejects_same_numel_wrong_device_shape(tmp_path):
-    """bin golden 同 numel 但设备输出 shape 不符时被拒绝。"""
-    case = _e2e_case("same_numel_wrong_shape")
+def test_bin_golden_same_numel_wrong_shape_legacy_suffix_rejected(tmp_path):
+    """存量数据（文件名带 shape 段）同 numel 但设备输出 shape 不符时仍被拒绝。"""
+    case = _e2e_case("same_numel_wrong_shape_legacy")
+    store = ManualDataStore(tmp_path)
+    case_dir = store.write_case(
+        case,
+        "e2e",
+        [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+        [np.arange(6, dtype=np.float32).reshape(2, 3)],
+    )
+    (case_dir / "golden_0_float32.bin").rename(case_dir / "golden_0_float32__shape_2x3.bin")
+
+    loaded = store.load_case(case, "e2e")
+    with pytest.raises(ManualDataError, match="saved shape .*device output shape"):
+        loaded.load_goldens(references=[np.zeros((3, 2), np.float32)])
+
+
+def test_bin_golden_same_numel_reshapes_by_reader_shape(tmp_path):
+    """新数据无 shape 段：reshape 真值 = 读侧传入的设备输出 shape。"""
+    case = _e2e_case("same_numel_reader_truth")
     store = ManualDataStore(tmp_path)
     store.write_case(
         case,
@@ -846,8 +860,9 @@ def test_bin_golden_rejects_same_numel_wrong_device_shape(tmp_path):
     )
 
     loaded = store.load_case(case, "e2e")
-    with pytest.raises(ManualDataError, match="saved shape .*device output shape"):
-        loaded.load_goldens(references=[np.zeros((3, 2), np.float32)])
+    restored = loaded.load_goldens(references=[np.zeros((3, 2), np.float32)])
+
+    assert restored[0].shape == (3, 2)
 
 
 @pytest.mark.parametrize(
@@ -858,8 +873,8 @@ def test_bin_golden_rejects_same_numel_wrong_device_shape(tmp_path):
         ((2, 0, 3), "2x0x3"),
     ],
 )
-def test_bin_golden_shape_filename_handles_scalar_and_zero_dimensions(tmp_path, shape, token):
-    """bin golden 文件名 shape 后缀覆盖标量与含 0 维度的 shape。"""
+def test_bin_golden_restores_scalar_and_zero_dimensions_by_reader_shape(tmp_path, shape, token):
+    """bin golden 标量与含 0 维度 shape 由读侧 references 还原（文件名无 shape 段）。"""
     case = _e2e_case(f"shape_{token}")
     store = ManualDataStore(tmp_path)
     golden = np.zeros(shape, dtype=np.float32)
@@ -873,7 +888,7 @@ def test_bin_golden_shape_filename_handles_scalar_and_zero_dimensions(tmp_path, 
     loaded = store.load_case(case, "e2e")
     restored = loaded.load_goldens(references=[np.zeros(shape, np.float32)])
 
-    assert (case_dir / f"golden_0_float32__shape_{token}.bin").is_file()
+    assert (case_dir / "golden_0_float32.bin").is_file()
     expected_storage_shape = (1,) if shape == () else shape
     assert restored[0].shape == expected_storage_shape
 
@@ -947,21 +962,21 @@ def test_invalidate_case_unlinks_directory_symlink_without_touching_target(tmp_p
     assert not case_dir.is_symlink()
 
 
-def test_prepare_and_replay_helpers_share_store_policy(tmp_path):
-    """prepare/replay 辅助函数共享同一 store 策略与目录。"""
-    prepare_case = _e2e_case("prepare_helper")
-    prepare_switches = SimpleNamespace(manual_data_mode="prepare", manual_data_dirs=(str(tmp_path),))
+def test_dump_and_load_helpers_share_store_policy(tmp_path):
+    """dump/load 辅助函数共享同一 store 策略与目录。"""
+    dump_case = _e2e_case("dump_helper")
+    dump_switches = SimpleNamespace(no_prof=True, manual_data_dirs=(str(tmp_path),))
 
-    prepare_store = prepare_manual_data_store(prepare_case, "e2e", prepare_switches)
+    dump_store = manual_data_dump_store(dump_case, dump_switches)
 
-    assert isinstance(prepare_store, ManualDataStore)
-    assert not prepare_store.case_dir(prepare_case.testcase_name).exists()
+    assert isinstance(dump_store, ManualDataStore)
+    assert not dump_store.case_dir(dump_case.testcase_name).exists()
 
-    replay_case = _e2e_case("replay_helper")
+    load_case = _e2e_case("load_helper")
     inputs = [np.ones((3, 3), np.float32), np.zeros((2, 2), np.float32)]
-    ManualDataStore(tmp_path).write_case(replay_case, "e2e", inputs, [np.zeros((2, 2), np.float32)])
-    replay_switches = SimpleNamespace(
-        manual_data_mode="replay",
+    ManualDataStore(tmp_path).write_case(load_case, "e2e", inputs, [np.zeros((2, 2), np.float32)])
+    load_switches = SimpleNamespace(
+        no_prof=False,
         manual_data_dirs=(str(tmp_path),),
         golden_mode="Enable",
         validate_only=False,
@@ -969,85 +984,53 @@ def test_prepare_and_replay_helpers_share_store_policy(tmp_path):
     )
     loaded_status = []
 
-    manual_case = load_manual_data_case(
-        replay_case, "e2e", replay_switches, before_load=lambda: loaded_status.append(True)
-    )
+    manual_case = load_manual_data_case(load_case, "e2e", load_switches, before_load=lambda: loaded_status.append(True))
 
     assert loaded_status == [True]
     np.testing.assert_array_equal(manual_case.inputs[0], inputs[0])
 
 
-def test_registered_provider_is_an_extension_point_for_future_csv_sources(tmp_path):
-    """注册的目录 provider 作为扩展点，被 manual_data_store 调用。"""
-    case = _e2e_case("provider_case")
-    ManualDataStore(tmp_path).write_case(
-        case,
-        "e2e",
-        [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
-        [np.zeros((2, 2), np.float32)],
+def test_load_returns_none_for_no_prof_empty_and_missing_dirs(tmp_path):
+    """no-prof（写方向）/ 无目录 / 目录全空 三种情况 load 返回 None。"""
+    case = _e2e_case("load_none")
+    inputs = [np.ones((3, 3), np.float32), np.zeros((2, 2), np.float32)]
+    ManualDataStore(tmp_path).write_case(case, "e2e", inputs, [np.zeros((2, 2), np.float32)] * 2)
+    base = {"golden_mode": "Enable", "validate_only": False, "force_cpu": False}
+
+    assert (
+        load_manual_data_case(case, "e2e", SimpleNamespace(no_prof=True, manual_data_dirs=(str(tmp_path),), **base))
+        is None
     )
-    switches = SimpleNamespace(manual_data_dirs=())
-
-    def provider(testcase, case_type, current_switches):
-        assert testcase is case
-        assert case_type == "e2e"
-        assert current_switches is switches
-        return tmp_path
-
-    register_manual_data_directory_provider(provider)
-    try:
-        loaded = manual_data_store(case, "e2e", switches).load_case(case, "e2e")
-    finally:
-        unregister_manual_data_directory_provider(provider)
-
-    assert loaded.case_dir == ManualDataStore(tmp_path).case_dir(case.testcase_name)
-
-
-def test_case_provider_takes_priority_over_cli_batch_directories(tmp_path):
-    """provider 提供的目录优先于 CLI 批量目录。"""
-    case = _e2e_case("provider_priority")
-    inputs = [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)]
-    cli_root = tmp_path / "cli"
-    provider_root = tmp_path / "provider"
-    ManualDataStore(cli_root).write_case(case, "e2e", inputs, [np.full((2, 2), 1, np.float32)])
-    ManualDataStore(provider_root).write_case(case, "e2e", inputs, [np.full((2, 2), 2, np.float32)])
-    switches = SimpleNamespace(manual_data_dirs=(cli_root,))
-
-    def provider(*_):
-        return provider_root
-
-    register_manual_data_directory_provider(provider)
-    try:
-        loaded = manual_data_store(case, "e2e", switches).load_case(case, "e2e")
-    finally:
-        unregister_manual_data_directory_provider(provider)
-
-    assert loaded.case_dir.parent == provider_root.resolve()
-    np.testing.assert_array_equal(
-        loaded.load_goldens(references=[np.zeros((2, 2), np.float32)])[0],
-        np.full((2, 2), 2, np.float32),
+    assert load_manual_data_case(case, "e2e", SimpleNamespace(no_prof=False, manual_data_dirs=(), **base)) is None
+    empty = tmp_path / "empty_root"
+    empty.mkdir()
+    assert (
+        load_manual_data_case(case, "e2e", SimpleNamespace(no_prof=False, manual_data_dirs=(str(empty),), **base))
+        is None
     )
 
 
-def test_provider_replay_obeys_device_stage_constraints(tmp_path):
-    """replay 模式下 provider 仍遵守设备阶段约束（--cpu 被拒绝）。"""
-    case = _e2e_case("provider_constraints")
-    switches = SimpleNamespace(manual_data_dirs=(), golden_mode="Enable", validate_only=False, force_cpu=True)
+def test_load_raises_when_case_missing_in_nonempty_directory(tmp_path):
+    """目录非空但用例未命中 → raise（不静默现场生成）。"""
+    other = _e2e_case("other_case")
+    inputs = [np.ones((3, 3), np.float32), np.zeros((2, 2), np.float32)]
+    ManualDataStore(tmp_path).write_case(other, "e2e", inputs, [np.zeros((2, 2), np.float32)] * 2)
+    case = _e2e_case("missing_case")
+    switches = SimpleNamespace(
+        no_prof=False,
+        manual_data_dirs=(str(tmp_path),),
+        golden_mode="Enable",
+        validate_only=False,
+        force_cpu=False,
+    )
 
-    def provider(*_):
-        return tmp_path
-
-    register_manual_data_directory_provider(provider)
-    try:
-        with pytest.raises(ManualDataError, match="cannot use --cpu"):
-            replay_manual_data_store(case, "e2e", switches)
-    finally:
-        unregister_manual_data_directory_provider(provider)
+    with pytest.raises(ManualDataError, match="was not found"):
+        load_manual_data_case(case, "e2e", switches)
 
 
 def test_e2e_restore_rebuilds_view_without_running_input_plugin():
     """e2e 回放按 stride/offset 重建视图且不运行输入插件。"""
-    from ttk.core_modules.framework_api.input_generation import np_to_torch_inputs
+    from ttk.core_modules.common.backend.torch_backend import np_to_torch_inputs
 
     case = _e2e_case("restore_e2e")
     storage = np.arange(9, dtype=np.float32).reshape(3, 3)
@@ -1067,7 +1050,7 @@ def test_aclnn_restore_rebuilds_tensor_and_scalar_without_plugins(monkeypatch):
     case = _aclnn_case()
     switches = SimpleNamespace(plugin_path=("must-not-be-scanned",))
     monkeypatch.setattr(
-        "ttk.core_modules.npu.op_api.input_generation.get_global_storage",
+        "ttk.core_modules.aclnn.input_generate.get_global_storage",
         lambda: switches,
     )
     inputs = [np.arange(2, dtype=np.float32), np.zeros(2, dtype=np.float32)]

@@ -6,7 +6,7 @@ kernel / aclnn / e2e 子命令均可加 `--backend npusim`，把真机执行替�
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--backend {npu,npusim}` | `npu` | `npusim` 走仿真执行 |
+| `--backend {npu,npusim}` | `npu` | `npusim` 走仿真执行（e2e 另支持 `cpu`；三方采集仅走远端，无 `xpu` 本机后端） |
 | `--sim-soc <SoC>` | `Ascend950` | 仿真 SoC（`Ascend950` / `Ascend950DT`） |
 | `--sim-output <dir>` | `<root>/sim_output` | 仿真中间产物根目录 |
 | `--sim-report` | 关闭 | 仿真结束后生成流水图（`trace_core*.json` + HTML 报告） |
@@ -17,7 +17,8 @@ kernel / aclnn / e2e 子命令均可加 `--backend npusim`，把真机执行替�
 
 - 与 `--no-prof` **互斥**：仿真后端内部自动生成输入/golden，不能再走手工数据 prepare（`sim_args.apply_sim_args` 直接报错）。
 - **GEIR 不支持**仿真。
-- e2e 仿真仅支持 **eager** 执行；graph / aclgraph / fullgraph 模式禁用（camodel 缺 GE 图编译能力）。
+- e2e 仿真聚焦 **eager** 执行；graph / aclgraph / fullgraph 依赖 GE 图编译（camodel 缺 pcie bar 能力），仿真下未验证、可能失败，建议仅用 eager。
+- e2e 仿真要求算子**在线编译**：`-b`/`--binary`（默认二进制复用）被强制关闭并告警。
 - 并发进程默认自动设为 1（避免多 camodel 实例打爆 CPU）。
 
 ## 环境要求
@@ -29,26 +30,27 @@ kernel / aclnn / e2e 子命令均可加 `--backend npusim`，把真机执行替�
 
 ```shell
 # Kernel：仿真 + 精度比对（核 0，加快仿真）
-python3 -m ttk kernel --backend npusim -i examples/case_store/kernel/add.csv --sim-cores 0
+python3 -m ttk kernel --backend npusim -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast --sim-cores 0
 
 # 筛选单用例 + 输出流水图
 python3 -m ttk kernel --backend npusim -i cases.csv -t add_01 --sim-cores 0 --sim-report -o result.csv
 
 # ACLNN
-python3 -m ttk aclnn --backend npusim -i examples/case_store/aclnn/aclnn_add.csv --sim-cores 0
+python3 -m ttk aclnn --backend npusim -i examples/case_store/aclnn/cases.csv -t add_fp16_broadcast --sim-cores 0
 
 # E2E（eager）额外出流水图
-python3 -m ttk e2e --backend npusim -i examples/case_store/e2e/torch_ops.csv -t add_f32_01 --sim-report
+python3 -m ttk e2e --backend npusim -i examples/case_store/e2e/torch_cases.csv -t add_f32_alpha --sim-report
 ```
 
 ## 产物
 
 ```
-<sim_output>/<case_name>/record_out/cannsim_<ts>_<case>/
-    instr.bin        # 指令流（report 输入，归档根目录）
-    cannsim.log      # record 日志
-report/              # 仅 --sim-report
-    trace_core0.json # ★ Chrome tracing 流水图
+<sim_output>/<case_name>/
+├── record_out/cannsim_<ts>_<case>/
+│   ├── instr.bin      # 指令流（report 输入，归档根目录）
+│   └── cannsim.log    # record 日志
+└── report/            # 仅 --sim-report
+    └── trace_core0.json  # ★ Chrome tracing 流水图
 ```
 
 仿真模式 `*_perf_us` 列为 `UNKNOWN`（model 模式无单值周期），性能分析请查看流水图。

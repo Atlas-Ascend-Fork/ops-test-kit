@@ -13,27 +13,6 @@ Core Modules root
 
 # ruff: noqa: E402, F401
 
-from . import tbe_logging
+from . import common as common
 
-tbe_logging.default_logging_config()
-from . import (
-    dsmi as dsmi,
-)
-from . import (
-    infershape as infershape,
-)
-from . import (
-    npu as npu,
-)
-from . import (
-    operator as operator,
-)
-from . import (
-    runtime as runtime,
-)
-from . import (
-    tbe_multiprocessing as tbe_multiprocessing,
-)
-from . import (
-    testcase_manager as testcase_manager,
-)
+common.default_logging_config()

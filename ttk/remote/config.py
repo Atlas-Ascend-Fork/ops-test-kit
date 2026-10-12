@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 """
 向后兼容 shim — 所有配置相关功能已移至 ttk.config。
 
@@ -5,18 +15,18 @@
     from ttk.config.loader import Endpoint, RemoteConfig, get_remote_config, get_config
 """
 
-from ttk.config.loader import (  # noqa: F401  re-export
-    Endpoint as Endpoint,
-)
 from ttk.config.loader import (
-    RemoteConfig as RemoteConfig,
+    Endpoint,
+    RemoteConfig,
+    get_config,
+    get_remote_config,
+    load_config,
 )
-from ttk.config.loader import (
-    get_config as get_config,
-)
-from ttk.config.loader import (
-    get_remote_config as get_remote_config,
-)
-from ttk.config.loader import (
-    load_config as load_config,
-)
+
+__all__ = [
+    "Endpoint",
+    "RemoteConfig",
+    "get_config",
+    "get_remote_config",
+    "load_config",
+]

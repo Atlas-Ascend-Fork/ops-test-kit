@@ -1,2 +1,0 @@
-testcase_name,op_name,input_shapes,input_dtypes,input_formats,output_shapes,output_dtypes,output_formats,attributes,input_data_ranges,precision_tolerances,absolute_precision,output_shape_unknown_indexes
-NonZero_float32_01,non_zero,"((2, 858),)","('float32',)","('ND',)","((8, 1716),)","('int32',)","('ND',)",{'transpose': True},"((-10, 10),)","((0, 0),)",0,"(0,)"

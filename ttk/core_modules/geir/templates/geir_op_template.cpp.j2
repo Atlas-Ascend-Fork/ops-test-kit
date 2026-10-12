@@ -21,11 +21,12 @@
 {% endif %}
 #include "{{ proto_file }}"
 
-// Data/Const 用与 CANN proto 头同款的防重定义宏（OPS_PROTO_DEF_*）守卫：
-// 新版包已把这两个注册打进 ops_proto_* 头（含上述宏），上面 include 后宏已被
-// 定义、此处自动跳过，避免 ge::op::Data/Const 类重定义；老版包的头不带它们，
-// 宏未定义时在此补注册。
 namespace ge {
+// 新版 CANN 包把 REG_OP(Data)/REG_OP(Const) 的注册打进 proto 头且用
+// OPS_PROTO_DEF_DATA/OPS_PROTO_DEF_CONST 防重定义宏守卫；模板再无条件自带
+// 一份会在同一编译单元内重定义 ge::op::Data/Const。老版 CANN 头不带这两
+// 个注册，模板必须补上（建图用的 op::Data/op::Const 类型才存在）——套用
+// 与 CANN 头同款宏守卫，两头任一定义过即跳过。
 #ifndef OPS_PROTO_DEF_DATA
 #define OPS_PROTO_DEF_DATA
 REG_OP(Data)
@@ -33,8 +34,8 @@ REG_OP(Data)
     .OUTPUT(y, TensorType::ALL())
     .ATTR(index, Int, 0)
     .OP_END_FACTORY_REG(Data)
-
 #endif
+
 #ifndef OPS_PROTO_DEF_CONST
 #define OPS_PROTO_DEF_CONST
 REG_OP(Const)

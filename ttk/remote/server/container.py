@@ -1,3 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: UTF-8 -*-
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+
 """Docker sandbox backend for xpu-server.
 
 Deployment constraint: stdlib + subprocess only. No ttk.* imports.
@@ -24,7 +34,8 @@ def _run_in_container(
 
     Bind-mounts req_dir (rw, tmp_in + out) + tenant_sync_dir (ro, specs) at
     fixed container paths, rewrites the 3 path fields in kwargs to those paths,
-    runs executor_main.py, maps envelope.output_path back to host.
+    runs `python -m ttk.remote.server.executor_main`, maps envelope.output_path
+    back to host.
     """
     host_req_dir = kwargs["output_dir"]
     host_sync_dir = kwargs["tenant_sync_dir"]
@@ -70,15 +81,18 @@ def _run_in_container(
             f"{os.getuid()}:{os.getgid()}",  # non-root: blocks symlink escape
             "-v",
             f"{kwargs_path}:/kwargs.json:ro",
+            "-w",
+            "/executor",  # ttk 包根（显式指定，不依赖镜像 WORKDIR）
         ]
         if use_device:
             cmd.extend(docker_args or [])
             cmd.extend(["--security-opt", "no-new-privileges"])
         else:
             cmd.append("--cap-drop=ALL")
-        cmd.extend([image, "python", "/executor/executor_main.py", "/kwargs.json"])
+        # -m 模块形态与镜像 ENTRYPOINT 一致（-w 已显式指向 ttk 包根）
+        cmd.extend([image, "python", "-m", "ttk.remote.server.executor_main", "/kwargs.json"])
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, check=False)
 
         if result.returncode == 0 and result.stdout.strip():
             try:
@@ -98,7 +112,7 @@ def _run_in_container(
         return {
             "ok": False,
             "http_status": 500,
-            "error": "container execution failed" if result.stderr else f"exit code {result.returncode}",
+            "error": (f"container execution failed (exit {result.returncode}): {(result.stderr or '').strip()[-500:]}"),
             "api": _api,
         }
 

@@ -5,47 +5,47 @@
 # CANN Open Software License Agreement Version 2.0 (the "License").
 # Please refer to the License for details. You may not use this file except in compliance with the License.
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
 """
 Unit tests for the E2E golden Promote path.
 
-Covers the three functions added when E2E golden gained `golden_mode=Promote`
-under a cross_check tolerance:
+Covers the three functions of the E2E golden Promote mechanism:
 
-  * `golden_generation._promote_raw_inputs`    - dtype lift itself
-  * `profiling._needs_golden_promote`          - "does the standard need Promote?"
-  * `profiling._generate_golden_maybe_promote` - set / restore the override
+  * `golden_generation._promote_raw_inputs` - dtype lift itself
+  * `worker._needs_golden_promote`           - "does the standard need Promote?"
+  * `worker._generate_golden`                - set / restore the override
 """
 
 from unittest.mock import patch
 
 import numpy as np
 
-from ttk.core_modules.framework_api import profiling as _prof
-from ttk.core_modules.framework_api.golden_generation import (
+from ttk.core_modules.framework_api import worker as _worker
+from ttk.core_modules.framework_api.golden import (
     _promote_raw_inputs as promote_raw_inputs,
 )
-from ttk.core_modules.framework_api.profiling import (
-    _generate_golden_maybe_promote as generate_golden_maybe_promote,
+from ttk.core_modules.framework_api.worker import (
+    _generate_golden as generate_golden,
 )
-from ttk.core_modules.framework_api.profiling import (
+from ttk.core_modules.framework_api.worker import (
     _needs_golden_promote as needs_golden_promote,
 )
 
 # 被测函数以别名导入而非 `模块._私有` 属性访问:后者会被判受保护成员访问(G.CLS.11)。
-# 仍保留 _prof 模块引用,供 patch.object 按名字打桩使用(传的是字符串,不构成属性访问)。
+# 仍保留 _worker 模块引用,供 patch.object 按名字打桩使用(传的是字符串,不构成属性访问)。
 
 
 class _Testcase:
     """Minimal stand-in for TestcaseE2e (plain attributes, no __slots__)."""
 
-    def __init__(self, flat_tensor_dtypes=None, golden_mode_override=None):
+    def __init__(self, flat_tensor_dtypes=None, golden_mode_override=None, flat_output_dtypes=("float32",)):
         self.testcase_name = "ut_case"
         self.api_name = "torch.add"
         self.flat_tensor_dtypes = flat_tensor_dtypes
         self.golden_mode_override = golden_mode_override
+        self.flat_output_dtypes = flat_output_dtypes
         self.flat_precision_tolerances = None
         self.flat_absolute_precision = None
 
@@ -108,58 +108,120 @@ def test_promote_leaves_extra_inputs_alone():
     assert out[1].dtype == np.float16
 
 
+def test_promote_applies_to_mutable_apis():
+    """升精度只由 golden_mode 与 dtype 决定，对 mutable/有状态 API 一致适用。"""
+    testcase = _Testcase(flat_tensor_dtypes=["float16"])
+    testcase.api_name = "tf.raw_ops.ResourceScatterAdd"
+    raw = [np.ones(4, dtype=np.float16)]
+
+    out = promote_raw_inputs(testcase, raw, _Switches(golden_mode="Promote"))
+
+    assert out[0].dtype == np.float32
+
+
 # ----------------------------------------------------------------------------
 # _needs_golden_promote
 # ----------------------------------------------------------------------------
 def test_needs_promote_true_for_cross_check():
-    with patch.object(_prof, "get_spec_attr", return_value=None), patch.object(
-        _prof, "resolve_tolerance", return_value=[_standard("cross_check")]
+    with patch.object(_worker, "SpecResolver") as _sr, patch.object(
+        _worker, "resolve_tolerance", return_value=[_standard("cross_check")]
     ):
-        assert needs_golden_promote(_Testcase(), _Switches(), [np.ones(2)]) is True
+        _sr.return_value.resolve_tolerance.return_value = None
+        assert needs_golden_promote(_Testcase(), _Switches()) is True
 
 
 def test_needs_promote_true_for_mix_tolerance():
     """mix_tolerance（默认单标杆判据）与 CLI 简写 mixed 同样要求 golden 升精度。"""
     for token in ("mix_tolerance", "mixed"):
-        with patch.object(_prof, "get_spec_attr", return_value=None), patch.object(
-            _prof, "resolve_tolerance", return_value=[_standard(token)]
+        with patch.object(_worker, "SpecResolver") as _sr, patch.object(
+            _worker, "resolve_tolerance", return_value=[_standard(token)]
         ):
-            assert needs_golden_promote(_Testcase(), _Switches(), [np.ones(2)]) is True
+            _sr.return_value.resolve_tolerance.return_value = None
+            assert needs_golden_promote(_Testcase(), _Switches()) is True
 
 
 def test_needs_promote_false_for_non_promote_standards():
     """stat_rel_err/binary_equal/isclose 判据不强制 golden 升精度。"""
     for token in ("stat_rel_err", "binary_equal", "isclose"):
-        with patch.object(_prof, "get_spec_attr", return_value=None), patch.object(
-            _prof, "resolve_tolerance", return_value=[_standard(token)]
+        with patch.object(_worker, "SpecResolver") as _sr, patch.object(
+            _worker, "resolve_tolerance", return_value=[_standard(token)]
         ):
-            assert needs_golden_promote(_Testcase(), _Switches(), [np.ones(2)]) is False
+            _sr.return_value.resolve_tolerance.return_value = None
+            assert needs_golden_promote(_Testcase(), _Switches()) is False
 
 
-def test_needs_promote_false_without_ref_nps():
-    """拿不到被测输出（ref_nps 空）时无法解析判据，不升精度。"""
-    with patch.object(_prof, "get_spec_attr", return_value=None), patch.object(
-        _prof, "resolve_tolerance", return_value=[_standard("mix_tolerance")]
+def test_needs_promote_false_without_declared_output_dtypes():
+    """CSV 未声明输出 dtype 时无法解析判据，不升精度（锚点=声明 dtype，不依赖执行结果）。"""
+    with patch.object(_worker, "SpecResolver") as _sr, patch.object(
+        _worker, "resolve_tolerance", return_value=[_standard("mix_tolerance")]
     ):
-        assert needs_golden_promote(_Testcase(), _Switches(), None) is False
+        _sr.return_value.resolve_tolerance.return_value = None
+        assert needs_golden_promote(_Testcase(flat_output_dtypes=None), _Switches()) is False
+
+
+def test_needs_promote_anchor_is_csv_declared_dtype():
+    """判定锚点 = CSV 声明输出 dtype：resolve_numpy_dtypes(flat_output_dtypes) 供参。"""
+    seen = {}
+
+    def _capture(tolerance, precisions, absolutes, dtypes, method):
+        seen["dtypes"] = dtypes
+        return [_standard("cross_check")]
+
+    with patch.object(_worker, "SpecResolver") as _sr, patch.object(_worker, "resolve_tolerance", side_effect=_capture):
+        _sr.return_value.resolve_tolerance.return_value = None
+        assert needs_golden_promote(_Testcase(flat_output_dtypes=("float32", "float16")), _Switches()) is True
+    assert tuple(str(d) for d in seen["dtypes"]) == ("float32", "float16")
+
+
+def test_needs_promote_false_under_xpu():
+    """golden_mode=XPU 与 Promote 互斥：golden 由三方产出，不做 CPU 抬精度。"""
+    assert needs_golden_promote(object(), _Switches(golden_mode="XPU")) is False
+
+
+def test_generate_golden_data_xpu_placeholder(monkeypatch):
+    """XPU 模式本地不生成 golden：统一返回 GOLDEN_FAILURE 占位（真值由远端三方回路给出）。"""
+    from types import SimpleNamespace
+
+    import ttk.core_modules.framework_api.compare as prof
+
+    monkeypatch.setattr(
+        prof, "process_context", lambda: SimpleNamespace(notify_status=lambda *a, **k: None, storage={})
+    )
+    testcase = SimpleNamespace(golden_api="", golden_mode_override=None)
+    golden = prof.generate_golden_data(testcase, [], _Switches(golden_mode="XPU"), None, dump=False)
+    assert golden == ["GOLDEN_FAILURE"]
 
 
 # ----------------------------------------------------------------------------
-# _generate_golden_maybe_promote
+# _generate_golden
 # ----------------------------------------------------------------------------
-def test_maybe_promote_sets_promote_then_restores():
+def _patch_plain_generator(seen):
+    def _fake_generate(case, raw_inputs, switches, backend, dump=True):
+        seen["mode"] = case.golden_mode_override
+        seen["dump"] = dump
+        return ["golden"]
+
+    return patch.object(_worker, "generate_golden_data", side_effect=_fake_generate)
+
+
+def test_generate_golden_promotes_then_restores():
     testcase = _Testcase(golden_mode_override="Enable")
     seen = {}
 
-    def _fake_generate(case, raw_inputs, switches, backend):
-        seen["mode"] = case.golden_mode_override
-        return ["golden"]
-
-    with patch.object(_prof, "_needs_golden_promote", return_value=True), patch.object(
-        _prof, "_generate_golden_data", side_effect=_fake_generate
-    ):
-        out = generate_golden_maybe_promote(testcase, [], _Switches(), "cpu", [np.ones(2)])
+    with _patch_plain_generator(seen):
+        out = generate_golden(testcase, [], _Switches(), "cpu", promote=True)
 
     assert out == ["golden"]
     assert seen["mode"] == "Promote"  # 生成期间已抬升
     assert testcase.golden_mode_override == "Enable"  # 结束后恢复原值
+
+
+def test_generate_golden_without_promote_keeps_mode():
+    testcase = _Testcase(golden_mode_override="Enable")
+    seen = {}
+
+    with _patch_plain_generator(seen):
+        out = generate_golden(testcase, [], _Switches(), "cpu", promote=False)
+
+    assert out == ["golden"]
+    assert seen["mode"] == "Enable"  # 未抬升
