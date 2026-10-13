@@ -84,6 +84,19 @@ class _ScanState:
 class CrossCheckComparison(ComparisonBase):
     STANDARD_NAME = "cross_check"
 
+    def _precheck(self):
+        """三方前置校验：third_party 元素数与 output 不一致 → FAIL（异长会
+        IndexError/ValueError，空输出 vs 非空三方是位数不匹配）；third_party
+        缺失时不短路，空输出也走 compare_impl 的 GOLDEN_FAILURE。output 与
+        golden 的元素数校验由基类统一处理。"""
+        if self.third_party is None:
+            return None
+        if self.third_party.size != self.output.size:
+            precision = f"{self.output.size} vs {self.golden.size} vs {self.third_party.size}"
+            log = f"Output {self.output_idx} size is different among output/golden/third_party: {precision}\n"
+            return EachCompareResult(precision, None, False, log)
+        return super()._precheck()
+
     def compare_impl(self) -> EachCompareResult:
         t, g, b = self.output, self.golden, self.third_party
         if b is None:

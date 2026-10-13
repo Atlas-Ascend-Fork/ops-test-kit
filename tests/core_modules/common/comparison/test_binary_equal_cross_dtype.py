@@ -105,3 +105,20 @@ def test_isclose_populates_metrics():
     assert metrics["standard"] == "isclose"
     assert metrics["pass"] is True
     assert "precision" in metrics
+
+
+def test_element_count_mismatch_fails_with_sizes():
+    """#257：不同元素数先行判 FAIL 并给出两侧大小——前缀字节相同不得假通过，字节扫描不再广播崩溃。"""
+    cls = _cls("binary")
+    precision, log, is_pass, _m = cls(
+        np.array([7], dtype=np.int8), np.array([7, 7, 7], dtype=np.int8), 0, "int8"
+    ).compare()
+    assert is_pass is False
+    assert precision == "1 vs 3"
+    assert "size is different with golden size" in log
+    # 跨 dtype promote 路径同样拦截（元素数不随 promote 变化）
+    precision2, _l2, is_pass2, _m2 = cls(
+        np.array([7, 7], dtype=np.int32), np.array([7], dtype=np.int64), 0, "int32"
+    ).compare()
+    assert is_pass2 is False
+    assert precision2 == "2 vs 1"

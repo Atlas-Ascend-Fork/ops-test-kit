@@ -196,6 +196,30 @@ class TestSpecialDtypeCompleteness:
         assert bool(is_pass) is True
         assert metrics["precision"] == pytest.approx(1.0)
 
+    def test_cosine_zero_vectors_pass(self):
+        """cosine 双零向量：precision=1——零向量方向无定义，相同零张量不得判 FAIL（#57）。"""
+        z = np.zeros(4, np.float32)
+        _p, _l, is_pass, metrics = self._run("cosine", z, z.copy(), {"legacy": {"rtol": None}})
+        assert bool(is_pass) is True
+        assert metrics["precision"] == 1.0
+
+    def test_cosine_single_side_zero_fails(self):
+        """cosine 单侧零：precision=0 判 FAIL（零与非零向量不相似，不再是 nan）。"""
+        _p, _l, is_pass, metrics = self._run(
+            "cosine", np.zeros(4, np.float32), np.ones(4, np.float32), {"legacy": {"rtol": None}}
+        )
+        assert bool(is_pass) is False
+        assert metrics["precision"] == 0.0
+
+    @pytest.mark.parametrize("dt", [np.int8, np.int16])
+    def test_cosine_integer_dot_no_wraparound(self, dt):
+        """cosine 整数：np.dot 按输入 dtype 累加溢出回绕（int8[300]×127 平方和
+        4.8e6 回绕成 44，全同向量 precision≈9e-06 假失败），提升 float64 后须 PASS（#57）。"""
+        a = np.full(300, 127, dtype=dt)
+        _p, _l, is_pass, metrics = self._run("cosine", a, a.copy(), {"legacy": {"rtol": None}})
+        assert bool(is_pass) is True
+        assert metrics["precision"] == pytest.approx(1.0)
+
     def test_isclose_fp8_dtype_aware_default_rtol(self):
         """isclose + fp8：默认 rtol 分档感知精度（相邻可表示值 ulp≈2^-2~2^-3 须宽限）。"""
         from ttk.utilities.dtypes import resolve_numpy_dtype
@@ -205,6 +229,22 @@ class TestSpecialDtypeCompleteness:
         c = np.array([1.25], dtype=f8)  # 1.0 的相邻可表示值
         _p, _l, is_pass, _m = self._run("isclose", c, b, {"legacy": {"rtol": None, "ptol": None, "atol": None}})
         assert bool(is_pass) is True
+
+    def test_complex_diff_log_keeps_imaginary(self):
+        """#283：复数失败日志保留虚部——1j vs 2j 不得都打成 0.0（float() 丢虚部 + ComplexWarning）。"""
+        import warnings
+
+        g = np.array([1j, 1 + 2j], np.complex64)
+        a = np.array([2j, 3 + 4j], np.complex64)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            _p, log, is_pass, _m = self._run("close", a, g, {"legacy": {"rtol": None, "ptol": None, "atol": None}})
+        assert bool(is_pass) is False
+        assert "1j" in log
+        assert "2j" in log
+        assert "1+2j" in log
+        assert "3+4j" in log
+        assert "0.000000000000000000" not in log
 
 
 class TestCompareWithHooksEntry:

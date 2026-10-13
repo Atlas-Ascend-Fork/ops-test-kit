@@ -165,8 +165,8 @@ class ComparisonBase(metaclass=ABCMeta):
     def compare_impl(self) -> EachCompareResult:
         pass
 
-    def _check_empty(self) -> Optional[EachCompareResult]:
-        """都空→PASS；一方空→FAIL；都非空→None（继续 compare_impl 主体）。"""
+    def _precheck(self) -> Optional[EachCompareResult]:
+        """都空→PASS；一方空→FAIL；元素数不一致→FAIL；其余→None（进 compare_impl）。"""
         out_empty = self.output.size == 0
         gold_empty = self.golden.size == 0
         if out_empty and gold_empty:
@@ -177,6 +177,10 @@ class ComparisonBase(metaclass=ABCMeta):
             return EachCompareResult(
                 0, is_pass=False, standard=self.standard, metrics={"standard": self.standard, "pass": False}
             )
+        if self.output.size != self.golden.size:
+            precision = f"{self.output.size} vs {self.golden.size}"
+            log = f"Output {self.output_idx} size is different with golden size: {precision}\n"
+            return EachCompareResult(precision, None, False, log)
         return None
 
     def _finalize_tolerances(self):
@@ -221,8 +225,9 @@ class ComparisonBase(metaclass=ABCMeta):
         self.output = _to_numpy(self.output)
         self.golden = _to_numpy(self.golden)
         self.third_party = _to_numpy(self.third_party) if self.third_party is not None else None
-        # 空数组统一短路（唯一点）：都空→PASS、一方空→FAIL；compare_impl 只在非空时跑
-        compare_result = self._check_empty()
+        # 入口前置短路（唯一点）：都空→PASS、一方空或元素数不一致→FAIL；
+        # compare_impl 只处理非空同数
+        compare_result = self._precheck()
         if compare_result is None:
             # 容差终值化在 _to_numpy 之后：分档默认（fp8 家族）依据的是 torch→numpy
             # 转换后的 dtype；compare_impl 只见终值（per-output 取位/默认兜底在此单点）
@@ -252,6 +257,13 @@ class ComparisonBase(metaclass=ABCMeta):
         ):
             self.golden = np.pad(self.golden, (0, 1), mode="constant")
 
+    @staticmethod
+    def _fmt_log_value(value, spec=":<14.18f") -> str:
+        """差异日志数值格式化：复数走 str 保留虚部（float() 丢虚部并告警），其余按 spec 定宽。"""
+        if isinstance(value, (complex, np.complexfloating)):
+            return str(value)
+        return format(float(value), spec)
+
     def _log_diff_output(self, diff_index) -> str:
         log = ""
         if diff_index is not None:
@@ -265,21 +277,23 @@ class ComparisonBase(metaclass=ABCMeta):
                 if golden_size <= 0:
                     log += (
                         f"Index: {idx:03d} RealIndex: {real_index:06d} Expected: 0 "
-                        f"Actual: {float(actual_v):<14.18f}, Diff: inf\n"
+                        f"Actual: {self._fmt_log_value(actual_v)}, Diff: inf\n"
                     )
                 elif any(s in str(self.golden.dtype) for s in ("float8", "float4", "hifloat8")):
                     # out-of-range number will be nan/inf in
                     # `- (golden_v - actual_v) / golden_v`. convert to float.
                     tmp_array = np.array([float(golden_v), float(actual_v)], dtype=np.float32)
                     log += (
-                        f"Index: {idx:03d} RealIndex: {real_index:06d} Expected: {float(golden_v):<14.18f} "
-                        f"Actual: {float(actual_v):<14.18f} Diff: {float(-(tmp_array[0] - tmp_array[1]) / tmp_array[0]):<14.06f}\n"
+                        f"Index: {idx:03d} RealIndex: {real_index:06d} Expected: {self._fmt_log_value(golden_v)} "
+                        f"Actual: {self._fmt_log_value(actual_v)} "
+                        f"Diff: {self._fmt_log_value(-(tmp_array[0] - tmp_array[1]) / tmp_array[0], ':<14.06f')}\n"
                     )
                 elif "bool" not in str(self.golden.dtype):
                     # (golden_v - actual_v) is different with (actual_v - golden_v) in BFP16 vs FP32-Golden
                     log += (
-                        f"Index: {idx:03d} RealIndex: {real_index:06d} Expected: {float(golden_v):<14.18f} "
-                        f"Actual: {float(actual_v):<14.18f} Diff: {float(-(golden_v - actual_v) / golden_v):<14.06f}\n"
+                        f"Index: {idx:03d} RealIndex: {real_index:06d} Expected: {self._fmt_log_value(golden_v)} "
+                        f"Actual: {self._fmt_log_value(actual_v)} "
+                        f"Diff: {self._fmt_log_value(-(golden_v - actual_v) / golden_v, ':<14.06f')}\n"
                     )
                 else:
                     log += f"Index: {idx:03d} RealIndex: {real_index:06d} Expected: {str(golden_v)} Actual: {str(actual_v)} Diff: FAIL\n"

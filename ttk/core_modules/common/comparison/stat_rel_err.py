@@ -13,10 +13,20 @@ stat_rel_err comparison — 相对误差统计精度标准（MERE/MARE）
 
 import numpy as np
 
+from ....utilities.dtypes import dtype_to_name
 from .registry import CHUNK_SIZE, FAIL_REASONS, ComparisonBase, EachCompareResult, register_comparison
 
 # 算法常量（不是配置——配置由 resolve_tolerance 解析后经 params 传入）
 MARE_RATIO = 10
+# 相消噪声地板（rel_err 分母下限）= 输出 dtype 的 1 ulp（@1.0），表外 dtype 回落
+# FLOOR。固定 1e-7 与 dtype 无关：近零 golden 处中间量残留被放大成 O(1) 的
+# "相对误差"，mare 单点即挂整张用例。fp16/bf16 档与 SMALL_VALUE 同值；恰好
+# 1 ulp 的偏差 re=1 仍判 FAIL。
+NOISE_FLOOR = {
+    "float16": 2.0**-11,
+    "bfloat16": 2.0**-8,
+    "float32": 2.0**-23,
+}
 FLOOR = 1e-7
 # CHUNK_SIZE 见 registry（判据层共用）；分块降内存动机与 top-K 语义见彼处注释。
 
@@ -39,12 +49,13 @@ class StatRelErrComparison(ComparisonBase):
     STANDARD_NAME = "stat_rel_err"
 
     def compare_impl(self) -> EachCompareResult:
-        # 空数组已在 compare() 入口 _check_empty 统一短路，这里只处理非空
+        # 空数组与元素数已在 compare() 入口 _precheck 统一短路，这里只处理非空同数
         # threshold 是 resolve_tolerance 解析好的最终值（经 params → options 传入），不查表
         actual, golden = self.output, self.golden
         T = np.promote_types(np.dtype(np.float32), np.promote_types(actual.dtype, golden.dtype))
         th = self.tol_options["threshold"]
-        scan = self._scan_chunks(actual, golden, T)
+        floor = NOISE_FLOOR.get(dtype_to_name(self.output_dtype), FLOOR)
+        scan = self._scan_chunks(actual, golden, T, floor)
 
         if scan.mism:  # NaN/Inf 不一致：污染，不算 mere/mare
             return EachCompareResult(
@@ -82,7 +93,7 @@ class StatRelErrComparison(ComparisonBase):
             metrics=_metrics(th, mere, scan.mare, passed, reason),
         )
 
-    def _scan_chunks(self, actual, golden, T) -> _ChunkScan:
+    def _scan_chunks(self, actual, golden, T, floor) -> _ChunkScan:
         """按 CHUNK_SIZE 分块扫描：mismatch 位（前 K 个）+ 有限元素 mere/mare 累计 + top-K 候选。
 
         所有中间数组均为 O(CHUNK_SIZE) 不随元素数增长；dtype 提升在块内做免全量拷贝。
@@ -112,7 +123,7 @@ class StatRelErrComparison(ComparisonBase):
                 if not nf:
                     continue
                 scan.n_finite += nf
-                re = np.abs(ac - gc) / (np.abs(gc) + FLOOR)
+                re = np.abs(ac - gc) / (np.abs(gc) + floor)
                 re_f = re[fin]
                 scan.err_sum += float(re_f.sum(dtype=np.float64))
                 scan.mare = max(scan.mare, float(re_f.max()))

@@ -282,3 +282,42 @@ def test_xpu_golden_mode_degenerate_two_party():
 
     c = _make(np.array([1.0, 1.01], dtype=np.float32), golden, golden.copy(), params)
     assert c.compare()[2] is False  # rel_err=1e-2 远超
+
+
+_PARAMS = {
+    "level": "L1",
+    "mare_ratio": 5.0,
+    "mere_ratio": 1.5,
+    "rmse_ratio": 1.5,
+    "small_value": 2**-14,
+    "small_value_atol": 2**-30,
+    "legacy": {"rtol": None, "ptol": None, "atol": 1e-8},
+}
+
+
+def test_element_count_mismatch_fails_not_raises():
+    """#292：三方元素数不一致直接 FAIL（给出一元大小串），不再 IndexError/ValueError。"""
+    r = _make(np.ones(2, np.float32), np.ones(2, np.float32), np.ones(1, np.float32), _PARAMS).compare()
+    assert r[2] is False
+    assert r[0] == "2 vs 2 vs 1"
+    r2 = _make(np.ones(2, np.float32), np.ones(2, np.float32), np.ones(3, np.float32), _PARAMS).compare()
+    assert r2[2] is False
+
+
+def test_empty_outputs_vs_nonempty_third_party_fails():
+    """#292：output/golden 都空而 third_party 非空 → FAIL（此前"都空→PASS"短路误通过）。"""
+    r = _make(np.ones(0, np.float32), np.ones(0, np.float32), np.ones(3, np.float32), _PARAMS).compare()
+    assert r[2] is False
+
+
+def test_empty_outputs_missing_third_party_golden_failure():
+    """#292：都空且三方缺失 → GOLDEN_FAILURE FAIL（不再被"都空→PASS"绕过既有语义）。"""
+    r = _make(np.ones(0, np.float32), np.ones(0, np.float32), None, _PARAMS).compare()
+    assert r[2] is False
+    assert r[0] == "GOLDEN_FAILURE"
+
+
+def test_all_empty_consistent_still_passes():
+    """三方全空且一致 → PASS 语义保留。"""
+    r = _make(np.ones(0, np.float32), np.ones(0, np.float32), np.ones(0, np.float32), _PARAMS).compare()
+    assert r[2] is True

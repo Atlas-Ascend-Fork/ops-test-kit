@@ -23,12 +23,19 @@ import numpy as np
 
 
 def compute_output_md5(arrays):
-    """Compute MD5 hash of numpy output arrays for deterministic check."""
+    """输出数组确定性 MD5：每位带 [idx:dtype:shape:nbytes] 边界，None 位显式留痕。
+
+    仅拼 tobytes 时异形同字节（如 ([1,2],[3]) 与 ([1],[2,3])）会得到相同摘要。"""
     if not isinstance(arrays, (list, tuple)):
         arrays = [arrays]
-    return hashlib.md5(  # noqa: S324  # 非安全用途：确定性校验和
-        b"".join(arr.tobytes() if isinstance(arr, np.ndarray) else b"" for arr in arrays)
-    ).hexdigest()
+    h = hashlib.md5()  # noqa: S324  # 非安全用途：确定性校验和
+    for idx, arr in enumerate(arrays):
+        if not isinstance(arr, np.ndarray):
+            h.update(f"[{idx}:None]".encode())
+            continue
+        h.update(f"[{idx}:{arr.dtype.str}:{arr.shape}:{arr.nbytes}]".encode())
+        h.update(arr.tobytes())
+    return h.hexdigest()
 
 
 def finalize_det_status(md5_list, testcase_name):

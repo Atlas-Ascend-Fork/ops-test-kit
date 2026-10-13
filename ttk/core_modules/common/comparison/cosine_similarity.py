@@ -15,7 +15,7 @@ cosine similarity comparison
 import numpy as np
 
 # Third-party Packages
-from .registry import FAIL_REASONS, ComparisonBase, EachCompareResult, register_comparison
+from .registry import CHUNK_SIZE, FAIL_REASONS, ComparisonBase, EachCompareResult, register_comparison
 
 
 @register_comparison("cosine")
@@ -34,19 +34,22 @@ class CosineSimilarityComparison(ComparisonBase):
         rtol = self.rtol
         output = self._normalize_dtype(self.output)
         golden = self._normalize_dtype(self.golden)
-        common_dtype = np.promote_types(output.dtype, golden.dtype)
-        _output = output.astype(common_dtype, copy=False)
-        _golden = golden.astype(common_dtype, copy=False)
-        # 小动态范围浮点（fp16/bf16/fp8 家族）的 dot/norm 会溢出（如 e5m2 max
-        # 57344，百级元素 × 量级 ~30 的平方和即溢出为 inf → precision=inf/nan），
-        # 一律提升 fp32 计算，保证余弦相似度精度与输入 dtype 无关
-        name = getattr(common_dtype, "name", "")
-        compute_dtype = np.float32 if name in ("float16", "bfloat16") or name.startswith("float8") else common_dtype
-        _output = _output.astype(compute_dtype, copy=False)
-        _golden = _golden.astype(compute_dtype, copy=False)
-        output_norm = np.linalg.norm(_output)
-        golden_norm = np.linalg.norm(_golden)
-        precision = np.dot(_output, _golden.T) / (output_norm * golden_norm)
+        # 分块 float64 累加 dot 与两路平方和，norm=sqrt(平方和)：原生 dtype 直算
+        # 时整数 dot 按输入 dtype 回绕、窄浮点平方和溢出；分块免全量 float64 物化
+        dot = 0.0
+        sq_output = 0.0
+        sq_golden = 0.0
+        for s in range(0, output.size, CHUNK_SIZE):
+            _output = output[s : s + CHUNK_SIZE].astype(np.float64, copy=False)
+            _golden = golden[s : s + CHUNK_SIZE].astype(np.float64, copy=False)
+            dot += float(np.dot(_output, _golden))
+            sq_output += float(np.dot(_output, _output))
+            sq_golden += float(np.dot(_golden, _golden))
+        output_norm = np.sqrt(sq_output)
+        golden_norm = np.sqrt(sq_golden)
+        denom = output_norm * golden_norm
+        # 零范数：双零向量按 precision=1，单侧零按 0
+        precision = (1.0 if output_norm == golden_norm else 0.0) if denom == 0 else float(dot / denom)
         is_pass = (1 - precision) <= rtol
         metrics = {"standard": self.STANDARD_NAME, "precision": float(precision), "pass": bool(is_pass)}
         if not is_pass:

@@ -44,7 +44,7 @@ class BinaryComparison(ComparisonBase):
     STANDARD_NAME = "binary_equal"
 
     def compare_impl(self) -> EachCompareResult:
-        # 空数组已在 compare() 入口 _check_empty 统一短路，这里只处理非空
+        # 空数组与元素数不一致已在 compare() 入口 _precheck 统一短路
         if str(self.output.dtype) != str(self.golden.dtype):
             return self._cross_dtype_compare()
         diff_idx, golden_size, diff_idx_size = self._numpy_binary_compare(self.output, self.golden)

@@ -40,7 +40,7 @@ class MixToleranceComparison(ComparisonBase):
     STANDARD_NAME = "mix_tolerance"
 
     def compare_impl(self) -> EachCompareResult:
-        # 空数组已在 compare() 入口 _check_empty 统一短路，这里只处理非空
+        # 空数组与元素数已在 compare() 入口 _precheck 统一短路，这里只处理非空同数
         # rtol/atol/required_matched_ratio/max_abs_error_limit 均为 resolve_tolerance 解析好的最终值（不查表）
         actual, golden = self.output, self.golden
         if actual.size != golden.size:

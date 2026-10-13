@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ttk.core_modules.common.comparison.stat_rel_err import CHUNK_SIZE, FLOOR, StatRelErrComparison
+from ttk.core_modules.common.comparison.stat_rel_err import CHUNK_SIZE, FLOOR, NOISE_FLOOR, StatRelErrComparison
 
 
 def _impl(actual, golden, dtype, threshold):
@@ -32,13 +32,13 @@ def _run(actual, golden, dtype, threshold):
     return c.compare()
 
 
-def _reference_impl(actual, golden):
+def _reference_impl(actual, golden, floor):
     """旧全量实现，仅用于分块路径对拍（不含 mismatch 分支）。"""
     T = np.promote_types(np.dtype(np.float32), np.promote_types(actual.dtype, golden.dtype))
     a = actual.astype(T)
     g = golden.astype(T)
     with np.errstate(invalid="ignore", divide="ignore"):
-        rel_err = np.abs(a - g) / (np.abs(g) + FLOOR)
+        rel_err = np.abs(a - g) / (np.abs(g) + floor)
         mask = np.isfinite(a) & np.isfinite(g)
         mere = float(np.mean(rel_err[mask]))
         mare = float(np.max(rel_err[mask]))
@@ -100,7 +100,7 @@ def test_matches_reference_across_chunk_boundary():
     for n in (CHUNK_SIZE - 1000, CHUNK_SIZE + 1000):
         g = rng.standard_normal(n).astype(np.float32)
         a = g + rng.random(n).astype(np.float32) * np.float32(1e-3)
-        mere, mare, ref_idx = _reference_impl(a, g)
+        mere, mare, ref_idx = _reference_impl(a, g, NOISE_FLOOR["float32"])
         r = _impl(a, g, "float32", 2**-13)
         assert r.is_pass is False
         assert r.metrics["mere"] == pytest.approx(mere, rel=1e-3)  # float64 累加 vs 全量 float32 mean
@@ -127,7 +127,7 @@ def test_chunked_cross_chunk_nan_inf():
     assert list(r.diff_index) == [CHUNK_SIZE, n - 1]
 
 
-# 2^20 处 float32 的 ulp=0.125 > FLOOR，|g|+FLOOR 恰为 2^20 → rel_err 可精确落在阈值上
+# 2^20 处 float32 的 ulp=0.125 > 地板（2^-23），|g|+地板 恰为 2^20 → rel_err 可精确落在阈值上
 _BASE = np.float32(2**20)
 
 
@@ -153,6 +153,62 @@ def test_chunked_strict_threshold_boundary():
     r3 = _impl(g, g, "float32", th)
     assert r3.is_pass is True
     assert r3.diff_index is None
+
+
+# —— 防线 6：近零相消噪声不被放大（#76：固定 FLOOR=1e-7 时单点残留挂整张用例）——
+def test_near_zero_cancellation_bf16():
+    """防线 6：bf16（#76 实测 dtype，th=2^-7）——fp32 中间量相消残留 2^-23 是深度
+    亚 ulp 噪声（输出 ulp=2^-8），地板下 rel_err≈3e-5 通过（旧固定 1e-7 时 mare=1.19 必挂）。"""
+    g = np.full(10000, 0.4, dtype=np.float32)
+    g[0] = 0.0
+    a = g.copy()
+    a[0] = np.float32(2.0**-23)
+    r = _impl(a, g, "bfloat16", 2**-7)
+    assert r.is_pass is True
+    assert r.metrics["mare"] == pytest.approx(2.0**-23 / 2.0**-8, rel=1e-6)
+
+
+def test_near_zero_cancellation_fp16():
+    """防线 6：fp16（th=2^-10）——2^-23 残留对输出 ulp（2^-11）为亚 ulp 噪声，通过。"""
+    g = np.full(10000, 0.4, dtype=np.float32)
+    g[0] = 0.0
+    a = g.copy()
+    a[0] = np.float32(2.0**-23)
+    r = _impl(a, g, "float16", 2**-10)
+    assert r.is_pass is True
+
+
+def test_near_zero_fp32_ulp_boundary():
+    """防线 6：fp32 地板=1 ulp（2^-23）——golden=0 处恰好 1 ulp 的偏差 re=1 判 FAIL
+    （同精度下 1 ulp 即可见误差）；1/1024 ulp（2^-33）的噪声级残留通过。"""
+    g = np.full(10000, 0.4, dtype=np.float32)
+    g[0] = 0.0
+    a = g.copy()
+    a[0] = np.float32(2.0**-23)
+    r = _impl(a, g, "float32", 2**-13)
+    assert r.is_pass is False
+    assert r.metrics["mare"] == pytest.approx(1.0, rel=1e-6)
+    a[0] = np.float32(2.0**-33)
+    r2 = _impl(a, g, "float32", 2**-13)
+    assert r2.is_pass is True
+    assert r2.metrics["mare"] == pytest.approx(2.0**-33 / 2.0**-23, rel=1e-6)
+
+
+def test_real_error_not_masked_by_floor():
+    """防线 6：正常量级的真实误差不被地板掩盖——5% 偏差仍 FAIL。"""
+    g = np.full(10000, 0.4, dtype=np.float32)
+    a = g + np.float32(0.02)
+    r = _impl(a, g, "float32", 2**-13)
+    assert r.is_pass is False
+
+
+def test_floor_fallback_unchanged_for_offtable_dtype():
+    """防线 6：表外 dtype（int64）回落 FLOOR=1e-7——golden=0 vs actual=1 仍 FAIL，语义不变。"""
+    assert NOISE_FLOOR.get("int64", FLOOR) == 1e-7
+    r = _impl([0, 1], [0, 1], "int64", 2**-13)
+    assert r.is_pass is True
+    r2 = _impl([1, 1], [0, 1], "int64", 2**-13)
+    assert r2.is_pass is False
 
 
 # —— 防线 5：大数组数值 FAIL 路径 RSS 回归 ——
@@ -192,3 +248,10 @@ def test_large_array_bounded_rss():
     assert proc.returncode == 0, proc.stderr
     hwm_kib = int(proc.stdout.strip().splitlines()[-1])
     assert hwm_kib < 800_000, f"comparison peak RSS {hwm_kib} KiB exceeds bounded budget"
+
+
+def test_size_mismatch_unified_fail():
+    """#257 上提基类：异长（4 vs 2）统一短路 FAIL——此前长 golden 尾部被静默截断。"""
+    precision, _log, is_pass, _m = _run(np.ones(4, np.float32), np.ones(2, np.float32), "float32", 2**-13)
+    assert is_pass is False
+    assert precision == "4 vs 2"

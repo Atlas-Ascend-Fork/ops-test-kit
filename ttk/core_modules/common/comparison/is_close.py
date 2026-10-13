@@ -77,18 +77,13 @@ class CloseComparison(ComparisonBase):
         return np.where(finite, within, nonfinite_eq)
 
     def _isclose(self) -> EachCompareResult:
-        # 空数组已在 base compare() 的 _check_empty 统一短路，这里只处理非空
-        # 分块扫描：逐块 isclose + 失败计数（precision 精确）
+        # 空数组与元素数不一致已在 base compare() 的 _precheck 统一短路，
+        # 这里只处理非空同数：分块扫描：逐块 isclose + 失败计数（precision 精确）
         # + 前 K 个失败位（索引升序，仅 _log_diff_output 消费）
         rtol = self.rtol
         atol = self.atol
         output_size = self.output.size
         golden_size = self.golden.size
-        if output_size != golden_size:
-            precision = f"{output_size} vs {golden_size}"
-            log = f"Output {self.output_idx} size is different with golden size: {precision}\n"
-            return EachCompareResult(precision, None, False, log)
-
         n_bad = 0
         first_k = _FirstK(self.MAX_DIFF_OUTPUT)
         for s in range(0, output_size, CHUNK_SIZE):

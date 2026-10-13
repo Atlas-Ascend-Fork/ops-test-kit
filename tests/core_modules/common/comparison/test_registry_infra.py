@@ -51,7 +51,7 @@ def test_torch_input_normalized_to_numpy_dtype():
     assert is_pass64 is False
 
 
-# 一个最小 ComparisonBase 子类用于测 _check_empty
+# 一个最小 ComparisonBase 子类用于测 _precheck
 @register_comparison("__test_dummy")
 class _Dummy(ComparisonBase):
     STANDARD_NAME = "dummy"
@@ -72,6 +72,17 @@ def test_compare_both_empty_short_circuits_to_pass(actual, golden, expected):
     precision, _log, is_pass, _m = c.compare()
     assert is_pass is expected[0]
     assert precision == expected[1]
+
+
+def test_compare_size_mismatch_short_circuits_to_fail():
+    """compare() 公开入口：元素数不一致统一短路 FAIL（#257 上提基类）——"N vs M"
+    precision + 大小说明，不进 compare_impl（此前仅 isclose 有私有检查，binary
+    异长崩溃、stat_rel_err/cosine 长侧静默截断）。"""
+    c = _Dummy(np.ones(4, np.float32), np.ones(2, np.float32), 0, "float32", {})
+    precision, log, is_pass, _m = c.compare()
+    assert is_pass is False
+    assert precision == "4 vs 2"
+    assert "size is different with golden size" in log
 
 
 def test_log_diff_output_respects_max():
