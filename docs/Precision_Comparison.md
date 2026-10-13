@@ -159,7 +159,13 @@ absolute_precision,1e-8
 ```
 
 - `precision_tolerances`：每个输出的 `(rtol, ptol)` 对
-- `absolute_precision`：全局 atol
+- `absolute_precision`：atol。单个浮点数应用于全部输出；tuple/list 时按输出索引逐输出取值，多输出算子各输出量纲不同时可分别设置：
+
+```csv
+absolute_precision,"(1e-8, 1e-5)"
+```
+
+> 字段类型为 `FLOAT_SCALAR_NESTED`，完整字段约定见[测试用例生成](./Test_Case_Generation.md)。
 
 ### 使能方式
 
@@ -403,7 +409,7 @@ python3 -m ttk kernel -i cases.csv --compare cross_check --config ttk.conf.yaml 
 | 字段 | 作用 | 格式 | 读取方 |
 |------|------|------|--------|
 | `precision_tolerances` | 每输出的 `(rtol, ptol)` | `((0.001, 0.001),)` | `close`、`cosine`（仅 rtol）、`requant`/`quant`（仅 ptol，作为允许超差元素占比） |
-| `absolute_precision` | 全局 atol | `1e-8` | 仅 `close` |
+| `absolute_precision` | atol；单值应用于全部输出，tuple/list 按输出索引逐输出配置 | `1e-8` / `(1e-8, 1e-5)` | 仅 `close` |
 
 > 默认 `mixed` 不读 CSV 字段，需在 TestSpec `tolerance` 中覆盖（需 `--plugin`）。
 

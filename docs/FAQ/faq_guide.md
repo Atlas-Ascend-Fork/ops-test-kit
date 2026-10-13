@@ -161,7 +161,7 @@ absolute_precision,1e-8
 ```
 
 - `precision_tolerances`：每个输出的 (rtol, ptol) 对
-- `absolute_precision`：全局绝对精度容差
+- `absolute_precision`：绝对精度容差（atol）。单个浮点数应用于全部输出；tuple/list 按输出索引逐输出配置，如双输出 `"(1e-8, 1e-5)"`
 
 > 注意：这两个 CSV 字段是 legacy 字段，`precision_tolerances` 由 `--compare close`（rtol/ptol）/`cosine`（rtol）/`requant`（ptol）及 TestSpec 声明的 `quant` 判据（ptol）读取、`absolute_precision` 仅 `close` 读取。默认的 `mixed` 不读 CSV 容差字段，需在 TestSpec 的 `tolerance` 中覆盖（需 `--plugin`）：
 >

@@ -32,7 +32,7 @@ tolerance = {"float32": {"standard": "mix_tolerance", "rtol": 0.002}}
 | 字段 | 默认 | 说明 |
 |------|------|------|
 | `precision_tolerances` | None | 每个输出的 `(rtol, ptol)` 对。如 `"((0.001, 0.001),)"`。legacy 字段，仅 `--compare close`/`cosine` 读取 |
-| `absolute_precision` | 1e-8 | 全局绝对精度容差。可以是单值或嵌套逐输出控制。legacy 字段，仅 `--compare close` 读取 |
+| `absolute_precision` | 1e-8 | 绝对误差容差（atol）。单值应用于全部输出，嵌套容器逐输出控制。legacy 字段，仅 `--compare close` 读取 |
 
 ### 容差设置示例
 
@@ -43,8 +43,11 @@ precision_tolerances,"((0.001, 0.001),)"
 # 多输出：每个输出独立设置
 precision_tolerances,"((0.001, 0.001), (0.01, 0.01))"
 
-# 全局绝对精度
+# 单值 atol：应用于全部输出
 absolute_precision,1e-5
+
+# 逐输出 atol：双输出各取不同值
+absolute_precision,"(1e-8, 1e-5)"
 ```
 
 ## Dump 数据工作流

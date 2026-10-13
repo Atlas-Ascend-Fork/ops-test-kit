@@ -212,7 +212,7 @@ interplay:
         "body": """\
 applies to: kernel / geir / aclnn / e2e
 
-collects per-case third-party (XPU) device_ms only — no data transfer,
+collects per-case third-party (XPU) device_us only — no data transfer,
 no influence on the precision comparison. Results land in the
 xpu_metrics column; the NPU side keeps its normal golden comparison.
 
