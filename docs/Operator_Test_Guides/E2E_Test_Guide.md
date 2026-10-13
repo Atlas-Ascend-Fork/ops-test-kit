@@ -7,6 +7,8 @@
 
 # 环境准备
 
+## torch 测试环境准备
+
 1、基本环境配置
 
 - 建议Python 3.8+，安装PyTorch 2.0+
@@ -54,6 +56,47 @@ pip install ".[e2e-npu]"
 
 # MLU后端
 pip install ".[e2e-xpu]"
+```
+
+4、检查环境
+
+```shell
+python3 -m ttk info
+```
+
+确认设备信息正常后再执行测试。
+
+## TF 测试环境准备
+
+1、基本环境配置
+
+- 建议Python 3.8+，安装 TensorFlow 2.12+
+- NPU后端需额外编包安装 npu_device，编包参考 [cann/tensorflow](https://gitcode.com/cann/tensorflow)
+- 完成CANN包安装
+
+```shell
+# 默认路径安装，以root用户为例（非root用户，将/usr/local替换为${HOME}）
+source /usr/local/Ascend/cann/set_env.sh
+# 指定路径安装
+# source ${install_path}/cann/set_env.sh
+```
+
+2、自定义算子包（可选）
+
+安装方式与 torch 测试相同，参见「torch 测试环境准备」第2步。
+
+3、TTK工具安装
+
+```shell
+git clone https://gitcode.com/cann/ops-test-kit.git
+cd ops-test-kit
+pip install -r requirements.txt
+
+# TF后端
+pip install ".[tf]"
+
+# 如需同时测试torch用例，加装 e2e-npu
+# pip install ".[e2e-npu]"
 ```
 
 4、检查环境
