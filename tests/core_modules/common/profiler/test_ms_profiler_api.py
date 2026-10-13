@@ -81,10 +81,37 @@ def test_report_op_dfx_missing_symbol_warns_and_returns(caplog):
     prof = _bare_profiler()
     prof._is_model = False
     prof._msprof_dll = object()  # non-None: report path is active
+    prof._prof_started = True
     prof._prof_api_dll = _MissingSymbolDll()
     with caplog.at_level(logging.WARNING):
         prof.report_op_dfx(MsProfOpDfx(kernel_name="k", block_dim=1, core_type="AiCore"))
     assert "MsprofReportCompactInfo" in caplog.text
+
+
+def test_report_op_dfx_noop_before_start():
+    """start_step 隔离时首轮无 aclprof 会话：dfx 上报 no-op，不触达 profapi。
+
+    用真实符号的 FakeDll 断言零调用——缺符号 dll 无法区分 no-op 与
+    "warning + return"，守卫删掉时本用例必须失败。
+    """
+    prof = _bare_profiler()
+    prof._is_model = False
+    prof._msprof_dll = object()
+    prof._prof_started = False
+    compact = _FakeApi(0)
+    sys_cycle = _FakeApi(1000)
+    hash_id = _FakeApi(42)
+    prof._prof_api_dll = _FakeDll(
+        {
+            "MsprofReportCompactInfo": compact,
+            "MsprofSysCycleTime": sys_cycle,
+            "MsprofGetHashId": hash_id,
+        }
+    )
+    prof.report_op_dfx(MsProfOpDfx(kernel_name="k", block_dim=1, core_type="AiCore"))
+    assert compact.calls == []
+    assert sys_cycle.calls == []
+    assert hash_id.calls == []
 
 
 def test_get_hash_id_missing_symbol_raises_runtime_error():
@@ -249,6 +276,7 @@ def test_report_op_dfx_calls_compact_info_api():
     prof = _bare_profiler()
     prof._is_model = False
     prof._msprof_dll = object()  # non-None: report path is active
+    prof._prof_started = True
     compact = _CapturingCompactApi()
     prof._prof_api_dll = _FakeDll(
         {

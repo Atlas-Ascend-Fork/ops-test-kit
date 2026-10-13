@@ -35,9 +35,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import DATA, PERF, ExecutionSpec, get_tenant_id
-
-# third_party key aliases — mirrors server executor.py:_TP_ALIASES; keep in sync.
-_TP_ALIASES = {"tensorflow": "tf", "np": "numpy"}
+from .endpoint_view import _TP_ALIASES
 
 
 def extract_spec_providers(tp) -> List[str]:

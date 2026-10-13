@@ -26,6 +26,7 @@ import hashlib
 import logging
 import os
 import shutil
+import tempfile
 import zipfile
 from typing import Union
 
@@ -211,8 +212,11 @@ def extract_zip(zip_file, extract_to, remove_top_level=False):
         with zipfile.ZipFile(zip_file, mode="r") as zf:
             zf.extractall(extract_to)
         return
-    tmp_dir = f"{extract_to}_tmp"
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    # 唯一临时目录（mkdtemp 原子创建）：固定名 "{extract_to}_tmp" 会无条件 rmtree
+    # 相邻同名目录（已有内容丢失/并发解压路径碰撞），改用随机后缀互不干扰
+    parent = os.path.dirname(os.path.abspath(extract_to))
+    os.makedirs(parent, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix=f"{os.path.basename(extract_to) or 'extract'}_tmp_", dir=parent)
     try:
         with zipfile.ZipFile(zip_file, "r") as zf:
             zf.extractall(tmp_dir)

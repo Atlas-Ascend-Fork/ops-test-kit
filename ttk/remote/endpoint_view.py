@@ -26,13 +26,21 @@ from ttk.utilities import Singleton
 log = logging.getLogger(__name__)
 HEALTH_BARRIER_TIMEOUT_S = 15.0
 
+# third_party provider aliases — canonical worker-side copy (spec-layer key
+# normalization in client.py and CLI --provider parsing share it); the server
+# keeps its own in server/executor.py (separate process). Keep in sync.
+_TP_ALIASES = {"tensorflow": "tf", "np": "numpy"}
+
 
 def _parse_provider_filter(raw: Optional[str]) -> Optional[List[str]]:
     """Parse --provider filter from a raw CLI string (comma-separated).
 
     空字符串/None → None（resolve_providers 见 None 跳过 cli 过滤）。
+    别名归一与 spec 层 third_party 键同口径（tensorflow→tf、np→numpy），
+    否则 --provider tensorflow 过滤不到规范名 tf 的 endpoint。
     """
     parsed = [p.strip() for p in (raw or "").split(",") if p.strip()]
+    parsed = [_TP_ALIASES.get(p, p) for p in parsed]
     return parsed or None
 
 

@@ -323,11 +323,15 @@ class KernelExecutor:
                 self._param.kernel_json_info.core_type,
                 self._param.kernel_json_info.task_ration,
             )
+            # 与 aclnn 同口径：run>1 时 start_step=1，首轮（aclprof 异步启动的
+            # 首 launch 计时不准 + kernel 首次装载开销）不进采集窗口，统计取
+            # 全窗口 median；run=1 保持 start_step=0 采那 1 次（冷启动口径）
+            prof_start_at = 1 if self._run_time > 1 else 0
             with MsProfiler(
                 self._device.device_id,
                 result_path=self._prof_result_path,
                 prof_type=self._prof_type,
-                start_step=0,
+                start_step=prof_start_at,
                 is_model=(self._device.is_model()),
             ) as profiler:
                 md5_list = []
@@ -623,17 +627,13 @@ class KernelExecutor:
         return "UNKNOWN"
 
     def _process_msprof_cycles(self):
-        # CSV 读取在 common/profiler/ms_profiler（谁采集谁解析）；
-        # 首轮剔除（aclprof 异步启动的首 launch 计时不准）与 median 聚合
-        # 是通路编排语义，留在通路侧
+        # CSV 读取在 common/profiler/ms_profiler（谁采集谁解析）；首轮隔离在
+        # 采集窗口层（start_step，见 _rts_kernel_sequence_v2），统计取全窗口 median
         total_cycle = "UNKNOWN"
         op_prof = read_task_durations(self._prof_result_path)
         if op_prof:
-            results = op_prof[0:1]
-            if len(op_prof) > 1:
-                results = op_prof[1:]
-            logging.debug(f"MsProf Task Profiling result: {results}")
-            total_cycle = numpy.round(numpy.median(results), 3)
+            logging.debug(f"MsProf Task Profiling result: {op_prof}")
+            total_cycle = numpy.round(numpy.median(op_prof), 3)
 
         return total_cycle
 

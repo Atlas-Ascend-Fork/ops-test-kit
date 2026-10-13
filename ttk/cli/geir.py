@@ -75,6 +75,8 @@ def _handle_geir(args):
         sw.cst_switches.enabled = parse_cli_bool(args.const)
     if args.dynamic is not None:
         sw.dyn_switches.enabled = parse_cli_bool(args.dynamic)
+    if not (sw.cst_switches.enabled or sw.dyn_switches.enabled):
+        raise ValueError("geir: both const (-c) and dynamic (-d) shape tests are disabled; enable at least one")
     if args.binary is not None:
         val = args.binary
         if isinstance(val, str):

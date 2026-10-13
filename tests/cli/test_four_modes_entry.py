@@ -121,6 +121,12 @@ class TestGeirMode:
         sw = _run(["geir", "-i", "x.csv", "-d=true"], captured)
         assert sw.dyn_switches.enabled is True
 
+    def test_both_modes_disabled_rejected(self, captured):
+        """-c=false -d=false 双模式全关：报错退出，不进入执行。"""
+        with pytest.raises(ValueError, match="at least one"):
+            _run(["geir", "-i", "x.csv", "-c=false", "-d=false"], captured)
+        assert "sw" not in captured
+
     def test_binary_release_sets_geir_binary(self, captured):
         """-b=release 将 geir_binary 设为 True。"""
         sw = _run(["geir", "-i", "x.csv", "-b=release"], captured)

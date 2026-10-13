@@ -131,7 +131,7 @@ def _add_run_args(parser):
         "--provider",
         metavar="PROVIDERS",
         default=None,
-        help="Which providers to TEST (e.g. torch,tf). "
+        help="Which providers to TEST (e.g. torch,tf; alias tensorflow->tf). "
         "Test filter — narrows dispatch, does NOT override remote config. "
         "If not set, uses the first available key from spec's third_party.",
     )
@@ -144,7 +144,10 @@ def _add_run_args(parser):
         help="Task-level profiling (msprof) switch (default: true)",
     )
     group.add_argument(
-        "--validate", dest="validate_only", action="store_true", help="Validate CSV cases only, skip device execution"
+        "--validate",
+        dest="validate_only",
+        action="store_true",
+        help="Validate test cases (csv/xlsx) only, skip device execution",
     )
 
 

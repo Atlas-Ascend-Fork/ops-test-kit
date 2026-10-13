@@ -96,7 +96,7 @@ CSV 中多个算子可能配置了不同 provider，可用 `--provider` 缩小�
 python3 -m ttk kernel -i cases.csv --compare cross_check --provider torch --config ttk.conf.yaml
 ```
 
-`--provider` 是测试过滤器，只缩小 dispatch 范围，不覆盖 spec 中的 `third_party` 配置。未设置时使用 spec 的第一个 provider。
+`--provider` 是测试过滤器，只缩小 dispatch 范围，不覆盖 spec 中的 `third_party` 配置。未设置时使用 spec 的第一个 provider。支持别名 `tensorflow`→`tf`。
 
 ### 2.5 complex32 输入输出的传递
 
@@ -143,7 +143,9 @@ manual_input_binaries,manual_golden_binaries,manual_xpu_binaries
 ```
 
 该字段仅在 `cross_check` 比较中生效，并优先于远端 XPU dispatch。配置后必须同时提供
-`manual_input_binaries`（有输入算子）和 `manual_golden_binaries`，文件数量必须与输出数量一致。
+`manual_input_binaries`（有输入算子）和 `manual_golden_binaries`，文件数量与各自对应的
+张量一致：`manual_input_binaries` 对应输入张量（数量与输入数一致），`manual_golden_binaries`
+对应输出张量（数量与输出数一致）。
 固定文件模式不需要 `--config` 或 `--provider`。
 
 ### 2.8 XPU 输出落盘

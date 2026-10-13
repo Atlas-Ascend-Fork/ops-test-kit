@@ -21,7 +21,7 @@ import numpy
 import pytest
 
 from ttk.core_modules.common.dump.formatter import get_formatter
-from ttk.utilities import load_array
+from ttk.utilities import extract_zip, load_array
 from ttk.utilities.dtypes import resolve_numpy_dtype
 
 
@@ -84,3 +84,48 @@ def test_load_array_reshape_fallback_on_wrong_shape(tmp_path):
     numpy.arange(4, dtype=numpy.int32).tofile(tmp_path / "x.bin")
     back = load_array(str(tmp_path / "x.bin"), "int32", [3])
     assert back.shape == (4,)
+
+
+# -- extract_zip -------------------------------------------------------------
+
+
+def _make_zip(path, entries):
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries:
+            zf.writestr(name, data)
+
+
+def test_extract_zip_strips_single_top_level(tmp_path):
+    zip_path = tmp_path / "z.zip"
+    _make_zip(zip_path, [("top/a.txt", b"aaa"), ("top/b.txt", b"bbb")])
+    out = tmp_path / "out"
+    out.mkdir()
+    extract_zip(str(zip_path), str(out), remove_top_level=True)
+    assert sorted(p.name for p in out.iterdir()) == ["a.txt", "b.txt"]
+    assert (out / "a.txt").read_bytes() == b"aaa"
+
+
+def test_extract_zip_multiple_top_levels_keeps_structure(tmp_path):
+    zip_path = tmp_path / "z.zip"
+    _make_zip(zip_path, [("a.txt", b"1"), ("b/c.txt", b"2")])
+    out = tmp_path / "out"
+    out.mkdir()
+    extract_zip(str(zip_path), str(out), remove_top_level=True)
+    assert (out / "a.txt").read_bytes() == b"1"
+    assert (out / "b" / "c.txt").read_bytes() == b"2"
+
+
+def test_extract_zip_keeps_adjacent_fixed_name_tmp_dir(tmp_path):
+    """相邻 <目标>_tmp 目录不被清理（原实现固定名 + 无条件 rmtree 会丢已有内容）。"""
+    zip_path = tmp_path / "z.zip"
+    _make_zip(zip_path, [("top/a.txt", b"aaa")])
+    out = tmp_path / "out"
+    out.mkdir()
+    neighbor = tmp_path / "out_tmp"
+    neighbor.mkdir()
+    (neighbor / "precious.txt").write_bytes(b"keep")
+    extract_zip(str(zip_path), str(out), remove_top_level=True)
+    assert (neighbor / "precious.txt").read_bytes() == b"keep"
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith("out_tmp_")]

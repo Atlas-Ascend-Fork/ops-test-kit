@@ -146,7 +146,8 @@ def load_config(config_path: str = None) -> dict:
     """加载配置：default.yaml → 用户文件 → CLI 覆盖。
 
     Args:
-        config_path: 可选 CLI 指定的配置文件路径
+        config_path: 可选 CLI 指定的配置文件路径（不存在时报错——显式路径
+            拼写错误不应静默回退默认配置；标准搜索路径缺失仍视为正常）
 
     Returns:
         合并后的配置 dict
@@ -164,6 +165,8 @@ def load_config(config_path: str = None) -> dict:
 
     # 3. 覆盖：CLI 指定的配置文件
     if config_path:
+        if not Path(config_path).exists():
+            raise ValueError(f"config file not found: {config_path}")
         cfg = deep_merge(cfg, _load_yaml(config_path))
 
     _config = cfg

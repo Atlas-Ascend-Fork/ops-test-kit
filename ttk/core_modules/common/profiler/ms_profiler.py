@@ -249,6 +249,10 @@ class MsProfiler(Profiler):
             return
         if self._msprof_dll is None:
             return
+        if not self._prof_started:
+            # start_step 隔离（run>1 首轮不进采集窗口）时，首轮 launch 时尚无
+            # aclprof 会话可标注——no-op（该轮本就不在采集窗口内）
+            return
         if self._prof_api_dll is None:
             self._prof_api_dll = ctypes.CDLL("libprofapi.so")
         api = getattr(self._prof_api_dll, "MsprofReportCompactInfo", None)
@@ -386,7 +390,7 @@ class MsProfiler(Profiler):
 
         视图按 prof_type：
         - OP：read_task_durations 每 launch 时长，elapsed = median
-          （warmup 处理归通路——kernel 的 start_step / 首轮剔除是编排，
+          （warmup 处理归通路——kernel 的 start_step 首轮隔离是编排，
           不在采集器职责内）
         - API：op_statistic 聚合，elapsed = Σ Avg（单轮口径——Avg 已被
           msprof 按实际采集次数平均），total_device = Σ Avg × repeat

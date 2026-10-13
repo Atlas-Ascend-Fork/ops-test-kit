@@ -67,7 +67,7 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2
 | `--operator` | `--op` | 无 | 按算子名筛选 | `--op add,mat_mul_v3` |
 | `--exclude-operator` | `--no-op` | 无 | 排除算子名 | `--no-op concat_d` |
 | `--priority` | | 无 | 按优先级筛选 | `--priority=1-3` |
-| `--provider` | | 无 | 三方provider过滤（如torch/tf），缩小dispatch范围 | `--provider torch` |
+| `--provider` | | 无 | 三方provider过滤（如torch/tf，别名 tensorflow→tf），缩小dispatch范围 | `--provider torch` |
 | `--rerun` | | 无 | 重跑失败项（仅 Kernel/GEIR 通路支持；Kernel 可用列：`dyn_perf_us`/`cst_perf_us`/`bin_perf_us`/`perf_status`/`precision_status`，GEIR 可用列：`dyn_perf_us`/`cst_perf_us`/`precision_status`（`bin_perf_us`/`perf_status` 为 Kernel 专属结果列），ACLNN/E2E 传入会报 `Unsupported rerun targets`） | `--rerun=precision_status` |
 
 ## 设备与并行

@@ -73,6 +73,7 @@ build_py = "ttk._version.BuildPyWithBuild"
     "user_defined_modules/**/*.yaml",
     "user_defined_modules/**/*.cce",
     "core_modules/**/*.json",
+    "core_modules/geir/templates/*.j2",
 ]
 
 [tool.ruff]

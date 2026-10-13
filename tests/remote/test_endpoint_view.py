@@ -12,9 +12,10 @@
 import json
 import os
 
+import pytest
 import yaml
 
-from ttk.remote.endpoint_view import EndpointView
+from ttk.remote.endpoint_view import EndpointView, _parse_provider_filter
 
 
 def _write_health(path, endpoints_data):
@@ -60,6 +61,33 @@ def test_resolve_intersects_and_preserves_priority(monkeypatch, tmp_path):
     assert ev.resolve_providers(spec_providers=["torch", "tf"]) == ["torch", "tf"]
     # cli 交集
     assert ev.resolve_providers(cli_providers=["tf"]) == ["tf"]
+
+
+# -- _parse_provider_filter -------------------------------------------------
+
+
+def test_parse_provider_filter_aliases_and_empty():
+    """--provider 解析：别名归一（tensorflow→tf、np→numpy）；空/None→None。"""
+    assert _parse_provider_filter("tensorflow") == ["tf"]
+    assert _parse_provider_filter("np") == ["numpy"]
+    assert _parse_provider_filter(" tensorflow , np ") == ["tf", "numpy"]
+    assert _parse_provider_filter("torch,tf") == ["torch", "tf"]
+    assert _parse_provider_filter("") is None
+    assert _parse_provider_filter(None) is None
+    assert _parse_provider_filter(" , ") is None
+
+
+def test_cli_alias_filter_resolves_canonical_provider(monkeypatch, tmp_path):
+    """--provider tensorflow（别名）经解析后能命中 detect 的规范名 tf。"""
+    ev = _make_ev(
+        monkeypatch,
+        tmp_path,
+        {"10.0.0.1:9090": {"alive": True, "providers": ["torch", "tf"]}},
+        [{"host": "10.0.0.1", "port": 9090}],
+    )
+    assert ev.resolve_providers(cli_providers=_parse_provider_filter("tensorflow")) == ["tf"]
+    with pytest.raises(RuntimeError):
+        ev.resolve_providers(cli_providers=_parse_provider_filter("np"))
 
 
 # -- pick_endpoint ----------------------------------------------------------

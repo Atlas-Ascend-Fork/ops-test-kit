@@ -28,6 +28,7 @@ TTK（ops Test Tool Kit）是[CANN](https://hiascend.com/software/cann)算子库
 
 - 按照昇腾社区安装CANN环境：[官方链接](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850alpha001/softwareinst/instg/instg_quick.html)
 - Python版本建议选择3.8及以上
+- E2E 通路额外依赖 `torch`/`torch_npu`（不在 `requirements.txt` 中，需按本地 CANN 版本配套安装，参见 [torch_npu 安装指引](https://gitee.com/ascend/pytorch)）
 
 ```shell
 git clone https://gitcode.com/cann/ops-test-kit.git

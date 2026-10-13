@@ -14,7 +14,7 @@ TTK 支持采集算子在 NPU 上的执行性能。通过 `--warmup`、`--run`�
 
 | 模式 | 参数 | 语义 |
 |------|------|------|
-| 稳态性能（默认） | `--warmup true --run 3` | 预热后采集 3 次（统计口径随通路：剔除首轮取中位数/均值等，见下文），反映算子稳态开销 |
+| 稳态性能（默认） | `--warmup true --run 3` | 预热后跑 3 次（首轮是否计入随通路：kernel/aclnn 首轮不进统计、e2e 全部计入，见下文），反映算子稳态开销 |
 | 冷启动性能 | `--warmup false --run 1` | 不预热，只跑 1 次，反映首次执行的全部开销 |
 
 ```shell
@@ -40,8 +40,9 @@ python3 -m ttk e2e -i cases.csv --warmup false --run 1 -o cold.csv
 ### kernel（AscendC 算子内核）
 
 - **warmup**：launch 空 helper kernel `warmup.o` 1 次（每个 core 仅 `tik_return`，无实际计算），预热 SMMU/BIU/TLB/cores
-- **采集**：`start_step=0`，`--run` 次迭代全部进入采集窗口，统计时剔除首轮（aclprof 异步启动的首 launch 计时不准），对剩余迭代取 median；`--run=1` 时取该 1 次
+- **采集**：`--run > 1` 时 `start_step=1` 首轮不进采集窗口（aclprof 异步启动的首 launch 计时不准 + kernel 首次装载开销，与 aclnn 同口径），对窗口内迭代取 median；`--run = 1` 时 `start_step=0` 采那 1 次
 - **冷启动**：`--warmup false` 跳过 helper kernel，首次迭代含硬件冷启动开销
+- **注意**：`--warmup false --run 3` 仍会跳首次（`start_step=1`），因为 `run_time > 1`；若要采首次需用 `--run 1`
 
 ### aclnn（aclnn C API）
 
@@ -60,7 +61,7 @@ python3 -m ttk e2e -i cases.csv --warmup false --run 1 -o cold.csv
 
 | 通路 | 采集工具 | 读取文件 | 读取列 | 统计方式 | 实际采集次数 |
 |------|---------|---------|--------|---------|-------------|
-| kernel | CANN msprof | `op_summary_*.csv` / `task_time_*.csv` | `Task Duration(us)` / `task_time(us)` | `median`（中位数，剔除首轮） | `--run` 次 |
+| kernel | CANN msprof | `op_summary_*.csv` / `task_time_*.csv` | `Task Duration(us)` / `task_time(us)` | `median`（中位数） | `--run - 1` 次（`--run > 1`，首轮不进窗）；`1` 次（`--run = 1`） |
 | geir | CANN msprof（子进程） | `op_summary_*.csv` / `task_time_*.csv` | `Task Duration(us)` / `task_time(us)` | `median`（中位数） | `1` 次（默认）；`--run` 次（`--dl 1`） |
 | aclnn | CANN msprof | `api_statistic_*.csv` / `op_statistic_*.csv` | `Avg(us)` / `Avg Time(us)` | msprof 内部按采集次数取平均 | `--run - 1` 次（`--run > 1`）；`1` 次（`--run = 1`） |
 | e2e（torch） | torch_npu.profiler | `kernel_details.csv` | `Duration(us)` | 累加后 `/ run_count`（平均值） | `--run` 次 |
