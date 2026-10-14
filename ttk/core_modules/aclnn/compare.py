@@ -144,7 +144,8 @@ class Comparator:
             )
             logging_data += _logging_data
             logging.debugc(logging_data)
-            passed = "PASS" if passed else "FAIL"
+            # None=SKIP：golden Disable，未比对
+            passed = "SKIP" if passed is None else "PASS" if passed else "FAIL"
         except Exception:
             logging.exception("Comparison failed")
             return ApiComparisonResult("COMPARE_FAILURE")

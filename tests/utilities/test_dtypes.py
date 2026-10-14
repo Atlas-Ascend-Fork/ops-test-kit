@@ -294,6 +294,26 @@ def test_torch_numpy_roundtrip_float4():
     assert np.array_equal(back.view(np.uint8), src.view(np.uint8))
 
 
+@pytest.mark.skipif(_missing_ml_dtypes(), reason="ml_dtypes is not installed")
+def test_int4_converts_to_packed_uint8():
+    """int4 走 fp4 同款 packed uint8 降级分支（不 raise）：末维减半、按 pack_4bits 打包。"""
+    src = np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=resolve_numpy_dtype("int4"))
+    t = numpy_to_torch_tensor(src)
+    assert t.dtype == torch.uint8
+    assert tuple(t.shape) == (4,)
+    assert t.tolist() == pack_4bits(src).tolist()
+
+
+@pytest.mark.skipif(_missing_ml_dtypes(), reason="ml_dtypes is not installed")
+def test_int4_2d_shape_and_odd_last_dim():
+    src = np.arange(12, dtype=resolve_numpy_dtype("int4")).reshape(2, 6)
+    t = numpy_to_torch_tensor(src)
+    assert tuple(t.shape) == (2, 3)
+    odd = np.array([0, 1, 2], dtype=resolve_numpy_dtype("int4"))
+    with pytest.raises(RuntimeError, match="even last dimension"):
+        numpy_to_torch_tensor(odd)
+
+
 def test_torch_numpy_complex32_roundtrip():
     src = np.zeros(8, dtype=np.float16)
     src[::2] = 1.0
@@ -305,10 +325,11 @@ def test_torch_numpy_complex32_roundtrip():
 
 
 @pytest.mark.skipif(_missing_ml_dtypes(), reason="ml_dtypes is not installed")
-def test_numpy_to_torch_tensor_rejects_int4():
-    """int4 无可用 torch.dtype——错误信息语义修复锚点。"""
-    with pytest.raises(RuntimeError, match="int4"):
-        numpy_to_torch_tensor(np.zeros(4, dtype=resolve_numpy_dtype("int4")))
+def test_int4_packs_to_uint8_like_other_4bit():
+    """int4 与 HIF4 同路：无可用 view 目标时保持 packed uint8（不 raise）。"""
+    t = numpy_to_torch_tensor(np.zeros(4, dtype=resolve_numpy_dtype("int4")))
+    assert t.dtype == torch.uint8
+    assert tuple(t.shape) == (2,)
 
 
 @pytest.mark.skipif(_missing_en_dtypes(), reason="en_dtypes is not installed")

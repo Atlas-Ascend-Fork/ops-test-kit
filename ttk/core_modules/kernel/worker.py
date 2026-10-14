@@ -35,6 +35,7 @@ from ..common.logging import build_single_log_dir, default_logging_config, relea
 from ..common.plugin import SpecResolver
 from ..common.process import DeviceLock, gate_host_memory, process_context
 from ..common.testcase.batch import resolve_deterministic_level
+from ..common.testcase.input_data import reseed_per_testcase
 from .compare import comparing, handle_profiling_result
 from .compile.dynamic import dynamic_compilation
 from .compile.static import static_compilation
@@ -614,6 +615,8 @@ def _run_profile(
     context: TestcaseKernel, device_grant_events: dict, device_granted_indices: dict, dev_id: int
 ) -> KernelReturnStructure:
     switches, process_ctx = _setup_profiling_env(context)
+    # --seed 用例级播种先于一切数据生成（输入/golden/workspace），与派发解耦
+    reseed_per_testcase(context, switches)
 
     # dump 方向：--no-prof 落盘（bridge 仅在写方向激活时设置 manual_data_dirs）
     dump_store, early_result = _open_dump_only_store(context, switches)

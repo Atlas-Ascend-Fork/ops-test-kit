@@ -18,7 +18,7 @@ from ttk.core_modules.common.comparison.batch_consistency import (
     assemble_batch_summary,
     slice_batch_hashes,
 )
-from ttk.core_modules.common.comparison.comparison import PLACEHOLDER_PASS, validate_outputs
+from ttk.core_modules.common.comparison.comparison import PLACEHOLDER_PASS, _fold_pass, compare, validate_outputs
 
 
 class TestValidateOutputs:
@@ -34,11 +34,27 @@ class TestValidateOutputs:
         assert verdict.status is None
 
     def test_golden_placeholder_fake_pass(self):
-        # 模式开关/显式豁免 → fake-pass
-        for token in ("SUPPRESSED", "DYN_OFF"):
+        # 模式开关占位（golden 侧）→ fake-pass
+        for token in ("DYN_OFF",):
             verdict = validate_outputs([np.ones(2)], [token])
             assert verdict.needs_compare is False
             assert verdict.per_output == [(token, True)], token
+
+    def test_golden_disabled_suppressed_skips(self):
+        # golden 侧 "SUPPRESSED"（--golden-mode Disable）→ SKIP；
+        # output 为模式占位哨兵时仍 SKIP（Disable 优先）
+        verdict = validate_outputs([np.ones(2)], ["SUPPRESSED"])
+        assert verdict.needs_compare is False
+        assert verdict.per_output == [("SUPPRESSED", None)]
+        verdict = validate_outputs(["DYN_OFF"], ["SUPPRESSED"])
+        assert verdict.per_output == [("SUPPRESSED", None)]
+
+    def test_operator_not_found_fails(self):
+        # 算子未找到是确定失败，不属"主动不比对"
+        for token in ("DYN_OPERATOR_NOT_FOUND", "CST_OPERATOR_NOT_FOUND", "BIN_OPERATOR_NOT_FOUND"):
+            verdict = validate_outputs([token], [np.ones(2)])
+            assert verdict.per_output == [(token, False)], token
+            assert token not in PLACEHOLDER_PASS, token
 
     def test_golden_failure_placeholder_fails(self):
         # golden 生成失败类 → FAIL（真值缺失必须暴露）
@@ -80,15 +96,54 @@ class TestPlaceholderPassTable:
             "CST_OFF",
             "BIN_OFF",
             "DYN_UNSUPPORTED",
-            "BIN_OPERATOR_NOT_FOUND",
-            "DYN_INPUT_MISSING",
+            "SUPPRESSED",
         ):
             assert token in PLACEHOLDER_PASS, token
 
     def test_fail_tokens_excluded(self):
-        # golden 生成失败类不进 fake-pass 表（判 FAIL）
-        for token in ("NO_OUTPUT", "COMPARE_FAILURE", "SOMETHING", "UNSUPPORTED", "GOLDEN_TIMEOUT", "GOLDEN_FAILURE"):
+        # golden 生成失败类 + 算子未找到/输入缺失类不进 fake-pass 表（判 FAIL）
+        for token in (
+            "NO_OUTPUT",
+            "COMPARE_FAILURE",
+            "SOMETHING",
+            "UNSUPPORTED",
+            "GOLDEN_TIMEOUT",
+            "GOLDEN_FAILURE",
+            "DYN_OPERATOR_NOT_FOUND",
+            "CST_OPERATOR_NOT_FOUND",
+            "BIN_OPERATOR_NOT_FOUND",
+            "STC_OPERATOR_NOT_FOUND",
+            "DYN_INPUT_MISSING",
+        ):
             assert token not in PLACEHOLDER_PASS, token
+
+
+class TestTriStateVerdict:
+    """compare() 三态返回：True=PASS / False=FAIL / None=SKIP。"""
+
+    def test_golden_disabled_returns_skip(self):
+        precision, _, passed, metrics = compare([np.ones(2)], ["SUPPRESSED"], ("float32",), standards=[None])
+        assert precision == "SUPPRESSED"
+        assert passed is None
+        assert metrics == {}
+
+    def test_per_output_exemption_still_passes(self):
+        # golden=None（shape 0 输出等单输出豁免）保持 PASS
+        precision, _, passed, _ = compare([np.ones(2)], [None], ("float32",), standards=[None])
+        assert precision == "SUPPRESSED"
+        assert passed is True
+
+    def test_fold_pass_precedence(self):
+        assert _fold_pass([True, True]) is True
+        assert _fold_pass([False, None]) is False  # FAIL 压过 SKIP
+        assert _fold_pass([True, None]) is None  # 有未比对位且无失败 → SKIP
+        assert _fold_pass([None]) is None
+        assert _fold_pass([]) is True
+
+    def test_output_sentinel_not_found_fails(self):
+        precision, _, passed, _ = compare(["DYN_OPERATOR_NOT_FOUND"], [np.ones(2)], ("float32",), standards=[None])
+        assert passed is False
+        assert precision == "DYN_OPERATOR_NOT_FOUND"
 
 
 class TestLazyRegistry:

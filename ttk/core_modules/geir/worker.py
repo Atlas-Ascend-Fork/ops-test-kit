@@ -36,6 +36,7 @@ from ..common.plugin import SpecResolver
 from ..common.process import DeviceLock, gate_host_memory, process_context
 from ..common.result import format_xpu_metrics
 from ..common.testcase.batch import resolve_deterministic_level
+from ..common.testcase.input_data import reseed_per_testcase
 from ..common.testcase.tensor import values_match_slots
 from ..common.xpu import collect_third_party, xpu_mode_of
 from .compare import CompareInputs, compare_case
@@ -74,6 +75,9 @@ def run(
         result.precision = testcase.fail_reason or "INVALID"
         result.passed = False
         return result
+
+    # --seed 用例级播种先于一切数据生成（逐模式输入/golden），与派发解耦
+    reseed_per_testcase(testcase, switches)
 
     # host 内存闸门：入口位（校验早退之后的首个重负载前）——manual 落盘加载、
     # 输入生成、golden、图执行全在闸门之后
@@ -178,11 +182,16 @@ def _geir_profiling_end_print(result):
     """结果后屏显：kernel 同款 render_table（MODE × Performance/Comparison）。"""
     switches = get_global_storage()
     mode_suffix = "_BIN" if getattr(switches, "geir_binary", False) else ""
+    status = (
+        result.precision_status
+        if result.precision_status in ("PASS", "FAIL", "SKIP")
+        else ("PASS" if result.passed else "FAIL")
+    )
     lines = [
         ("MODE", "Performance", "Comparison"),
         (f"CST{mode_suffix}", str(result.cst_perf_us), str(result.cst_precision)),
         (f"DYN{mode_suffix}", str(result.dyn_perf_us), str(result.dyn_precision)),
-        ("STATUS", "PASS" if result.passed else "FAIL", str(result.precision_status)),
+        ("STATUS", status, str(result.precision_status)),
     ]
     logging.info("\n" + render_table(lines))
 
@@ -592,13 +601,16 @@ def _prof_path(switches, testcase, mode) -> str:
 
 
 def _pack_result(mode, exec_result, compared, xpu_results, testcase):
-    """打包：mode → cst_/dyn_ 槽位 + det_status + xpu_metrics + bcid。"""
+    """打包：mode → cst_/dyn_ 槽位 + det_status + xpu_metrics + bcid（passed 三态透传）。"""
     precision, log_str, passed, metrics = compared
     xpu_metrics = format_xpu_metrics(xpu_results) if xpu_results else {}
     result = GeirReturnStructure()
     result.precision = precision
     result.passed = passed
-    result.precision_status = "PASS" if passed else "FAIL"
+    if passed is None:
+        result.precision_status = "SKIP"
+    else:
+        result.precision_status = "PASS" if passed else "FAIL"
     result.log = log_str
     result.xpu_metrics = xpu_metrics
     result.deterministic_status = exec_result.det_status

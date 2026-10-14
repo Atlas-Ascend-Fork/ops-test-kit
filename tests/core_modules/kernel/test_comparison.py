@@ -14,13 +14,17 @@ Tests for ttk.core_modules.kernel.compare:
 - ComparisonResult output
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
+import ttk.core_modules.kernel.compare as compare_mod
 from ttk.core_modules.kernel.compare import __outputs_to_numpy_arrays as _decode_outputs
 from ttk.core_modules.kernel.compare import comparing
+from ttk.core_modules.kernel.result import KernelExecuteResult
+from ttk.switches import MODE, SWITCHES
 
 
 @pytest.fixture(autouse=True)
@@ -132,6 +136,69 @@ class TestComparingPass:
                 standards=[MagicMock()],
             )
         assert result.passed == "COMPARE_FAILURE"
+
+
+class TestComparingTriState:
+    """golden Disable → SKIP；确定失败 → FAIL。"""
+
+    def test_all_skip_when_golden_disabled(self):
+        result, _ = _call_comparing(
+            [
+                ("SUPPRESSED", "", None, {}),
+                ("SUPPRESSED", "", None, {}),
+                ("SUPPRESSED", "", None, {}),
+            ]
+        )
+        assert result.passed == "SKIP"
+        assert result.dyn_precision == "SUPPRESSED"
+
+    def test_skip_plus_fail_is_fail(self):
+        result, _ = _call_comparing(
+            [
+                ("SUPPRESSED", "", None, {}),
+                ("0.5", "", False, {}),
+                ("SUPPRESSED", "", None, {}),
+            ]
+        )
+        assert result.passed == "FAIL"
+
+    def test_skip_plus_pass_is_skip(self):
+        # 模式关闭占位（True）与未比对（None）混合：本轮没有可比对的真值 → SKIP
+        result, _ = _call_comparing(
+            [
+                ("SUPPRESSED", "", None, {}),
+                ("1.0", "", True, {}),
+                ("SUPPRESSED", "", None, {}),
+            ]
+        )
+        assert result.passed == "SKIP"
+
+
+class TestPerfFakePass:
+    """perf 侧共用 PLACEHOLDER_PASS：模式占位放行，算子未找到判 FAIL。"""
+
+    @staticmethod
+    def _ctx(monkeypatch, dyn_cycle, cst_cycle, bin_cycle):
+        sw = SWITCHES()
+        sw.mode = MODE.ASCEND_ONBOARD
+        monkeypatch.setattr(compare_mod, "get_global_storage", lambda: sw)
+        return SimpleNamespace(
+            dyn_prof_result=KernelExecuteResult(dyn_cycle),
+            cst_prof_result=KernelExecuteResult(cst_cycle),
+            bin_prof_result=KernelExecuteResult(bin_cycle),
+        )
+
+    def test_operator_not_found_fails_perf(self, monkeypatch):
+        from ttk.core_modules.kernel.compare import handle_profiling_result
+
+        ctx = self._ctx(monkeypatch, "DYN_OPERATOR_NOT_FOUND", "DYN_OPERATOR_NOT_FOUND", "DYN_OPERATOR_NOT_FOUND")
+        assert handle_profiling_result(ctx) == "FAIL"
+
+    def test_mode_off_and_suppressed_still_pass_perf(self, monkeypatch):
+        from ttk.core_modules.kernel.compare import handle_profiling_result
+
+        ctx = self._ctx(monkeypatch, 100.5, "SUPPRESSED", "CST_OFF")
+        assert handle_profiling_result(ctx) == "PASS"
 
 
 class TestRestoreOutputShape:

@@ -36,6 +36,7 @@ from ttk.core_modules.common.dump import (
     snapshot_manual_values,
 )
 from ttk.core_modules.common.testcase.batch import resolve_deterministic_level
+from ttk.core_modules.common.testcase.input_data import reseed_per_testcase
 from ttk.switches import get_global_storage
 from ttk.utilities import render_table
 from ttk.utilities.dtypes import resolve_numpy_dtypes
@@ -277,6 +278,10 @@ def run(testcase, device_grant_events, device_granted_indices, dev_id, is_multi_
         return_struct.precision_status = "FAIL"
         _profiling_end_print(testcase, return_struct)
         return return_struct
+
+    # --seed 用例级播种先于一切数据生成（输入/golden），与派发解耦；多卡路径
+    # 的 per-rank 重播种在其后生效，不受影响
+    reseed_per_testcase(testcase, switches)
 
     gate_host_memory(switches.no_memory_check, process_ctx)
     try:

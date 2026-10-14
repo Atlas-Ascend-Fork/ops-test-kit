@@ -49,11 +49,12 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # 输出校验（占位分类）
 # ---------------------------------------------------------------------------
-# fake-pass 集合：Kernel 三模式开关/算子缺失占位 + DYN_INPUT_MISSING +
-# SUPPRESSED（golden 显式豁免，golden_mode=Disable）。出现在精度列时不判
-# FAIL（行结论由通路判定——Kernel perf 判定共用本表）。
-# golden 生成失败类（UNSUPPORTED/GOLDEN_TIMEOUT/GOLDEN_FAILURE）**不在此表**
-# ——判 FAIL：真值缺失必须暴露，静默通过会掩盖 golden 生成回归。
+# fake-pass 集合：模式开关/能力不适用占位 + SUPPRESSED（golden 显式豁免、
+# 执行侧模式未跑）。出现在精度列时不判 FAIL（行结论由通路判定——Kernel perf
+# 判定共用本表）。golden 生成失败类与算子未找到/输入缺失类不在此表——判
+# FAIL：真值缺失与环境错误必须暴露，静默通过会掩盖回归。
+# golden 侧 "SUPPRESSED"（golden_mode=Disable）不查本表，_classify_one 单独
+# 判 SKIP。
 PLACEHOLDER_PASS = frozenset(
     {
         "SUPPRESSED",
@@ -65,11 +66,6 @@ PLACEHOLDER_PASS = frozenset(
         "CST_UNSUPPORTED",
         "BIN_UNSUPPORTED",
         "STC_UNSUPPORTED",
-        "DYN_OPERATOR_NOT_FOUND",
-        "CST_OPERATOR_NOT_FOUND",
-        "BIN_OPERATOR_NOT_FOUND",
-        "STC_OPERATOR_NOT_FOUND",
-        "DYN_INPUT_MISSING",
     }
 )
 
@@ -97,7 +93,15 @@ class OutputVerdict:
 
 
 def _classify_one(output, golden) -> tuple:
-    """单输出分类：(is_valid, entry, log_suffix)——entry 为 VALID 哨兵或 (precision, pass_)。"""
+    """单输出分类：(is_valid, entry, log_suffix)——entry 为 VALID 哨兵或 (precision, pass_)。
+
+    pass_ 三态：True=放行（模式开关/显式豁免）、False=FAIL、None=SKIP。
+    """
+    if isinstance(golden, str) and golden == "SUPPRESSED":
+        # golden 侧 SUPPRESSED 只由 golden_mode=Disable 产出，与 golden=None
+        # 的单输出豁免语义相反（PASS），须区分；先于 output 哨兵判定——Disable
+        # 下即使该模式未跑（output 为 *_OFF），整轮也没做过比对，仍判 SKIP
+        return False, (golden, None), " (golden disabled)"
     if isinstance(output, str):
         return False, (output, output in PLACEHOLDER_PASS), " (kernel output sentinel)"
     if isinstance(golden, str):
@@ -112,11 +116,12 @@ def _classify_one(output, golden) -> tuple:
 def validate_outputs(outputs, goldens, third_parties=None) -> "OutputVerdict":
     """输出校验：逐输出分类 + 聚合。
 
-    分类：VALID（双 ndarray）/ golden 占位（str ∈ PLACEHOLDER_PASS → 透传+PASS；
-    str ∉ 表 → 透传+FAIL——golden 生成失败类 UNSUPPORTED/GOLDEN_TIMEOUT/
-    GOLDEN_FAILURE 即此路）/ golden None → SUPPRESSED+PASS / output None →
-    NO_OUTPUT+FAIL；整体：空 outputs → EMPTY；third_parties 数 < outputs →
-    THIRD_PARTY_COUNT_MISMATCH（cross_check 前置数据不足）。
+    分类：VALID（双 ndarray）/ golden 占位（"SUPPRESSED" → 透传+SKIP，golden
+    Disable；str ∈ PLACEHOLDER_PASS → 透传+PASS；str ∉ 表 → 透传+FAIL——
+    UNSUPPORTED/GOLDEN_TIMEOUT/GOLDEN_FAILURE 即此路）/ golden None →
+    SUPPRESSED+PASS / output None → NO_OUTPUT+FAIL；整体：空 outputs →
+    EMPTY；third_parties 数 < outputs → THIRD_PARTY_COUNT_MISMATCH（cross_check
+    前置数据不足）。
     """
     verdict = OutputVerdict()
     if not outputs:
@@ -141,6 +146,15 @@ def validate_outputs(outputs, goldens, third_parties=None) -> "OutputVerdict":
 # ---------------------------------------------------------------------------
 # 数值比对（compare_with_hooks 的回落层；自身占位安全——占位透传 + VALID 子集分发）
 # ---------------------------------------------------------------------------
+def _fold_pass(passes: list) -> Optional[bool]:
+    """三态聚合：任一 False → FAIL；有 None（未比对位）→ SKIP；全 True → PASS。"""
+    if any(p is False for p in passes):
+        return False
+    if any(p is None for p in passes):
+        return None
+    return True
+
+
 def compare(
     outputs: Union[Tuple[np.ndarray], List[np.ndarray]],
     goldens: Union[Tuple[np.ndarray], List[np.ndarray]],
@@ -149,11 +163,12 @@ def compare(
     standards,
     third_parties=None,
     _verdict=None,
-) -> Tuple[str, str, bool, dict]:
+) -> Tuple[str, str, Optional[bool], dict]:
     """逐输出比对（占位安全：str/None 占位透传，仅 VALID 走数值判据）。
 
     standards: resolve_tolerance 产出（与 outputs 同长）。
-    返回 (precision_str, log, is_pass, metrics_dict)——metrics 键为原始输出序号。
+    返回 (precision_str, log, is_pass, metrics_dict)——metrics 键为原始输出序号；
+    is_pass 三态：True=PASS / False=FAIL / None=SKIP（golden Disable，未比对）。
     _verdict: 内部参数——compare_with_hooks 已算过的分类结论，免二次扫描；
     钩子路径传入的是变换后数据，必须留空重算。
     """
@@ -171,7 +186,7 @@ def compare(
         precisions = [entry[0] for entry in verdict.per_output]
         passes = [entry[1] for entry in verdict.per_output]
         log = "".join(line for line in verdict.log_lines if line)
-        return ",".join(precisions), log, all(passes), {}
+        return ",".join(precisions), log, _fold_pass(passes), {}
 
     total_precision, total_pass, total_log, total_metrics = [], [], "", {}
     for idx, (output, golden) in enumerate(zip(outputs, goldens)):
@@ -206,7 +221,7 @@ def compare(
         else:
             precisions.append(entry[0])
             passes.append(entry[1])
-    return ",".join(precisions), total_log, all(passes), total_metrics
+    return ",".join(precisions), total_log, _fold_pass(passes), total_metrics
 
 
 # ---------------------------------------------------------------------------

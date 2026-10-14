@@ -79,13 +79,21 @@ def test_golden_placeholder_fails_at_entry(ph):
     assert is_pass is False
 
 
-@pytest.mark.parametrize("ph", ["SUPPRESSED", "DYN_OFF"])
+@pytest.mark.parametrize("ph", ["DYN_OFF", "DYN_UNSUPPORTED"])
 def test_fake_pass_placeholder_passes_at_entry(ph):
-    """豁免/模式开关占位：入口透传 + PASS。"""
+    """模式开关/能力占位（golden 侧）：入口透传 + PASS。"""
     standards = resolve_tolerance(None, None, None, ["float32"], None)
     precision, _log, is_pass, _m = _entry([np.ones(2)], [ph], ("float32",), standards)
     assert precision == ph
     assert is_pass is True
+
+
+def test_golden_disabled_suppressed_skips_at_entry():
+    """golden 侧 SUPPRESSED（--golden-mode Disable）：透传 + SKIP（未比对）。"""
+    standards = resolve_tolerance(None, None, None, ["float32"], None)
+    precision, _log, is_pass, _m = _entry([np.ones(2)], ["SUPPRESSED"], ("float32",), standards)
+    assert precision == "SUPPRESSED"
+    assert is_pass is None
 
 
 def test_compare_returns_4tuple_with_metrics():

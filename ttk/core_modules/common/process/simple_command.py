@@ -42,6 +42,7 @@ __all__ = [
 
 # Standard Packages
 import atexit
+import contextlib
 import faulthandler
 import gc
 import importlib
@@ -503,7 +504,6 @@ class SimpleCommandProcess:
         self.status: PROCESS_STATUS_CODE = PROCESS_STATUS_CODE.CREATED
         self.rpc_queue: SimpleQueue = SimpleQueue()
         self.rpc_results: SimpleQueue = SimpleQueue()
-        self.locks: list = []
         self.process_status_timestamp = time.time()
         self.data: Dict[str, Any] = {}
         self.parent_pipe, self.child_pipe = context.Pipe()
@@ -517,6 +517,7 @@ class SimpleCommandProcess:
         )
         self.all_processes.append(self)
         self.parent.start()
+        self.child_pipe.close()  # child 端已随 start 移交子进程；父端持有会挡住子进程退出时的 EOF
         logging.debug(f"Process created with name {self.parent.name}")
 
     @classmethod
@@ -571,10 +572,9 @@ class SimpleCommandProcess:
                 self._update_timestamp()
         elif rpc_command == PROCESS_RPC.GET_DATA:
             name: str = rpc_args[0]
-            if name in self.data:
-                self.parent_pipe.send(self.data[name])
-            else:
-                self.parent_pipe.send(None)
+            # 子进程恰在回读窗口死亡时回复无意义；死亡由下一轮 update() 兜底
+            with contextlib.suppress(OSError):
+                self.parent_pipe.send(self.data.get(name))
         elif rpc_command == PROCESS_RPC.CHANGE_NAME:
             name: str = rpc_args[0]
             self.name = name
@@ -687,9 +687,10 @@ class SimpleCommandProcess:
         if not no_update:
             self.update()
         if self.status != PROCESS_STATUS_CODE.DEAD:
-            # noinspection PyBroadException
             try:
-                self._parent_send_rpc(PROCESS_RPC.SUICIDE, ())
+                # worker 已死时对端关闭，SUICIDE 写失败是预期——直接走 join/terminate
+                with contextlib.suppress(OSError, EOFError):
+                    self._parent_send_rpc(PROCESS_RPC.SUICIDE, ())
                 # 宽限须覆盖 worker 的有序退出清理：rtDeviceReset 在
                 # Ascend950PR 上裸测即 ~5s（与负载无关），3s 会在正当清理
                 # 中途 terminate → SIGTERM 全栈转储噪音；真挂死由 terminate 兜底
@@ -734,12 +735,6 @@ class SimpleCommandProcess:
                 logging.warning(f"Process {self.name} Timeout")
                 exception = SystemError("Process Timeout")
                 self.rpc_results.put(exception)
-            for lock in self.locks:
-                # noinspection PyBroadException
-                try:
-                    lock.release()
-                except Exception:
-                    logging.exception("Release lock failed")
             # Release device locks held by dead process
             DeviceLockManager.on_process_dead(
                 self, SimpleCommandProcess._device_grant_events, SimpleCommandProcess._device_granted_indices
@@ -751,8 +746,12 @@ class SimpleCommandProcess:
             raise
         if self.status == PROCESS_STATUS_CODE.IDLE and not self.rpc_queue.empty():
             func_call = self.rpc_queue.get()
-            self._parent_send_rpc(*func_call)
-            self.status = PROCESS_STATUS_CODE.WAITING
+            try:
+                self._parent_send_rpc(*func_call)
+                self.status = PROCESS_STATUS_CODE.WAITING
+            except (OSError, EOFError):
+                # worker 恰在此窗口死亡：动作作废，下一轮 update() 走死亡路径
+                pass
 
     def send_action(self, target: Callable, args: tuple, kwargs: dict):
         self.rpc_queue.put((PROCESS_RPC.EXECUTE_FUNCTION, (target, args, kwargs)))

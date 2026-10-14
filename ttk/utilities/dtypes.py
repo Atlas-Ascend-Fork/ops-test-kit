@@ -32,7 +32,9 @@ _NUMPY_TO_TORCH_4BIT_DTYPE = {
     # HIF4 uses FP4 E1M2 logical storage.  It may not have a torch.dtype
     # counterpart, in which case the packed uint8 tensor is intentional.
     "hifloat4": "float4_e1m2fn_x2",
-    "int4": "int4",
+    # int4 不登记 view 目标：torch.int4 是 1 字节/元素的非功能 dtype，pack
+    # 产物（2 元素/字节）经 view 会错长——走 packed uint8 降级分支，dtype
+    # 语义由算子侧属性（ACL 枚举，如 x_dtype）承载
 }
 
 # Numpy float8 dtypes -> torch dtype attribute names.
@@ -563,8 +565,6 @@ def _numpy_4bit_to_torch(np_array: numpy.ndarray):
     import torch
 
     np_dtype = np_array.dtype.name
-    if np_dtype == "int4":
-        raise RuntimeError("int4 numpy arrays cannot be converted to torch.Tensor (no functional torch.int4)")
     torch_dtype_name = _NUMPY_TO_TORCH_4BIT_DTYPE.get(np_dtype)
     torch_dtype = None if torch_dtype_name is None else getattr(torch, torch_dtype_name, None)
     if torch_dtype is not None and not isinstance(torch_dtype, torch.dtype):
@@ -580,7 +580,7 @@ def _numpy_4bit_to_torch(np_array: numpy.ndarray):
         logging.warning(
             "Torch dtype %s is unavailable for %s; using packed uint8 storage with shape %s. "
             "The operator must supply the device dtype semantics.",
-            torch_dtype_name,
+            torch_dtype_name or "<unmapped>",
             np_dtype,
             packed_shape,
         )

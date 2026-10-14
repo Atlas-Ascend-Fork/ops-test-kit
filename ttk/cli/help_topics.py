@@ -90,7 +90,9 @@ applies to: kernel / geir / aclnn / e2e
 
 values:
   Enable    CPU golden via plugin/builtin (default)
-  Disable   no golden generation (SUPPRESSED)
+  Disable   no golden generation, nothing is compared; the case
+            precision verdict is SKIP (unverified, counted in the
+            summary SKIP/NA bucket, never as PASS)
   Promote   CPU golden computed at promoted input precision
             (fp16/bf16->fp32, fp32->fp64) — for cross_check where the
             golden must be more accurate than both sides
@@ -101,7 +103,7 @@ interplay:
   XPU and Promote are mutually exclusive (single choice).
   cross_check / mixed / mix_tolerance criteria auto-enable Promote
   (per-case override, takes precedence over the global flag).
-  golden_api CSV column "disable" suppresses per-case (e2e).""",
+  golden_api CSV column "disable" suppresses per-case (e2e; also SKIP).""",
     },
     "core-limit": {
         "title": "--core-limit — cap cores visible to compilation",

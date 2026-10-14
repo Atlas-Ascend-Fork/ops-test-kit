@@ -190,8 +190,8 @@ def evaluate_eager_precision(
     if log_str:
         logging.debugc(f"\nComparing eager with golden\n{log_str}")
 
-    precision_status = "PASS" if is_pass else "FAIL"
-    if not is_pass and switches.dump_config.dump_on_fail:
+    precision_status = "SKIP" if is_pass is None else "PASS" if is_pass else "FAIL"
+    if is_pass is False and switches.dump_config.dump_on_fail:  # SKIP 不触发 on-fail dump
         _dump_on_fail(testcase, raw_inputs, result_nps, golden_nps, switches, segment="eager")
     return_struct.construct(precision_str, precision_status, perf, metrics=metrics)
     return True
@@ -240,8 +240,8 @@ def evaluate_graph_precision(
     if log_str:
         logging.debugc(f"\nComparing graph {mode} with golden\n{log_str}")
 
-    status = "PASS" if is_pass else "FAIL"
-    if not is_pass and switches.dump_config.dump_on_fail:
+    status = "SKIP" if is_pass is None else "PASS" if is_pass else "FAIL"
+    if is_pass is False and switches.dump_config.dump_on_fail:  # SKIP 不触发 on-fail dump
         # on-fail 补漏 segment 与常规 dump 词表对齐（graph_cst/dyn/aclgraph），
         # 与 result 列前缀共用 _MODE_PREFIX 映射
         segment = f"graph_{FrameworkApiReturnStructure._MODE_PREFIX[mode]}"

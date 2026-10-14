@@ -394,8 +394,8 @@ class GoldenGenerator:
         case_tensors = self._ctx.tensors
         real_idx = 0
         for ct in case_tensors:
-            if real_idx in self._ctx.pure_output_indexes:
-                continue
-            golden_tensors.append(ct)
+            # pure output 位只跳过装载，索引照常推进
+            if real_idx not in self._ctx.pure_output_indexes:
+                golden_tensors.append(ct)
             real_idx += len(ct) if isinstance(ct, (list, tuple)) else 1
         return golden_tensors

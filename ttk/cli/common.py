@@ -86,7 +86,7 @@ def _add_precision_args(parser):
         dest="golden_mode",
         default="Enable",
         choices=["Enable", "Disable", "Promote", "XPU"],
-        help="Golden mode: Enable/Disable/Promote (CPU high-precision) / XPU (GPU output as golden)",
+        help="Golden mode: Enable/Disable (no comparison, verdict SKIP)/Promote (CPU high-precision)/XPU (GPU output as golden)",
     )
     group.add_argument(
         "--input-dist",
@@ -103,7 +103,14 @@ def _add_precision_args(parser):
         help="Manual data directories. Load matching testcase data when present; "
         "with --no-prof they are the dump output target (one directory)",
     )
-    group.add_argument("--seed", "--random-seed", type=int, dest="random_seed", metavar="N", help="Random seed")
+    group.add_argument(
+        "--seed",
+        "--random-seed",
+        type=int,
+        dest="random_seed",
+        metavar="N",
+        help="Random seed: same CSV and seed reproduce per-testcase inputs/golden across runs",
+    )
 
 
 def _add_run_args(parser):

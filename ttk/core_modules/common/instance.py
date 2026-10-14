@@ -1239,8 +1239,9 @@ class InstanceBase(metaclass=ABCMeta):
         if result is None:
             output_data = self.handle_error(task, "none", None)
         elif isinstance(result, SystemError):
+            last_stage = proc.current_stage()  # resurrect 会重置 data，崩溃 stage 须先取
             proc.resurrect()
-            output_data = self.handle_error(task, "crash", (proc.current_stage(), pid, result))
+            output_data = self.handle_error(task, "crash", (last_stage, pid, result))
         elif isinstance(result, RuntimeError):
             proc.resurrect()
             output_data = self.handle_error(task, "fail", (pid, result))

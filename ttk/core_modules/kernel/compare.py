@@ -72,7 +72,14 @@ def comparing(
         logging_data += _logging_data
         logging.debugc(logging_data)
 
-        passed = "PASS" if all([d_passed, c_passed, b_passed]) else "FAIL"
+        # 三态聚合：任一 FAIL → FAIL；有 SKIP（golden Disable）无 FAIL → SKIP
+        verdicts = [d_passed, c_passed, b_passed]
+        if any(v is False for v in verdicts):
+            passed = "FAIL"
+        elif any(v is None for v in verdicts):
+            passed = "SKIP"
+        else:
+            passed = "PASS"
         metrics = {"dyn": dyn_m, "cst": cst_m, "bin": bin_m}
     except Exception:
         logging.exception("Comparison failed")

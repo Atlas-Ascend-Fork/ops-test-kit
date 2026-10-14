@@ -208,3 +208,15 @@ def test_output_titles_composes_header(switches):
     header = ins.output_titles(case, [])
     assert header == ("testcase_name", "op_name", "api_name", "dyn_perf_us", "precision", "input_shape")
     assert ins.case_result_title == ("dyn_perf_us", "precision")
+
+
+def test_update_summary_skip_goes_to_other_bucket(switches):
+    """SKIP（golden Disable 未比对）计入 SKIP/NA 桶，不算 PASS 也不算 FAIL。"""
+    ins = _make_instance(switches)
+    ins._precision_status_idx = 0
+    ins.case_input_title = ("testcase_name",)
+    for status in ("SKIP", "PASS", "FAIL"):
+        ins._update_summary((status,))
+    assert ins.other_count == 1
+    assert ins.pass_count == 1
+    assert ins.fail_count == 1

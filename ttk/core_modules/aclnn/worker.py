@@ -50,6 +50,7 @@ from ..common.plugin import SpecResolver
 from ..common.process import DeviceLock, MultiDeviceLock, gate_host_memory, process_context
 from ..common.result import format_xpu_metrics
 from ..common.testcase.batch import resolve_deterministic_level
+from ..common.testcase.input_data import reseed_per_testcase
 from .compare import Comparator
 from .execute import execute_on_device
 from .golden import GoldenGenerator
@@ -532,9 +533,10 @@ def _multi_device_row_or_none(context, switches, process_ctx, is_multi_device, d
         all_passed = all(did in thread_contexts and not thread_contexts[did].prof_result.failed() for did in device_ids)
         release_retained_multi_device_resources(context, device_ids)
         compare_result = ApiComparisonResult(None)
+        # golden Disable：未做比对，执行正常呈现 SKIP 而非 PASS（对齐单卡路径）
         compare_result.set(
             "EXECUTED" if all_passed else "MULTI_DEVICE_EXECUTION_FAILURE",
-            "PASS" if all_passed else "FAIL",
+            "SKIP" if all_passed else "FAIL",
         )
         return _return_row(context, process_ctx, compare_result)
     if hasattr(context, "_multi_device_thread_contexts"):
@@ -724,6 +726,9 @@ def _run_profile(
 ):
     """单卡/多卡测试编排：阶段函数各带显式失败出口（early_result 约定，对齐 kernel worker）。"""
     switches, process_ctx = _setup_profiling_env(context)
+    # --seed 用例级播种先于一切数据生成（输入/golden/workspace），与派发解耦；
+    # 多卡路径的 per-rank 重播种在其后生效，不受影响
+    reseed_per_testcase(context, switches)
 
     ####################
     # Check whether there is need to do further test
