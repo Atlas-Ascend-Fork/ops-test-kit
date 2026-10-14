@@ -30,6 +30,8 @@ def _build_input_signature(testcase, dynamic):
 
     static (dynamic=False): fixed shapes → corresponds to -c/--const
     dynamic (dynamic=True):  None dimensions → corresponds to -d/--dynamic
+    complex32: TF 无原生类型，签名为 fp16 + 尾维 [2]（与 eager 喂入的
+    lanes 形态一致，数据量等于声明 shape 的 complex32 元素）。
 
     Returns (signature, sig_idx): signature is the TensorSpec list (or None),
     sig_idx lists the flat tensor index each signature entry binds to.
@@ -38,7 +40,7 @@ def _build_input_signature(testcase, dynamic):
     """
     import tensorflow as tf
 
-    from ttk.utilities.dtypes import str_to_tf_dtype
+    from ttk.utilities.dtypes import DTYPE_MAP, str_to_tf_dtype
 
     from .param_extractor import mutable_flat_indexes
 
@@ -59,9 +61,13 @@ def _build_input_signature(testcase, dynamic):
         if shape is None or idx in const_indexes or idx in mutable_idx:
             continue
         dims = list(shape) if not dynamic else [None] * len(shape)
-        tf_dtype = str_to_tf_dtype(dtype_str)
-        if tf_dtype is None:
-            raise ValueError(f"Cannot map dtype {dtype_str} to tf.dtype for input_signature")
+        if DTYPE_MAP.get(dtype_str, dtype_str) == "complex32":
+            tf_dtype = tf.float16
+            dims = [*dims, 2]
+        else:
+            tf_dtype = str_to_tf_dtype(dtype_str)
+            if tf_dtype is None:
+                raise ValueError(f"Cannot map dtype {dtype_str} to tf.dtype for input_signature")
         sig.append(tf.TensorSpec(dims, tf_dtype))
         sig_idx.append(idx)
     return (sig if sig else None), sig_idx

@@ -218,3 +218,42 @@ def test_unmappable_dtype_fails_leg(tmp_path, monkeypatch):
 
     assert (result_nps, perf, det_status) == ([], None, None)
     assert profiler.windows == 0
+
+
+class TestBuildInputSignature:
+    """complex32 → fp16 + 尾维 [2] lanes 签名（与 eager 喂入形态一致）。"""
+
+    @staticmethod
+    def _testcase(shapes, dtypes):
+        return SimpleNamespace(
+            flat_tensor_view_shapes=shapes,
+            flat_tensor_dtypes=dtypes,
+            const_input_indexes=set(),
+            tensor_list_dist=(),
+            api_name="tf.raw_ops.InplaceAdd",
+        )
+
+    @pytest.mark.parametrize(
+        ("dtype", "dynamic", "expected"),
+        [
+            pytest.param("complex32", False, (2, 3, 2), id="static"),
+            pytest.param("complex32", True, (None, None, 2), id="dynamic"),
+            pytest.param("c32", False, (2, 3, 2), id="alias"),
+        ],
+    )
+    def test_complex32_maps_to_fp16_lanes(self, dtype, dynamic, expected):
+        from ttk.core_modules.framework_api.tf.graph_runner import _build_input_signature
+
+        sig, sig_idx = _build_input_signature(self._testcase(((2, 3),), (dtype,)), dynamic=dynamic)
+        assert sig_idx == [0]
+        assert sig[0].shape == expected
+        assert sig[0].dtype == tf.float16
+
+    def test_native_dtype_unchanged(self):
+        from ttk.core_modules.framework_api.tf.graph_runner import _build_input_signature
+
+        sig, _ = _build_input_signature(self._testcase(((2, 3), (1,)), ("float32", "int32")), dynamic=False)
+        assert sig[0].shape == (2, 3)
+        assert sig[0].dtype == tf.float32
+        assert sig[1].shape == (1,)
+        assert sig[1].dtype == tf.int32

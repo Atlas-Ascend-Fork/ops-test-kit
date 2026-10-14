@@ -90,6 +90,7 @@ class StatRelErrComparison(ComparisonBase):
             diff_index=diff_idx,
             is_pass=passed,
             standard=self.STANDARD_NAME,
+            diff_order="worst-first by error" if diff_idx is not None else None,
             metrics=_metrics(th, mere, scan.mare, passed, reason),
         )
 

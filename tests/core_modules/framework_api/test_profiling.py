@@ -265,6 +265,13 @@ class TestDefaultGenerateInputs:
         assert inputs[1].shape == (4,)
         assert inputs[1].dtype == np.float32
 
+    def test_complex32_input_keeps_lane_storage(self):
+        """complex32：视图即存储（fp16 + 尾维 2），不按声明形状坍缩成半数据。"""
+        case = _make_testcase(shapes=((2, 3),), dtypes=("complex32",))
+        inputs = default_generate_inputs(case, _make_switches())
+        assert inputs[0].shape == (2, 3, 2)
+        assert inputs[0].dtype == np.float16
+
 
 class TestApplyPreCompareSkip:
     """invoke_pre_compare 的跳过条件：func 缺失 / 空 golden（钩子契约在 common/comparison/comparison.py）。"""
@@ -447,13 +454,14 @@ class TestTryCustomCompareAdapt:
         ],
     )
     def test_dict_list_return(self, output_dist, compare_fn, result_arr, golden_arr, expected_p, expected_is_pass):
-        """compare 返回 dict 时的精度拼接与 pass 判定。"""
+        """compare 返回 dict 时的精度拼接、pass 判定与 metrics（pass=True 无失败条目）。"""
         from ttk.core_modules.common.comparison.comparison import invoke_custom_compare
 
         case = self._make_case(output_dist=output_dist)
-        p, log, is_pass = invoke_custom_compare(case, result_arr, golden_arr, compare_fn)
+        p, log, is_pass, metrics = invoke_custom_compare(case, result_arr, golden_arr, compare_fn)
         assert p == expected_p
         assert is_pass == expected_is_pass
+        assert metrics == {}
 
     @pytest.mark.parametrize(
         ("compare_return", "match", "result_arr", "golden_arr"),

@@ -68,18 +68,21 @@ def test_mismatch_truth_table(a, g, expect_pass, mere_none):
 
 # —— 防线 2：混合数组（mismatch 与数值 FAIL 的 diff_idx 分流）——
 def test_mismatch_present_diff_idx_only_mismatch():
-    """防线 2：混合数组中 mismatch 位的 diff_idx 仅包含 mismatch 位置。"""
+    """防线 2：混合数组中 mismatch 位的 diff_idx 仅包含 mismatch 位置（升序，
+    diff_order 缺省——NaN 路径与数值路径的排序语义可共存）。"""
     r = _impl([np.nan, 1.0], [1.0, 1.0], "float32", 2**-13)
     assert r.is_pass is False
     assert r.metrics["mere"] is None
     assert list(r.diff_index) == [0]
+    assert r.diff_order is None
 
 
 def test_numeric_fail_diff_idx_worst_first_full():
-    """防线 2：纯数值 FAIL 的 diff_idx 按误差从大到小排列。"""
+    """防线 2：纯数值 FAIL 的 diff_idx 按误差从大到小排列（worst-first）。"""
     r = _impl([1.0, 2.0, 3.0], [1.0, 1.0, 1.0], "float32", 2**-13)
     assert r.is_pass is False
     assert list(r.diff_index) == [2, 1, 0]
+    assert r.diff_order == "worst-first by error"
 
 
 # —— 防线 3：mere/mare/阈值公式数值校验 ——

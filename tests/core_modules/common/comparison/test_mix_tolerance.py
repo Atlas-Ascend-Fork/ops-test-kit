@@ -103,12 +103,14 @@ def test_hard_limit_exceeded_not_shown_as_100_percent():
 
 
 def test_hard_limit_exceeded_diff_index_has_details():
-    """同场景 → 超限元素全部进入 diff_index（ttk-compare.log 可展示出错部分）。"""
+    """同场景 → 超限元素全部进入 diff_index（ttk-compare.log 可展示出错部分），
+    排序语义 worst-first（摘要行标签的数据源）。"""
     g = np.array([100.0, -100.0, 200.0, -200.0])
     a = g + np.array([1.2, -1.1, 1.4, -1.3])
     r = _impl(a, g, options=dict(FP32, rtol=1e-3, atol=1e-3))
     assert r.diff_index is not None
     assert r.diff_index.size == 4
+    assert r.diff_order == "worst-first by error"
 
 
 def test_hard_limit_not_exceeded_ratio_unchanged():

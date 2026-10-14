@@ -86,7 +86,7 @@ def test_compare_size_mismatch_short_circuits_to_fail():
 
 
 def test_log_diff_output_respects_max():
-    """diff 行打印数 = MAX_DIFF_OUTPUT（此前 off-by-one 打 101 行）。"""
+    """diff 行打印数 = MAX_DIFF_OUTPUT（此前 off-by-one 打 101 行）；摘要行带排序标签。"""
     from ttk.core_modules.common.comparison.registry import get_comparison
 
     cls = get_comparison("bin")
@@ -94,6 +94,7 @@ def test_log_diff_output_respects_max():
     _p, log, _ok, _m = c.compare()
     n = sum(1 for line in log.splitlines() if line.startswith("Index:"))
     assert n == ComparisonBase.MAX_DIFF_OUTPUT
+    assert f"Output 0 Compare Difference length {ComparisonBase.MAX_DIFF_OUTPUT} (index ascending)" in log
 
 
 def test_register_comparison_rejects_bad_arg():

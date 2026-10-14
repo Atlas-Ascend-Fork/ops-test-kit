@@ -254,11 +254,14 @@ def compare_with_hooks(testcase, outputs, goldens, standards, hooks: CompareHook
     """带 TestSpec 钩子（pre_compare / compare）的比对统一入口（四通路共用）。
 
     流程：
-    1) validate_outputs 分类——全占位/整体异常/无钩子/混合占位 → 全部委托
-       compare()（占位路透传 + VALID 子集走标准比对，分类结论复用不重算）；
-    2) 全 VALID 且声明钩子 → 钩子路径：列表浅拷贝隔离 + 复制 golden 防改写 →
-       pre_compare → custom compare（非 None 采信）→ 回落标准 compare
-       （对变换后数据重新分类）。
+    1) validate_outputs 分类——无钩子/输出占位 → 委托 compare()（占位路透传 +
+        VALID 子集走标准比对，分类结论复用不重算）；
+    2) 声明钩子且输出均为真实数组 → 钩子路径：列表浅拷贝隔离 + 复制 golden
+        防改写 → pre_compare → custom compare（非 None 采信）→ 回落标准
+        compare（对变换后数据重新分类）。golden 的 str 哨兵由
+        invoke_pre_compare/invoke_custom_compare 内部 _can_customize 拦截；
+        None（抑制位，如 return_softmax_lse=False 的 LSE）交由插件钩子
+        自行处理，不禁用钩子（对齐重构前 comparison/custom.py 门控语义）。
 
     【形状契约】钩子拿到即真实形状——由各通路数据源头保证（kernel 在
     __outputs_to_numpy_arrays 解码处按声明 shape 还原，geir 在 _parse_stdout
@@ -270,14 +273,17 @@ def compare_with_hooks(testcase, outputs, goldens, standards, hooks: CompareHook
     """
     verdict = validate_outputs(outputs, goldens, hooks.third_parties)
     hooks_enabled = testcase is not None and (hooks.pre_compare is not None or hooks.custom_compare is not None)
-    if hooks_enabled and verdict.needs_compare and all(entry == "VALID" for entry in verdict.per_output):
+    # 重构前语义：只要输出是真实数组即可进钩子；golden 的 str 哨兵在
+    # invoke_pre_compare/invoke_custom_compare 内部拦截，None 抑制位交由插件处理
+    has_runtime_output = bool(outputs) and not any(isinstance(output, (str, type(None))) for output in outputs)
+    if hooks_enabled and has_runtime_output:
         mode_outputs = list(outputs)  # 浅拷贝隔离：invoke_pre_compare 原地改写不外溢到调用方列表
         mode_goldens = _copy_goldens(goldens)
         invoke_pre_compare(testcase, mode_outputs, mode_goldens, hooks.pre_compare)
         custom_result = invoke_custom_compare(testcase, mode_outputs, mode_goldens, hooks.custom_compare)
         if custom_result is not None:
-            precision, logging_data, passed = custom_result
-            return precision, logging_data, passed, {}
+            precision, logging_data, passed, custom_metrics = custom_result
+            return precision, logging_data, passed, custom_metrics
         return compare(
             mode_outputs,
             mode_goldens,
@@ -427,8 +433,59 @@ def _format_failure_detail(value):
     return text
 
 
+def _csv_literal(value):
+    """numpy 标量/数组 → Python 字面量（precision_metrics 列 eval 往返约束）。"""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {k: _csv_literal(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_csv_literal(v) for v in value]
+    return value
+
+
+# 结构化条目的容器界，与 _format_failure_detail 的 reprlib maxlist 同值（前 20）
+_CUSTOM_LIST_CAP = 20
+
+
+_CUSTOM_RESERVED_KEYS = frozenset({"standard", "pass", "reason", "diff_indices", "diff_indices_total"})
+
+
+def _structured_custom_entry(item, reason):
+    """失败 custom 结果 → 结构化条目（键与标准比对 metrics 同构：输出序号 → dict）。
+
+    标量字段原样（保字面量）；容器类与日志 detail 行同界（前 20 + total），
+    防止 precision_metrics 列被无界插件数据撑爆。保留键（standard/pass/reason/
+    diff_indices*）不被插件 metrics 覆盖——standard=="custom" 是回显判别标记。"""
+    entry = {"standard": "custom", "pass": False, "reason": reason}
+    diff_indices = _csv_literal(item.get("diff_indices"))
+    if isinstance(diff_indices, list):
+        entry["diff_indices"] = diff_indices[:_CUSTOM_LIST_CAP]
+        if len(diff_indices) > _CUSTOM_LIST_CAP:
+            entry["diff_indices_total"] = len(diff_indices)
+    elif diff_indices is not None:
+        entry["diff_indices"] = diff_indices
+    plugin_metrics = item.get("metrics")
+    if isinstance(plugin_metrics, dict):
+        for key, raw_val in plugin_metrics.items():
+            if key in _CUSTOM_RESERVED_KEYS:
+                continue
+            literal = _csv_literal(raw_val)
+            entry[key] = (
+                literal if isinstance(literal, (int, float, bool, str, type(None))) else _format_failure_detail(literal)
+            )
+    return entry
+
+
 def _normalize_custom_result(testcase, result):
-    """规整 Spec.compare 返回值：dict/列表/嵌套 → (precision 拼接, error_info 日志, pass)。"""
+    """规整 Spec.compare 返回值：dict/列表/嵌套 → (precision 拼接, error_info 日志, pass, metrics)。
+
+    metrics 键为输出序号（与标准比对 compare() 的 total_metrics 同构），失败输出
+    条目含 standard="custom"/pass/reason/diff_indices 及插件标量指标——结构化供
+    CSV precision_metrics 与父进程回显消费，文本进日志。
+    """
     if isinstance(result, dict):
         result = [result]
     if not isinstance(result, (list, tuple)):
@@ -440,6 +497,7 @@ def _normalize_custom_result(testcase, result):
     precisions = []
     passes = []
     log_lines = []
+    custom_metrics = {}
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise ValueError(f"[{testcase.testcase_name}] compare output[{index}] is not a dict")
@@ -463,6 +521,8 @@ def _normalize_custom_result(testcase, result):
             log_lines.append(detail)
             if not item["pass"]:
                 logging.error("[%s] %s", testcase.testcase_name, detail)
+        if not item["pass"]:
+            custom_metrics[index] = _structured_custom_entry(item, _format_failure_detail(reason))
 
     log_data = "\n".join(log_lines) + ("\n" if log_lines else "")
-    return ",".join(precisions), log_data, all(passes)
+    return ",".join(precisions), log_data, all(passes), custom_metrics

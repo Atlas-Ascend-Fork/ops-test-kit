@@ -92,6 +92,7 @@ class MixToleranceComparison(ComparisonBase):
             diff_index=diff_idx,
             is_pass=passed,
             standard=self.STANDARD_NAME,
+            diff_order="worst-first by error" if diff_idx is not None else None,
             metrics=_metrics(rtol, atol, matched_ratio, required_ratio, max_abs_error, max_err_limit, passed, reason),
         )
 

@@ -95,8 +95,27 @@ def execute_graph(
     return result
 
 
+def _snapshot_prof_entries(prof_path: str) -> frozenset:
+    """执行前 prof_path 既有子目录快照（空路径返回空集）。"""
+    if not prof_path or not os.path.isdir(prof_path):
+        return frozenset()
+    return frozenset(entry for entry in os.listdir(prof_path) if os.path.isdir(os.path.join(prof_path, entry)))
+
+
+def _new_prof_dirs(prof_path: str, before: frozenset) -> list:
+    """执行前后差集 → 本轮子进程新建的 PROF 目录（绝对路径）。
+
+    msprof 导出只往既有 PROF 内写文件、不新建顶层目录，差集即本轮全部新 PROF。
+    """
+    if not prof_path or not os.path.isdir(prof_path):
+        return []
+    current = {entry for entry in os.listdir(prof_path) if os.path.isdir(os.path.join(prof_path, entry))}
+    return [os.path.join(prof_path, entry) for entry in sorted(current - before)]
+
+
 def _run_once(testcase, dev_id, switches, plan: GraphExecPlan) -> tuple:
     """单轮执行：Popen + pipe 数据通道 + plog 捕获 + 输出/perf 解析。"""
+    prof_before = _snapshot_prof_entries(plan.prof_path)
     data_r, data_w = os.pipe()
     data_holder = []
 
@@ -142,7 +161,8 @@ def _run_once(testcase, dev_id, switches, plan: GraphExecPlan) -> tuple:
         stderr = stderr_bytes.decode("utf-8", errors="replace")[:10000]
         raise RuntimeError(f"GEIR execution failed (rc={proc.returncode}): {stderr}")
 
-    device_perf_us = _parse_msprof_task_duration(plan.prof_path) if plan.prof_path else None
+    new_profs = _new_prof_dirs(plan.prof_path, prof_before)
+    device_perf_us = _parse_msprof_task_duration(new_profs) if plan.prof_path else None
     run_outputs = _parse_stdout(
         data_holder[0] if data_holder else b"",
         testcase.flat_output_dtypes,

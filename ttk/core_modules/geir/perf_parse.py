@@ -17,20 +17,21 @@ import numpy as np
 from ..common.profiler.ms_profiler import export_msprof_summary, read_task_durations
 
 
-def _parse_msprof_task_duration(prof_path: str):
-    """Run msprof.py export summary and parse op_summary CSV for Task Duration(us).
+def _parse_msprof_task_duration(prof_dirs):
+    """本轮新建 PROF（执行前后差集）的 Task Duration 中位数（µs）。
 
-    Returns median device time in µs, or None when profiling data is
-    unavailable / empty / msprof tool missing.
+    msprof -dir 可直接传 PROF 目录，导出/解析逐 PROF 限定在差集上，历史
+    PROF 不参与；无数据/工具缺失返回 None。
     """
-    # 1. msprof.py export summary (converts binary dumps to CSV)
-    export_msprof_summary(prof_path, exports=("summary",))
-
-    # 2. Per-launch Task Duration (op_summary_/task_time_，KERNEL_TYPE 过滤，
-    #    mtime 择新 + 空文件回退——kernel 通路同源)
-    durations = read_task_durations(prof_path)
-    if durations:
-        median_us = round(float(np.median(durations)), 3)
-        logging.debugc("[GEIR] device perf: median=%.3f us, all=%s", median_us, durations)
-        return median_us
-    return None
+    if not prof_dirs:
+        return None
+    durations = []
+    for prof_dir in prof_dirs:
+        # msprof.py export summary：原始数据转 CSV（仅本轮 PROF）
+        export_msprof_summary(prof_dir, exports=("summary",))
+        durations.extend(read_task_durations(prof_dir))
+    if not durations:
+        return None
+    median_us = round(float(np.median(durations)), 3)
+    logging.debugc("[GEIR] device perf: median=%.3f us, all=%s", median_us, durations)
+    return median_us

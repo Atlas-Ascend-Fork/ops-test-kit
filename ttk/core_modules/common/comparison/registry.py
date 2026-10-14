@@ -32,6 +32,9 @@ class EachCompareResult:
     standard: str = ""
     metrics: dict = field(default_factory=dict)
     error_info: Optional[str] = None  # custom compare 接口失败时填；compare() 打 ERROR 日志
+    # diff_index 的排序语义（如 "worst-first by error"）；None = 索引升序。
+    # _log_diff_output 摘要行带此标签，回显块自解释（判据间口径本就不同）
+    diff_order: Optional[str] = None
 
 
 class _FirstK:
@@ -240,7 +243,7 @@ class ComparisonBase(metaclass=ABCMeta):
         else:
             precision = f"{compare_result.precision * 100}%"
         compare_result.log += f"Output {self.output_idx} Precision is {precision}\n"
-        compare_result.log += self._log_diff_output(compare_result.diff_index)
+        compare_result.log += self._log_diff_output(compare_result.diff_index, compare_result.diff_order)
         gc.collect()
         return precision, compare_result.log, compare_result.is_pass, compare_result.metrics
 
@@ -264,12 +267,15 @@ class ComparisonBase(metaclass=ABCMeta):
             return str(value)
         return format(float(value), spec)
 
-    def _log_diff_output(self, diff_index) -> str:
+    def _log_diff_output(self, diff_index, diff_order=None) -> str:
         log = ""
         if diff_index is not None:
             diff_index_size = diff_index.size
             golden_size = self.golden.size
-            log += f"Output {self.output_idx} Compare Difference length {diff_index_size}\n"
+            log += (
+                f"Output {self.output_idx} Compare Difference length {diff_index_size} "
+                f"({diff_order or 'index ascending'})\n"
+            )
             for idx in range(min(diff_index_size, self.MAX_DIFF_OUTPUT)):
                 real_index = diff_index[idx]
                 golden_v = self.golden[real_index] if golden_size > 0 else 0

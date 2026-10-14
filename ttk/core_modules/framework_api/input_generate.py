@@ -23,7 +23,9 @@ from ttk.core_modules.common.testcase.input_data import (
     generate_np_storages,
 )
 from ttk.core_modules.common.testcase.tensor import make_storage_view
+from ttk.utilities import get
 from ttk.utilities.container import nest_by_distribution
+from ttk.utilities.dtypes import DTYPE_MAP
 
 from ..common.invoke import accepts_var_keyword, sig_params
 from ..common.plugin import get_plugin_function
@@ -200,10 +202,18 @@ def default_generate_inputs(testcase, switches):
 def build_views_from_storages(testcase):
     """Build (possibly non-contiguous) numpy views from contiguous storages."""
     flat_shapes = testcase.flat_tensor_view_shapes
+    flat_dtypes = testcase.flat_tensor_dtypes or ()
     inputs = []
     for idx, storage in enumerate(testcase.np_storages):
         if storage is None:
             inputs.append(None)
+            continue
+        dtype = get(flat_dtypes, idx)
+        if DTYPE_MAP.get(dtype, dtype) == "complex32":
+            # complex32 存储 = fp16(声明shape+[2])：numpy 无 complex32 做不了
+            # dtype 重解释，按声明形状切视图会取到半数据；视图即存储，复数语义
+            # 投影由框架张量层完成（torch.complex32 / TF fp16 lanes）
+            inputs.append(storage)
             continue
         view_shape = flat_shapes[idx]
         v_stride = testcase.flat_view_stride(idx)

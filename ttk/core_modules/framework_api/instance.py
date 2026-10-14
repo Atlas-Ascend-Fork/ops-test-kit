@@ -20,7 +20,11 @@ from typing import Any, List
 from ttk.switches import get_global_storage
 
 from ..common.backend import get_backend
-from ..common.comparison.compare_log import print_compare_log_failures, read_compare_log_failures
+from ..common.comparison.compare_log import (
+    print_compare_log_failures,
+    print_structured_compare_failures,
+    read_compare_log_failures,
+)
 from ..common.instance import InstanceBase, execution_sorted, register_instance
 from ..common.logging import COMPARE_LOG_FILE_NAME, build_single_log_dir
 from ..common.process import SimpleCommandProcess, Task
@@ -124,7 +128,9 @@ class FrameworkApiInstance(InstanceBase):
         return tasks
 
     def handle_result(self, task: Task, result: Any) -> tuple:
-        self._print_new_compare_failures(task.testcase)
+        self._print_new_compare_failures(
+            task.testcase, result if isinstance(result, FrameworkApiReturnStructure) else None
+        )
         if isinstance(result, FrameworkApiReturnStructure):
             return result.pick_data(self.result_titles())
         # worker 结果类型异常 → 显式 FAIL 行（不静默降级为字符串行）
@@ -152,7 +158,10 @@ class FrameworkApiInstance(InstanceBase):
     def get_device_info(self, dev_id: int) -> str:
         return f"{self.backend.device_type()}:{dev_id}"
 
-    def _print_new_compare_failures(self, testcase) -> None:
+    def _print_new_compare_failures(self, testcase, result=None) -> None:
+        # 自定义比对失败详情：结构化条目随返回结构回传（不依赖日志格式扫描）
+        if result is not None:
+            print_structured_compare_failures(getattr(result, "precision_metrics", None), testcase.testcase_name)
         # COMPARE 级进单一 ttk.log（per-case 覆写）——按用例日志文件
         # 读 Index/Diff 行，失败明细随结果打屏。
         switches = get_global_storage()

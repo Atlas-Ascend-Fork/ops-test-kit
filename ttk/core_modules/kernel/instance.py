@@ -29,7 +29,11 @@ from ttk.switches import get_global_storage
 
 from ...utilities import cpu_count, limit_cann_compile_jobs
 from ...utilities.proc import msdebug_runtime_injection_enabled
-from ..common.comparison.compare_log import print_compare_log_failures, read_compare_log_failures
+from ..common.comparison.compare_log import (
+    print_compare_log_failures,
+    print_structured_compare_failures,
+    read_compare_log_failures,
+)
 from ..common.device import DSMIInterface, get_npu_hw_info, validate_core_limit
 from ..common.instance import InstanceBase, register_instance
 from ..common.logging import COMPARE_LOG_FILE_NAME, build_single_log_dir
@@ -333,10 +337,13 @@ class KernelInstance(InstanceBase):
     def _profile_row(self, testcase: TestcaseKernel, result: Any) -> tuple:
         if not isinstance(result, KernelReturnStructure):
             raise RuntimeError(f"Only KernelReturnStructure is valid. But got {type(result)}")
-        self._print_new_compare_failures(testcase)
+        self._print_new_compare_failures(testcase, result)
         return result.pick_data(self.case_result_title)
 
-    def _print_new_compare_failures(self, testcase) -> None:
+    def _print_new_compare_failures(self, testcase, result=None) -> None:
+        # 自定义比对失败详情：结构化条目随返回结构回传（不依赖日志格式扫描）
+        if result is not None:
+            print_structured_compare_failures(getattr(result, "precision_metrics", None), testcase.testcase_name)
         # COMPARE 级日志落在 per-case 追加档 ttk-compare.log（跨复跑保留，
         # "===== run start" 标记分段）——read_compare_log_failures 只读最后
         # 一个标记之后的本运行段 Index/Diff 行，失败明细随结果打屏。

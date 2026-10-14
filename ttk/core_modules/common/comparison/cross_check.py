@@ -292,7 +292,7 @@ class CrossCheckComparison(ComparisonBase):
             metrics["reason"] = reason
         return metrics
 
-    def _log_diff_output(self, diff_index):
+    def _log_diff_output(self, diff_index, diff_order=None):
         """Three-party diff (t/g/b + |t-g| + |b-g|), worst-first.
         large positions use %.6e, small positions use %.10e (small values need
         more digits). [L]/[S] tag distinguishes large/small in each row."""
@@ -302,7 +302,7 @@ class CrossCheckComparison(ComparisonBase):
         t, g, b = self.output, self.golden, self.third_party
         small_value = self.tol_options.get("small_value", 1e-7)
         n = len(diff_index)
-        log += f"Output {self.output_idx} Compare Difference length {n} (worst-first)\n"
+        log += f"Output {self.output_idx} Compare Difference length {n} ({diff_order or 'worst-first'})\n"
         for idx in range(n):
             i = int(diff_index[idx])
             is_small = abs(float(g[i])) < small_value
