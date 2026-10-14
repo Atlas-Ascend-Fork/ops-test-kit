@@ -213,8 +213,10 @@ class TorchNpuProfiler(FrameworkProfiler):
 
     def __exit__(self, *exc):
         if self._prof:
-            self._prof.step()
-            self._prof.stop()
+            try:
+                self._prof.step()
+            finally:
+                self._prof.stop()
 
     def result(self, repeat_count) -> ProfileResult:
         kernel_csv = self._find_csv("kernel_details.csv")
