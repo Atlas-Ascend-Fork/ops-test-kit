@@ -1363,11 +1363,10 @@ def _check_testcase_indexes_selection(testcase_idx: int) -> bool:
 
 
 def _check_testcase_operator_selection(testcase_op_name: str) -> bool:
-    if get_global_storage().selected_operators:
-        return testcase_op_name in get_global_storage().selected_operators
-    if get_global_storage().excluded_operators:
-        return testcase_op_name not in get_global_storage().excluded_operators
-    return True
+    storage = get_global_storage()
+    selected = storage.selected_operators
+    excluded = storage.excluded_operators
+    return (not selected or testcase_op_name in selected) and (not excluded or testcase_op_name not in excluded)
 
 
 def _check_testcase_priority_selection(priority: int) -> bool:
