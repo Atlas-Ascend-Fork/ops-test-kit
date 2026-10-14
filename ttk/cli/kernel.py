@@ -67,6 +67,15 @@ def _add_kernel_args(parser):
         help="Enable dynamic shape test (default: enabled); use -d=false to disable",
     )
     group.add_argument(
+        "--expect-impl-source",
+        dest="expect_impl_source",
+        default=None,
+        metavar="SOURCE",
+        help="Fail the run unless every tested operator resolves from the expected "
+        "implementation source: builtin | vendor | custom | vendor=<name> | custom=<name> "
+        "(guards against silent fallback to builtin when a custom op package is ineffective)",
+    )
+    group.add_argument(
         "--force-block-dim", dest="force_block_dim", default=None, help="Force block dim, e.g. --force-block-dim=2"
     )
     group.add_argument(

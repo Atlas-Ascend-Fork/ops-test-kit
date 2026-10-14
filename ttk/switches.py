@@ -124,6 +124,7 @@ class SWITCHES:
         "force_clear_l1",
         "force_clear_l0",
         "force_block_dim",
+        "expect_impl_source",
         "force_simt_ub_size",
         "simt_cfg",
         "reuse_hbm",
@@ -274,6 +275,8 @@ class SWITCHES:
         self.force_clear_l1 = None
         self.force_clear_l0 = None
         self.force_block_dim = [None, None, None]
+        # --expect-impl-source——实现来源与预期不符时显式失败（builtin/vendor/custom[=name]）
+        self.expect_impl_source: str = None
         self.force_simt_ub_size = [None, None, None]  # dynamic/const/binary
         self.simt_cfg: SoCSimtCfg = SoCSimtCfg()
         self.reuse_hbm: bool = False

@@ -258,6 +258,8 @@ def apply_kernel_args(sw, args):
             sw.compile_options[key] = value
     if hasattr(args, "impl_mode") and args.impl_mode:
         sw.op_impl_mode = args.impl_mode
+    if hasattr(args, "expect_impl_source") and args.expect_impl_source:
+        sw.expect_impl_source = args.expect_impl_source
     # -l/--limit 与 --simt-* 的解析位于 args_to_switches（kernel/aclnn 共享注册）
     if hasattr(args, "reuse_hbm") and args.reuse_hbm:
         sw.reuse_hbm = True

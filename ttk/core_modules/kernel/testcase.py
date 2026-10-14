@@ -639,15 +639,17 @@ class TestcaseKernel(TestcaseBase):
         return "dyn_perf_us", "cst_perf_us", "bin_perf_us", "perf_status", "precision_status"
 
     @staticmethod
-    def hash_cases_to_groups(testcases: Iterable["TestcaseKernel"]) -> Dict[int, set]:
+    def hash_cases_to_groups(testcases: Iterable["TestcaseKernel"]) -> Dict[int, list]:
+        """按编译 hash 分组去重。组容器用 list 保持传入序（-t/--ti 圈选时
+        同 hash 组内也按传入序派发；set 迭代序不稳定）。"""
         testcase_group_dict = {}
         if not testcases:
             return testcase_group_dict
         for testcase in testcases:
             hash_index = testcase.get_compilation_hash()
-            testcase_group = testcase_group_dict.setdefault(hash_index, set())
+            testcase_group = testcase_group_dict.setdefault(hash_index, [])
             if testcase not in testcase_group:
-                testcase_group.add(testcase)
+                testcase_group.append(testcase)
             else:
                 logging.warning(f"Duplicate testcase: {testcase.testcase_name}")
         return testcase_group_dict

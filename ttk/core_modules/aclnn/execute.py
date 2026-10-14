@@ -399,7 +399,7 @@ class AclOpExecutor:
                     try:
                         # call phase 1 interface
                         workspace_size, c_executor = self._dvc.acl_get_workspace(self._ctx.api_name, phase1_params)
-                        npu_memory = workspace_size
+                        npu_memory = workspace_size / 1e6
                         # call phase 2 interface
                         status = self._dvc.acl_execute(self._ctx.api_name, workspace_size, c_executor, stream)
                     except Exception as e:

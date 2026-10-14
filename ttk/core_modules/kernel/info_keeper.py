@@ -136,6 +136,12 @@ class OpInfoKeeper(metaclass=Singleton):
             "ops_group": ops_group,
         }
         self._kernel_info_cache[op_name] = result
+        logging.info(
+            "[op source] %s: binary_base=%s (source=%s)",
+            op_name,
+            binary_base,
+            info.get("_impl_source", "builtin"),
+        )
         return result
 
     def get_operator_function(self, op_name: str) -> Optional[Callable]:
@@ -159,11 +165,30 @@ class OpInfoKeeper(metaclass=Singleton):
             func = getattr(module, func_name, None)
             self._op_func_cache[op_name] = func
             info["_impl_type"] = "asc" if getattr(module, "__version__", "1.0.0") == "2.0.0" else "tbe"
+            logging.info(
+                "[op source] %s: impl=%s (source=%s, vendor=%s)",
+                op_name,
+                module_path,
+                info.get("_impl_source", "builtin"),
+                info.get("_impl_vendor") or "-",
+            )
             return func
         except (ImportError, AttributeError) as e:
             logging.error(f"Failed to load operator function for {op_name}: {e}")
             self._op_func_cache[op_name] = None
             return None
+
+    def impl_source_of(self, op_name: str) -> Optional[dict]:
+        """逐算子实现来源描述（source=builtin/vendor/custom + 厂商名 + 实现根路径）。"""
+        info = self.info_of(op_name)
+        if info is None:
+            return None
+        return {
+            "source": info.get("_impl_source", "builtin"),
+            "vendor": info.get("_impl_vendor", ""),
+            "impl_prefix": info.get("_impl_prefix", ""),
+            "impl_base_path": info.get("_impl_base_path", ""),
+        }
 
     def impl_type_of(self, op_name: str) -> str:
         """Return impl type ('asc' or 'tbe'), lazy-resolved on first call."""
@@ -379,7 +404,15 @@ class OpInfoKeeper(metaclass=Singleton):
         config_parent = os.path.dirname(config_dir)
         impl_base_path = os.path.dirname(config_parent)
 
-        return {"_impl_prefix": impl_prefix, "_ops_group": ops_group, "_impl_base_path": impl_base_path}
+        return {
+            "_impl_prefix": impl_prefix,
+            "_ops_group": ops_group,
+            "_impl_base_path": impl_base_path,
+            # 逐算子来源信息（builtin/vendor/custom + 厂商名），供日志与
+            # --expect-impl-source 校验消费——自定义包未生效静默回落内置时可见。
+            "_impl_source": source_type,
+            "_impl_vendor": vendor_name if source_type in ("vendor", "custom") else "",
+        }
 
     def _eval_attr_str(self, attrs: List[dict], op_name: str):
         for attr in attrs:

@@ -21,7 +21,7 @@ from ttk.switches import get_global_storage
 
 from ..common.comparison.compare_log import print_compare_log_failures, read_compare_log_failures
 from ..common.device import DSMIInterface, get_npu_hw_info
-from ..common.instance import InstanceBase, register_instance
+from ..common.instance import InstanceBase, execution_sorted, register_instance
 from ..common.logging import COMPARE_LOG_FILE_NAME, build_single_log_dir
 from ..common.process import SimpleCommandProcess, Task
 from .result import AclnnReturnStructure
@@ -104,7 +104,8 @@ class AclnnInstance(InstanceBase):
     def build_tasks(self, testcases: List[TestcaseAclnn]) -> List[Task]:
         grant_events = SimpleCommandProcess._device_grant_events
         granted_indices = SimpleCommandProcess._device_granted_indices
-        sorted_cases = sorted(testcases, key=lambda t: getattr(t, "_csv_row_index", -1))
+        # -t/--ti 圈选时按传入序（getattr 兼容免实例化调用）
+        sorted_cases = execution_sorted(getattr(self, "_selection_order_key", None), testcases)
         tasks = []
         for t in sorted_cases:
             device_ids = list(t.device_ids) if hasattr(t, "device_ids") and t.device_ids else None

@@ -220,3 +220,55 @@ def test_update_summary_skip_goes_to_other_bucket(switches):
     assert ins.other_count == 1
     assert ins.pass_count == 1
     assert ins.fail_count == 1
+
+
+# ── -t/--ti 圈选时按传入参数顺序执行 ──
+
+
+def _order_case(name, row_index):
+    case = _make_case(name)
+    case._csv_row_index = row_index
+    return case
+
+
+def test_selection_order_by_names(switches):
+    """-t 圈选时 flatten_testcases 按传入参数顺序重排，_execution_sorted 同序。"""
+    switches.selected_testcases = ["c1", "a1", "b1"]
+    switches.selected_testcase_indexes = []
+    ins = _make_instance(switches)
+    ins.flatten_testcases = [_order_case("a1", 0), _order_case("b1", 1), _order_case("c1", 2)]
+    ins._apply_selection_order()
+    assert [tc.testcase_name for tc in ins.flatten_testcases] == ["c1", "a1", "b1"]
+    assert [tc.testcase_name for tc in ins._execution_sorted(ins.flatten_testcases)] == ["c1", "a1", "b1"]
+
+
+def test_selection_order_by_indexes(switches):
+    """--ti 圈选时按传入序号顺序重排。"""
+    switches.selected_testcases = []
+    switches.selected_testcase_indexes = [2, 0, 1]
+    ins = _make_instance(switches)
+    ins.flatten_testcases = [_order_case("a1", 0), _order_case("b1", 1), _order_case("c1", 2)]
+    ins._apply_selection_order()
+    assert [tc.testcase_name for tc in ins.flatten_testcases] == ["c1", "a1", "b1"]
+
+
+def test_no_selection_keeps_csv_order(switches):
+    """未圈选时不重排，_execution_sorted 回退 CSV 行序（build_tasks 消费口径不变）。"""
+    switches.selected_testcases = []
+    switches.selected_testcase_indexes = []
+    ins = _make_instance(switches)
+    ins.flatten_testcases = [_order_case("c1", 2), _order_case("a1", 0), _order_case("b1", 1)]
+    ins._apply_selection_order()
+    assert ins._selection_order_key is None
+    assert [tc.testcase_name for tc in ins._execution_sorted(ins.flatten_testcases)] == ["a1", "b1", "c1"]
+
+
+def test_execution_sorted_prefers_selection_key_over_csv(switches):
+    """aclnn/e2e build_tasks 经 _execution_sorted：圈选序优先于 CSV 行序。"""
+    switches.selected_testcases = ["b1", "a1"]
+    switches.selected_testcase_indexes = []
+    ins = _make_instance(switches)
+    ins.flatten_testcases = [_order_case("a1", 0), _order_case("b1", 1)]
+    ins._apply_selection_order()
+    reordered = list(reversed(ins.flatten_testcases))  # 模拟上游打乱后交给 build_tasks
+    assert [tc.testcase_name for tc in ins._execution_sorted(reordered)] == ["b1", "a1"]

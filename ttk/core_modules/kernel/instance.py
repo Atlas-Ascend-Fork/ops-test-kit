@@ -120,12 +120,50 @@ class KernelInstance(InstanceBase):
             self._launch_knowledge_server(self.mp_context)
         if self.switches.mode.is_model():
             os.environ.setdefault("ASCEND_SLOG_PRINT_TO_STDOUT", "1")
+        self._check_expected_impl_source()
         if (
             not self.switches.compile_only
             and not (self.switches.no_prof and self.switches.manual_data_dirs)
             and getattr(self.switches, "backend", None) != "npusim"
         ):
             self._compile_help_kernels()
+
+    def _check_expected_impl_source(self):
+        """--expect-impl-source 校验——实现来源与预期不符时显式失败，
+        防自定义包未生效（未注册 / 被旧 vendor 包抢占）时静默回落内置实现而误报 PASS。"""
+        expectation = getattr(self.switches, "expect_impl_source", None)
+        if not expectation:
+            return
+        from .info_keeper import OpInfoKeeper
+
+        source, _, vendor = expectation.partition("=")
+        source = source.strip().lower()
+        vendor = vendor.strip()
+        if source not in ("builtin", "vendor", "custom"):
+            raise ValueError(
+                f"Invalid --expect-impl-source: {expectation!r} (expected builtin | vendor | custom[=name])"
+            )
+        keeper = OpInfoKeeper()
+        mismatches = []
+        seen_ops = set()
+        for tc in self.flatten_testcases:
+            if tc.op_name in seen_ops:
+                continue
+            seen_ops.add(tc.op_name)
+            info = keeper.impl_source_of(tc.op_name)
+            if info is None:
+                mismatches.append(f"{tc.op_name}: no op info found for expected source {expectation!r}")
+            elif info["source"] != source or (vendor and info["vendor"] != vendor):
+                mismatches.append(
+                    f"{tc.op_name}: expected source {expectation!r}, resolved source={info['source']!r} "
+                    f"vendor={info['vendor']!r} base={info['impl_base_path']!r}"
+                )
+        if mismatches:
+            raise RuntimeError(
+                "IMPL_SOURCE_MISMATCH: tested operators do not resolve from the expected "
+                f"implementation source ({expectation!r}):\n  " + "\n  ".join(mismatches)
+            )
+        logging.info(f"All {len(seen_ops)} tested operator(s) resolve from expected impl source: {expectation!r}")
 
     def teardown(self):
         """KB server 轮询退出（switch=False → RUNNING 结束 → close）；进程死亡即止，不无限等待。"""

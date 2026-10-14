@@ -56,3 +56,19 @@ def test_npu_memory_pick_data():
     titles = AclnnReturnStructure.get_titles()
     row = prs.pick_data(titles)
     assert row[titles.index("npu_memory")] == 8192
+
+
+def test_npu_memory_workspace_converted_to_mb():
+    """回归锚：workspace 字节须 /1e6 转 MB（result.py 契约），与 e2e / GPU
+    peak_memory_mb 单位对齐；重构 6fd9eb3 曾丢失原修复 37ec723 的换算。"""
+    import re
+    from pathlib import Path
+
+    from ttk.core_modules.aclnn import execute as aclnn_execute
+
+    source = Path(aclnn_execute.__file__).read_text(encoding="utf-8")
+    assert re.search(r"npu_memory = workspace_size / 1e6", source), (
+        "workspace bytes must be converted to MB before entering npu_memory "
+        "(column contract: aclnn/result.py NPU device workspace memory (MB))"
+    )
+    assert "npu_memory = workspace_size\n" not in source, "raw-bytes assignment regressed"

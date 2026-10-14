@@ -203,6 +203,8 @@ class InstanceBase(metaclass=ABCMeta):
         self._batch_summaries: Dict[str, Any] = {}
         # dl=3 缺字段提示的按例去重（派发期逐 case 打，deferred 重派/双池不重复）
         self._batch_relation_warned: set = set()
+        # -t/--ti 圈选时的传入序 key（None = 未圈选，按 CSV 行序）
+        self._selection_order_key = None
 
     @staticmethod
     def _read_existing_header(path: str):
@@ -941,6 +943,7 @@ class InstanceBase(metaclass=ABCMeta):
                 continue
             kept.append(tc)
         self.flatten_testcases = kept
+        self._apply_selection_order()
         count = getattr(self.switches, "selected_testcase_count", -1)
         if 0 < count < len(self.flatten_testcases):
             import random
@@ -948,6 +951,28 @@ class InstanceBase(metaclass=ABCMeta):
             logging.info(f"Selecting {count} cases from all testcases")
             all_indexes = random.sample(tuple(range(len(self.flatten_testcases))), k=count)
             self.flatten_testcases = [tc for idx, tc in enumerate(self.flatten_testcases) if idx in all_indexes]
+
+    def _apply_selection_order(self):
+        """-t/--ti 圈选时按传入参数顺序重排执行序（其余选择器仍按 CSV 序）。
+
+        key 同时存于 self._selection_order_key——通路 build_tasks 经
+        _execution_sorted 消费（aclnn/e2e 原先固定按 _csv_row_index 重排会抵消此处重排）。"""
+        names = list(get_global_storage().selected_testcases or [])
+        indexes = list(get_global_storage().selected_testcase_indexes or [])
+        if names:
+            order = {name: pos for pos, name in enumerate(names)}
+            self._selection_order_key = lambda tc: order.get(tc.testcase_name, len(order))
+            self.flatten_testcases.sort(key=self._selection_order_key)
+            logging.info("Testcases reordered by -t argument order")
+        elif indexes:
+            order = {idx: pos for pos, idx in enumerate(indexes)}
+            self._selection_order_key = lambda tc: order.get(getattr(tc, "_csv_row_index", -1), len(order))
+            self.flatten_testcases.sort(key=self._selection_order_key)
+            logging.info("Testcases reordered by --ti argument order")
+
+    def _execution_sorted(self, testcases):
+        """通路 build_tasks 统一排序入口：-t/--ti 圈选时按传入序，否则按 CSV 行序。"""
+        return execution_sorted(self._selection_order_key, testcases)
 
     def _validate_only(self):
         self.parse_cases()
@@ -1306,6 +1331,16 @@ class InstanceBase(metaclass=ABCMeta):
 
 
 # ── 聚合层选择器（parse_cases 侧消费）──
+
+
+def execution_sorted(selection_order_key, testcases):
+    """通路 build_tasks 统一排序——-t/--ti 圈选时按传入参数序，否则按 CSV 行序。
+
+    selection_order_key 为 None（未圈选/伪实例）时回退 CSV 行序，供 build_tasks
+    以 getattr(self, "_selection_order_key", None) 免实例化调用。"""
+    if selection_order_key is not None:
+        return sorted(testcases, key=selection_order_key)
+    return sorted(testcases, key=lambda t: getattr(t, "_csv_row_index", -1))
 
 
 def _check_testcase_rerun(testcase_struct: TestcaseBase) -> bool:
