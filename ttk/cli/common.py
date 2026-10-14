@@ -7,10 +7,24 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+import argparse
 import logging
 
 from ttk.cli.bridge import parse_cli_bool
 from ttk.remote import is_remote_configured
+
+
+def positive_int(value):
+    """--tc 取值语义：N 必须为正整数。非正数若放行会绕过抽样条件
+    （instance 侧仅在 0 < N < 总数时抽样，-1 为未启用哨兵），
+    静默退化为全量执行，故在解析期直接判为参数错误。"""
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {ivalue}")
+    return ivalue
 
 
 def _add_io_args(parser):
@@ -44,7 +58,12 @@ def _add_case_filter_args(parser):
     group.add_argument("--priority", metavar="LIST", help="Filter by priority, e.g. --priority=1,3 or --priority=1-3")
     group.add_argument("-t", "--testcase", metavar="NAMES", help="Specify testcase name(s), comma-separated")
     group.add_argument(
-        "--tc", "--testcase-count", type=int, dest="testcase_count", metavar="N", help="Randomly pick N test cases"
+        "--tc",
+        "--testcase-count",
+        type=positive_int,
+        dest="testcase_count",
+        metavar="N",
+        help="Randomly pick N test cases (positive integer; N >= case count runs all)",
     )
     group.add_argument(
         "--ti",

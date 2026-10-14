@@ -11,6 +11,8 @@
 
 from argparse import Namespace
 
+import pytest
+
 
 def test_testcase_filter_trims_spaces_and_ignores_empty_items():
     from ttk.cli.bridge import args_to_switches
@@ -29,3 +31,35 @@ def test_testcase_filter_trims_spaces_and_ignores_empty_items():
     )
 
     assert switches.selected_testcases == ["case_a", "case_b"]
+
+
+# ----------------------------------------------------------------------------
+# --tc 非正数回归：曾以 type=int 放行 0/负数，随后绕过 instance 侧
+# 0 < N < 总数 的抽样条件（-1 为未启用哨兵），静默退化为全量执行。
+# ----------------------------------------------------------------------------
+
+
+def _parse(argv):
+    from ttk.cli import build_parser
+
+    parser, _ = build_parser()
+    return parser.parse_args(argv)
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "-100"])
+def test_testcase_count_rejects_non_positive(raw):
+    with pytest.raises(SystemExit) as exc_info:
+        _parse(["kernel", "-i", "cases.csv", f"--tc={raw}"])
+    assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("raw", ["0.5", "abc"])
+def test_testcase_count_rejects_non_int(raw):
+    with pytest.raises(SystemExit) as exc_info:
+        _parse(["kernel", "-i", "cases.csv", f"--tc={raw}"])
+    assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("option", ["--tc", "--testcase-count"])
+def test_testcase_count_accepts_positive(option):
+    assert _parse(["kernel", "-i", "cases.csv", option, "5"]).testcase_count == 5
