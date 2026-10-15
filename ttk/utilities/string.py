@@ -65,24 +65,8 @@ def camel_to_snake(camel_name: str):
 
 
 def longest_match(match_str: str, match_list: List[str]) -> str:
-    """Longest common prefix of match_str and any member of match_list,
-    required to be a full member itself; "" otherwise."""
-
-    def lcp(str1, str2):
-        length, index = min(len(str1), len(str2)), 0
-        while index < length and str1[index] == str2[index]:
-            index += 1
-        return str1[:index]
-
-    if not match_list:
-        return ""
-
-    prefix = ""
-    for m in match_list:
-        candidate = lcp(match_str, m)
-        if len(candidate) > len(prefix):
-            prefix = candidate
-    return prefix if prefix in match_list else ""
+    """Return the longest registered prefix of match_str, or an empty string."""
+    return max((candidate for candidate in match_list if match_str.startswith(candidate)), key=len, default="")
 
 
 def render_table(data: List[Tuple[str, ...]]) -> str:
@@ -144,6 +128,8 @@ def render_frameless_table(data: list) -> str:
                 item2           2.2           3.3        4.4             3
     ----------------------------------------------------------------------
     """
+    if not data:
+        return ""
     min_cell_width = 10
     cols = len(data[0])
     cols_width = [min_cell_width] * cols

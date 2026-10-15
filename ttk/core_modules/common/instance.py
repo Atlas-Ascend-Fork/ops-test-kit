@@ -847,9 +847,10 @@ class InstanceBase(metaclass=ABCMeta):
         return available
 
     def _filter_unhealthy_devices(self, device_ids):
-        """DSMI 健康态过滤（仅在线板态）：IMPORTANT/CRITICAL/OFF 及未知健康码的卡
-        不进调度池（授权域/派发池/CSV 校验域同步收缩）。WARNING 视为可用；单卡
-        查询失败保留该卡；查询能力缺失（无驱动/.so——asys 同源层）打告警不做检查。"""
+        """DSMI 健康态过滤（仅在线板态）：CRITICAL/OFF 及未知健康码的卡
+        不进调度池（授权域/派发池/CSV 校验域同步收缩）。WARNING/IMPORTANT 视为
+        可用（IMPORTANT 打告警放行——挡单卡开发机过激进，结果可信度由告警留痕）；
+        单卡查询失败保留该卡；查询能力缺失（无驱动/.so——asys 同源层）打告警不做检查。"""
         if not device_ids:
             return ()
         if not self.switches.mode.is_online_board():
@@ -862,11 +863,14 @@ class InstanceBase(metaclass=ABCMeta):
         if states is None:
             logging.warning("Device health check skipped (DSMI unavailable); all detected devices scheduled")
             return ()
-        unhealthy = {
-            d: h
-            for d, h in states.items()
-            if h is not None and h not in (DSMI_HEALTH_STATE.OK, DSMI_HEALTH_STATE.WARNING)
-        }
+        schedulable = (DSMI_HEALTH_STATE.OK, DSMI_HEALTH_STATE.WARNING, DSMI_HEALTH_STATE.IMPORTANT)
+        important = {d for d, h in states.items() if h is DSMI_HEALTH_STATE.IMPORTANT}
+        if important:
+            logging.warning(
+                f"Device(s) with IMPORTANT health alarm scheduled anyway: {sorted(important)}; "
+                f"results may be unreliable (check dsmi_get_device_error)"
+            )
+        unhealthy = {d: h for d, h in states.items() if h is not None and h not in schedulable}
         if unhealthy:
             detail = {d: getattr(h, "name", h) for d, h in sorted(unhealthy.items())}
             logging.warning(f"Unhealthy device(s) excluded from scheduling: {detail}")

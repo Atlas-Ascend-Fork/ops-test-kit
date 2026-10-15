@@ -19,7 +19,6 @@ __all__ = ["shape_inference"]
 
 
 # Standard Packages
-import math
 from typing import Tuple, Union
 
 from ....utilities import is_shape, promote_scalar_shapes
@@ -33,12 +32,17 @@ def _produce_by_broadcast_rule(*input_shapes) -> tuple:
     def __get_axis(shape, minus_dim) -> int:
         return shape[len(shape) + minus_dim] if len(shape) + minus_dim >= 0 else 1
 
-    maximum_shape = []
+    broadcast_shape = []
     rank = max([len(shape) for shape in input_shapes])
     for dim in range(-rank, 0):
-        max_axis = max([__get_axis(shape, dim) for shape in input_shapes])
-        maximum_shape.append(max_axis)
-    return tuple(maximum_shape)
+        axes = [__get_axis(shape, dim) for shape in input_shapes]
+        known_axes = {axis for axis in axes if axis >= 0 and axis != 1}
+        if len(known_axes) > 1:
+            raise RuntimeError(
+                f"Cannot broadcast incompatible shapes {input_shapes}: dim {dim} has {sorted(known_axes)}"
+            )
+        broadcast_shape.append(next(iter(known_axes)) if known_axes else min(axes))
+    return tuple(broadcast_shape)
 
 
 def _elewise_check_input_parameters(args, output_num, relations):
@@ -159,66 +163,3 @@ def shape_inference(shapes: tuple, args: tuple, mode: str) -> tuple:
     if mode == "RANGE":
         return tuple(range_inference(shape) for shape in shapes)
     raise RuntimeError(f"UNKNOWN MODE {mode}")
-
-
-def transform(shape, cur_format, target_format):
-    """
-    Produce target format shape with original shape
-    :param shape:
-    :param cur_format:
-    :param target_format:
-    :return:
-    """
-    if cur_format in FORMAT_TRANSFORMS:
-        if target_format in FORMAT_TRANSFORMS[cur_format]:
-            return FORMAT_TRANSFORMS[cur_format][target_format](shape)
-        raise NotImplementedError(f"Cannot transform format {cur_format} to {target_format}")
-    raise NotImplementedError(f"Cannot transform format {cur_format} to any format including {target_format}")
-
-
-def _25Dinfer(before_c, c, after_c):
-    c1 = math.ceil(c / 16)
-    return (*before_c, c1, *after_c, 16)
-
-
-def _NHWC25Dinfer(shape: tuple):
-    if not len(shape) == 4:
-        raise RuntimeError(f"4D to 5D transformation only supports 4 dimension input, but received {shape}")
-    n, h, w, c = shape
-    return _25Dinfer((n,), c, (h, w))
-
-
-def _NDHWC25Dinfer(shape: tuple):
-    if len(shape) != 5:
-        raise RuntimeError(f"NDHWC to 6D transformation only supports 5 dimension input, but received {shape}")
-    n, d, h, w, c = shape
-    return _25Dinfer((n, d), c, (h, w))
-
-
-def _NCHW25Dinfer(shape: tuple):
-    if not len(shape) == 4:
-        raise RuntimeError(f"4D to 5D transformation only supports 4 dimension input, but received {shape}")
-    n, c, h, w = shape
-    return _25Dinfer((n,), c, (h, w))
-
-
-def _NWC25Dinfer(shape: tuple):
-    if not len(shape) == 3:
-        raise RuntimeError(f"3D to 5D transformation only supports 3 dimension input, but received {shape}")
-    n, w, c = shape
-    return _25Dinfer((n,), c, (1, w))
-
-
-def _NZinfer(shape: tuple):
-    if len(shape) < 2:
-        shape = (2 - len(shape)) * (1,) + shape
-    a, b = shape[-2:]
-    return shape[:-2] + (math.ceil(b / 16), math.ceil(a / 16), 16, 16)
-
-
-FORMAT_TRANSFORMS = {
-    "NHWC": {"NC1HWC0": _NHWC25Dinfer, "FRACTAL_NZ": _NZinfer},
-    "NCHW": {"NC1HWC0": _NCHW25Dinfer, "FRACTAL_NZ": _NZinfer},
-    "NWC": {"NC1HWC0": _NWC25Dinfer, "FRACTAL_NZ": _NZinfer},
-    "NDHWC": {"NDC1HWC0": _NDHWC25Dinfer, "FRACTAL_NZ": _NZinfer},
-}

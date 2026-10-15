@@ -113,7 +113,7 @@ def is_nchw_like(shape, format_: str) -> bool:
     """
     if len(shape) != 4:
         return False
-    return len(set(format_)) == 4 and all(c in format_ for c in "NCHW")
+    return len(format_) == 4 and all(c in format_ for c in "NCHW")
 
 
 def is_ndhwc_like(shape, format_: str) -> bool:
@@ -122,7 +122,7 @@ def is_ndhwc_like(shape, format_: str) -> bool:
     """
     if len(shape) != 5:
         return False
-    return len(set(format_)) == 5 and all(c in format_ for c in "NDCHW")
+    return len(format_) == 5 and all(c in format_ for c in "NDCHW")
 
 
 BLOCK_SIZE = 16  # AiCore cube block size.
@@ -235,7 +235,7 @@ def nd_shape_to_nz(nd_shape: Union[list, tuple], dtype: str = "float16", nz_shap
     n0 = resolve_c0(dtype, nz_shape)
     m1 = ceil_div(m, m0)
     n1 = ceil_div(n, n0)
-    return tuple(nd_shape[:-2] + (n1, m1, m0, n0))
+    return tuple(nd_shape[:-2]) + (n1, m1, m0, n0)
 
 
 def from_nc1hwc0(data, target_shape, target_format: str = "NCHW"):

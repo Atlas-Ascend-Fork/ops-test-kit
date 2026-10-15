@@ -379,14 +379,24 @@ class TestNestedShapes:
         assert case.flat_output_shapes == ((3, 4), (3, 4))
 
         case2 = _make_testcase(
-            input_shapes=(((3, 4), (5, 4)), (8,)),
+            input_shapes=(((3, 1), (1, 4)), (3, 4)),
             input_dtypes=(("float16", "float16"), "float16"),
             output_shapes="ELEWISE",
             output_dtypes=("float16",),
         )
         _validate(case2)
-        assert isinstance(case2.output_shapes, tuple)
-        assert len(case2.output_shapes) == 1
+        assert case2.output_shapes == ((3, 4),)
+
+        incompatible = _make_testcase(
+            input_shapes=(((3, 4), (5, 4)), (8,)),
+            input_dtypes=(("float16", "float16"), "float16"),
+            output_shapes="ELEWISE",
+            output_dtypes=("float16",),
+        )
+        _validate(incompatible)
+        assert not incompatible.is_valid
+        assert incompatible.fail_reason == "STC_OUTPUT_INFERENCE_FAILED"
+        assert incompatible.output_shapes == "ELEWISE"
 
     def test_precision_tolerances_and_ranges_broadcast(self):
         case = _make_testcase(

@@ -116,6 +116,7 @@ class TestNormalizeManualOutputBinaries:
         case = _make_testcase(output_shapes=output_shapes, output_dtypes=output_dtypes)
         case.manual_golden_binaries = value
         _validate(case)
+        assert case.is_valid
         assert case.manual_golden_binaries == expected
 
     def test_list_converted_to_tuple(self):
@@ -123,6 +124,7 @@ class TestNormalizeManualOutputBinaries:
         case = _make_testcase(output_shapes=((8,), (8,)), output_dtypes=("float16", "float16"))
         case.manual_golden_binaries = ["o1.bin", "o2.bin"]
         _validate(case)
+        assert case.is_valid
         assert isinstance(case.manual_golden_binaries, tuple)
 
     def test_invalid_type_rejected(self):
@@ -144,7 +146,7 @@ class TestValidateOutputBinariesFlat:
 
     分两组：
     - test_flat_valid: binaries 与 outputs 匹配 → is_valid 为真
-      （expected 为 True 表示仅检查 is_valid；为 tuple 表示同时检查字段值）
+      （expected 为 tuple 时额外检查字段值）
     - test_flat_rejected: binaries 与 outputs 不匹配 → is_valid 为 False
       （check_reason 为 True 表示同时检查 fail_reason）
     """
@@ -159,13 +161,12 @@ class TestValidateOutputBinariesFlat:
         ids=["flat-count-matches", "flat-with-none-output", "flat-trailing-none-padded"],
     )
     def test_flat_valid(self, output_shapes, output_dtypes, value, expected):
-        """验证 flat binaries 与 outputs 匹配时 is_valid 为真（可选检查字段值）。"""
+        """验证 flat binaries 与 outputs 匹配时 is_valid 为真（expected 为 tuple 时额外检查字段值）。"""
         case = _make_testcase(output_shapes=output_shapes, output_dtypes=output_dtypes)
         case.manual_golden_binaries = value
         _validate(case)
-        if expected is True:
-            assert case.is_valid
-        else:
+        assert case.is_valid
+        if expected is not True:
             assert case.manual_golden_binaries == expected
 
     @pytest.mark.parametrize(
@@ -213,6 +214,7 @@ class TestValidateOutputBinariesNested:
         case = _make_testcase(output_shapes=output_shapes, output_dtypes=output_dtypes)
         case.manual_golden_binaries = value
         _validate(case)
+        assert case.is_valid
         assert case.manual_golden_binaries == expected
 
     @pytest.mark.parametrize(
@@ -273,6 +275,7 @@ class TestReshapeOutputBinaries:
         case = _make_testcase(output_shapes=output_shapes, output_dtypes=output_dtypes)
         case.manual_golden_binaries = value
         _validate(case)
+        assert case.is_valid
         assert case.manual_golden_binaries == expected
 
 
@@ -308,6 +311,7 @@ class TestFlatOutputBinariesProperties:
         case = _make_testcase(output_shapes=output_shapes, output_dtypes=output_dtypes)
         case.manual_golden_binaries = value
         _validate(case)
+        assert case.is_valid
         assert case.flat_manual_golden_binaries == expected
 
     def test_flat_output_none_when_not_set(self):

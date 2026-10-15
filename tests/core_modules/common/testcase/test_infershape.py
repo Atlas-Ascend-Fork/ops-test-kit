@@ -7,9 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""Tests for ttk.core_modules.common.testcase.infershape: broadcast/reduce/range/transform."""
-
-import math
+"""Tests for ttk.core_modules.common.testcase.infershape: broadcast/reduce/range."""
 
 import pytest
 
@@ -18,7 +16,6 @@ from ttk.core_modules.common.testcase.infershape import (
     range_inference,
     reduce,
     shape_inference,
-    transform,
 )
 
 
@@ -28,11 +25,21 @@ from ttk.core_modules.common.testcase.infershape import (
         (((8, 8), (8, 8)), ((8, 8),)),
         (((4, 1), (1, 8)), ((4, 8),)),
         (((8,), (4, 8)), ((4, 8),)),
-        (((4, 8), (3, 8)), ((4, 8),)),
+        (((0,), (1,)), ((0,),)),
+        (((5,), (1,)), ((5,),)),
+        (((1,), (1,)), ((1,),)),
+        (((-1, 3), (1, 3)), ((-1, 3),)),
+        (((-1,), (-1,)), ((-1,),)),
+        (((0, 2), (1,)), ((0, 2),)),
     ],
 )
 def test_elewise_broadcast(shapes, expected):
     assert elewise(*shapes) == expected
+
+
+def test_elewise_incompatible_dims_raise():
+    with pytest.raises(RuntimeError, match="Cannot broadcast incompatible shapes"):
+        elewise((4, 8), (3, 8))
 
 
 def test_elewise_multi_output_with_relations():
@@ -94,33 +101,3 @@ def test_shape_inference_dispatch(mode, shapes, args, expected):
 def test_shape_inference_unknown_mode():
     with pytest.raises(RuntimeError, match="UNKNOWN MODE"):
         shape_inference(((4,),), (None,), "BOGUS")
-
-
-@pytest.mark.parametrize(
-    ("shape", "cur", "target", "expected"),
-    [
-        ((1, 8, 8, 32), "NHWC", "NC1HWC0", (1, 2, 8, 8, 16)),
-        ((1, 32, 8, 8), "NCHW", "NC1HWC0", (1, 2, 8, 8, 16)),
-        ((1, 8, 32), "NWC", "NC1HWC0", (1, 2, 1, 8, 16)),
-        ((1, 2, 8, 8, 32), "NDHWC", "NDC1HWC0", (1, 2, 2, 8, 8, 16)),
-        ((2, 3), "NHWC", "FRACTAL_NZ", (1, 1, 16, 16)),
-        ((1, 5, 2, 3), "NCHW", "FRACTAL_NZ", (1, 5, 1, 1, 16, 16)),
-    ],
-)
-def test_transform_formats(shape, cur, target, expected):
-    assert transform(shape, cur, target) == expected
-
-
-def test_transform_unknown_source_raise():
-    with pytest.raises(NotImplementedError, match="Cannot transform format"):
-        transform((1, 2), "BOGUS", "NC1HWC0")
-
-
-def test_transform_4d_infer_requires_4d():
-    with pytest.raises(RuntimeError, match="4D to 5D"):
-        transform((1, 2, 3), "NHWC", "NC1HWC0")
-
-
-def test_transform_c_ceil_matches_math_ceil():
-    c = 17
-    assert transform((1, 8, 8, c), "NHWC", "NC1HWC0")[1] == math.ceil(c / 16)
