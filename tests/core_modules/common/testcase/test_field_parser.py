@@ -23,6 +23,8 @@ from ttk.core_modules.common.testcase.field_parser import (
     process_eval,
     scalar_nested,
     shape_stride,
+    shapelike_dyn_nested,
+    shapelike_float_nested,
     shapelike_float_signed_nested,
     shapelike_stc_ex,
     shapelike_stc_nested,
@@ -46,6 +48,9 @@ class TestShapelikeStcNested:
             ("(((3,3),(3,2)),(3,5))", (((3, 3), (3, 2)), (3, 5))),
             ("((3,5),)", ((3, 5),)),
             ("(((3,3),(3,2)),None,(3,5))", (((3, 3), (3, 2)), None, (3, 5))),
+            ("((None, (2,)), (4,))", ((None, (2,)), (4,))),
+            ("(((2,), None), (4,))", (((2,), None), (4,))),
+            ("((None, (2,), None),)", ((None, (2,), None),)),
             ("()", ()),
             ("((3,),)", ((3,),)),
             ("((5,),)", ((5,),)),
@@ -55,6 +60,9 @@ class TestShapelikeStcNested:
             "tensor-list-plus-tensor",
             "single-tensor",
             "with-none",
+            "tensor-list-leading-none",
+            "tensor-list-trailing-none",
+            "tensor-list-multi-none",
             "empty-tuple",
             "scalar-shape",
             "1d-shape",
@@ -69,8 +77,10 @@ class TestShapelikeStcNested:
         [
             "((3.5,),)",
             "('abc',)",
+            "((None, None),)",
+            "((3, (2,)),)",
         ],
-        ids=["invalid-shape-float", "invalid-shape-string"],
+        ids=["invalid-shape-float", "invalid-shape-string", "all-none-group-ambiguous", "mixed-scalar-and-shape"],
     )
     def test_parse_raises(self, text):
         """验证非法 shape（float / string）→ TypeError。"""
@@ -154,6 +164,9 @@ class TestShapelikeFloatSignedNested:
             ("(((None, 1.0), (-1.0, 1.0)), (0.0, 5.0))", (((None, 1.0), (-1.0, 1.0)), (0.0, 5.0))),
             ("((-1.0, 1.0),)", ((-1.0, 1.0),)),
             ("(((0.0, 1.0), None), (0.0, 1.0))", (((0.0, 1.0), None), (0.0, 1.0))),
+            ("((None, (None, 1.0)), (-1.0, 1.0))", ((None, (None, 1.0)), (-1.0, 1.0))),
+            ("(((None, 1.0), None), (0.0, 5.0))", (((None, 1.0), None), (0.0, 5.0))),
+            ("((None, None),)", ((None, None),)),
             ("()", ()),
             ("((0, 1),)", ((0, 1),)),
         ],
@@ -162,6 +175,9 @@ class TestShapelikeFloatSignedNested:
             "nested-tensor-list",
             "single-range",
             "with-none-element",
+            "tensor-list-leading-none",
+            "tensor-list-trailing-none",
+            "all-none-group-stays-leaf",
             "empty-tuple",
             "int-values",
         ],
@@ -182,6 +198,54 @@ class TestShapelikeFloatSignedNested:
         """验证非法字符串值 → TypeError。"""
         with pytest.raises(TypeError):
             shapelike_float_signed_nested(text)
+
+
+class TestShapelikeDynNested:
+    """Tests for shapelike_dyn_nested parser（动态 shape 嵌套，允许 -1/-2）。
+
+    - test_parse: 组内 None 槽位与顺序无关
+    - test_parse_raises: 首位 None 组内非法动态维（非 -1/-2 负数）→ ValueError
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("((None, (-1, 2)), (4,))", ((None, (-1, 2)), (4,))),
+            ("(((2, -1), None), (4,))", (((2, -1), None), (4,))),
+        ],
+        ids=["tensor-list-leading-none", "tensor-list-trailing-none"],
+    )
+    def test_parse(self, text, expected):
+        """验证 shapelike_dyn_nested 对组内 None 槽位（任意位置）的解析结果。"""
+        assert shapelike_dyn_nested(text) == expected
+
+    def test_parse_raises(self):
+        with pytest.raises(ValueError, match="dynamic shape dim"):
+            shapelike_dyn_nested("((None, (-3,)),)")
+
+
+class TestShapelikeFloatNested:
+    """Tests for shapelike_float_nested parser（正浮点 range 嵌套）。
+
+    - test_parse: 组内 None 槽位与顺序无关
+    - test_parse_raises: 组内标量与 range 混合 → TypeError
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("((None, (0.1, 0.2)), (0.3, 0.4))", ((None, (0.1, 0.2)), (0.3, 0.4))),
+            ("(((0.1, 0.2), None), (0.3, 0.4))", (((0.1, 0.2), None), (0.3, 0.4))),
+        ],
+        ids=["tensor-list-leading-none", "tensor-list-trailing-none"],
+    )
+    def test_parse(self, text, expected):
+        """验证 shapelike_float_nested 对组内 None 槽位（任意位置）的解析结果。"""
+        assert shapelike_float_nested(text) == expected
+
+    def test_parse_raises(self):
+        with pytest.raises(TypeError):
+            shapelike_float_nested("((3, (0.1,)),)")
 
 
 class TestShapeStride:

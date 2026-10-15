@@ -33,8 +33,10 @@ def test_framework_of_identifies_numpy_torch_and_custom():
 
     assert framework_of(numpy.add) == "numpy"  # ufunc
     assert framework_of(numpy.isposinf) == "numpy"  # 非 ufunc
+    assert framework_of(numpy.linalg.norm) == "numpy"  # 子模块函数 (numpy.linalg)
     assert framework_of(torch.add) == "torch"  # 顶层 builtin
-    assert framework_of(torch.ops.aten.amax) == "torch"  # OpOverloadPacket
+    assert framework_of(torch.ops.aten.amax) == "torch"  # OpOverloadPacket (torch._ops.aten)
+    assert framework_of(torch.nn.functional.relu) == "torch"  # 子模块函数
     assert framework_of(lambda x: x) is None  # 自定义 lambda
 
     def g(x, **kw):
@@ -48,6 +50,53 @@ def test_framework_of_identifies_numpy_torch_and_custom():
 
     assert framework_of(C) is None  # type(class)
     assert framework_of(C()) is None  # instance
+
+
+def _func_with_module(name):
+    def f(x):
+        return x
+
+    f.__module__ = name
+    return f
+
+
+@pytest.mark.parametrize(
+    ("module_name", "expected"),
+    [
+        # 根包等值与根包加点子模块 → 对应框架（tf/tensorflow 均映射 tf）
+        ("torch", "torch"),
+        ("torch.nn.functional", "torch"),
+        ("torch._ops.aten", "torch"),
+        ("numpy", "numpy"),
+        ("numpy.linalg", "numpy"),
+        ("tf", "tf"),
+        ("tf.raw_ops", "tf"),
+        ("tensorflow", "tf"),
+        ("tensorflow.python.ops", "tf"),
+        # 相似名（裸前缀、无点）→ custom
+        ("torchair", None),
+        ("torch_npu", None),
+        ("torchvision", None),
+        ("tfrecord", None),
+        ("tf_helpers", None),
+        ("numpy_helpers", None),
+        ("tensorflow_helpers", None),
+        ("numpyx", None),
+    ],
+)
+def test_framework_of_namespace_boundaries(module_name, expected):
+    """命名空间边界：根包等值/根包加点子模块才属框架，裸前缀相似名归 custom。
+
+    函数与 callable 实例两种形态断言（__module__ / type(obj).__module__）。
+    """
+    assert framework_of(_func_with_module(module_name)) == expected
+
+    class C:
+        def __call__(self, x):
+            return x
+
+    C.__module__ = module_name
+    assert framework_of(C()) == expected
 
 
 def test_bind_by_name_partial_split_init_and_call():

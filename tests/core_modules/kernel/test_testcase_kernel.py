@@ -357,6 +357,17 @@ class TestNestedShapes:
         assert case.flat_input_shapes == ((3, 4), (5, 4), (8,))
         assert case.flat_input_dtypes == ("float16", "float16", "float16")
 
+    def test_nested_inputs_leading_none_slot(self):
+        case = _make_testcase(
+            input_shapes=((None, (3, 4)), (8,)),
+            input_dtypes=(("float16", "float16"), "float16"),
+            input_ori_shapes=((None, (3, 4)), (8,)),
+        )
+        _validate(case)
+        # 组内首位 None 槽仍识别为 TensorList，分布/展平元数据与顺序无关
+        assert case.tensor_list_distribution == (2, 0, 0)
+        assert case.flat_input_shapes == (None, (3, 4), (8,))
+
     def test_nested_inputs_compressed_dtypes(self):
         case = _make_testcase(
             input_shapes=(((3, 4), (5, 4)), (8,)),

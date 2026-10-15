@@ -33,8 +33,14 @@ from ttk.utilities.container import (
         (((3, 3), (3, 5)), (0, 0)),
         # 两个 tensor_list → (2, 3)
         ((((1,), (2,)), ((3,), (4,), (5,))), (2, 3)),
+        # 首位 None 组照常计数（None 槽位与顺序无关） → (2, 0)
+        (((None, (2,)), (4,)), (2, 0)),
+        # 组内多 None 槽 → (3,)
+        (((None, (2,), None),), (3,)),
+        # 全 None 组歧义保持叶子 → (0,)
+        (((None, None),), (0,)),
     ],
-    ids=["flat", "list+list"],
+    ids=["flat", "list+list", "leading-none", "multi-none", "all-none-leaf"],
 )
 def test_infer_distribution_core_patterns(shapes, expected):
     """推断嵌套结构的 tensor list 分布：flat=0，list=元素数，None=0。"""
@@ -51,8 +57,12 @@ def test_infer_distribution_core_patterns(shapes, expected):
         (((3, 3), (3, 5)), ((3, 3), (3, 5))),
         # 全嵌套展平
         ((((1,), (2,)), ((3,), (4,))), ((1,), (2,), (3,), (4,))),
+        # 首位 None 组照常展开，None 槽位保留
+        (((None, (2,)), (4,)), (None, (2,), (4,))),
+        # 全 None 组保持叶子（歧义语法不扩展）
+        (((None, None),), ((None, None),)),
     ],
-    ids=["flat", "all-nested"],
+    ids=["flat", "all-nested", "leading-none-expanded", "all-none-kept-leaf"],
 )
 def test_flatten_core_patterns(shapes, expected):
     """展平嵌套序列：flat 不变，一层/全嵌套展平，None 保留。"""

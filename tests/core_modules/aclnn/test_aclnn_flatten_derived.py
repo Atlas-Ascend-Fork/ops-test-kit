@@ -23,3 +23,11 @@ def test_flat_tensors_derives_from_tensors():
     assert list(flat) == [t1, t2, t3]  # deep_flatten 展平,顺序保持
     # 缓存生效:再读同一对象
     assert case.flat_tensors is flat
+
+
+def test_tensor_list_dist_leading_none_group():
+    """首位 None 组的派生元数据顺序无关:dist=(2,0),flat 展开保留 None 槽。"""
+    case = TestcaseAclnn()
+    case.tensor_view_shapes = ((None, (2,)), (4,))
+    assert case.tensor_list_dist == (2, 0)
+    assert case.flat_tensor_view_shapes == (None, (2,), (4,))

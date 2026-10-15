@@ -1468,12 +1468,9 @@ class TestcaseKernel(TestcaseBase):
         if not shapes or not isinstance(shapes, tuple):
             return False
         for element in shapes:
-            if (
-                element is not None
-                and isinstance(element, tuple)
-                and len(element) > 0
-                and isinstance(element[0], tuple)
-            ):
+            if element is None:
+                continue
+            if isinstance(element, tuple) and any(isinstance(sub, tuple) for sub in element):
                 return True
         return False
 

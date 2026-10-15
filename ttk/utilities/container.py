@@ -60,27 +60,34 @@ def deep_flatten(sequence: Sequence) -> tuple:
     return tuple(result)
 
 
+def _is_tensor_list_group(element) -> bool:
+    """A slot is a TensorList group when ANY sub-element is a shape/range
+    sequence; None slots are legal at any position (incl. leading), so the
+    first element alone must not decide. All-None or empty groups stay
+    ambiguous and are treated as leaves.
+    """
+    return isinstance(element, (tuple, list)) and any(isinstance(sub, (tuple, list)) for sub in element)
+
+
 def flatten_groups(nested) -> tuple:
     """Flatten one level of TensorList grouping, preserving leaf tuples.
 
     Unlike deep_flatten which recursively flattens everything, this preserves
-    leaf tuples (like (3,3)) — a top element whose FIRST item is a container
-    is a group and gets expanded; otherwise it is a leaf (shape/range/None)
-    and is kept as-is. Designed for shape/range declaration columns.
+    leaf tuples (like (3,3)) — a top element that contains any container
+    sub-element is a group and gets expanded; otherwise it is a leaf
+    (shape/range/None) and is kept as-is. Designed for shape/range
+    declaration columns.
 
     (((3,3),(3,2)),(3,5)) → ((3,3),(3,2),(3,5))
     ((8,16),(32,)) → ((8,16),(32,))  # no nested groups, preserved
-    None values are preserved.
+    None values are preserved, including None slots inside groups.
     """
     flat = []
     for element in nested:
         if element is None:
             flat.append(None)
-        elif isinstance(element, (tuple, list)) and len(element) > 0:
-            if isinstance(element[0], (tuple, list)):
-                flat.extend(element)
-            else:
-                flat.append(element)
+        elif _is_tensor_list_group(element):
+            flat.extend(element)
         else:
             flat.append(element)
     return tuple(flat)
@@ -90,7 +97,7 @@ def infer_list_distribution_from_nesting(nested):
     """Infer tensor_list_distribution from nested structure.
 
     Each top-level element:
-      - tuple/list of shapes (tuple-of-tuples) → TensorList, count = len
+      - tuple/list containing shape/range sub-sequences → TensorList, count = len
       - single shape (tuple-of-ints) or None → single tensor, count = 0
 
     Example: (((3,3),(3,2)),(3,5)) → (2, 0)
@@ -99,11 +106,8 @@ def infer_list_distribution_from_nesting(nested):
     for element in nested:
         if element is None:
             distribution.append(0)
-        elif isinstance(element, (tuple, list)) and len(element) > 0:
-            if isinstance(element[0], (tuple, list)):
-                distribution.append(len(element))
-            else:
-                distribution.append(0)
+        elif _is_tensor_list_group(element):
+            distribution.append(len(element))
         else:
             distribution.append(0)
     return tuple(distribution)

@@ -28,6 +28,7 @@ from ttk.core_modules.common.plugin import (
     get_plugin_function,
     get_spec_class_meta,
 )
+from ttk.core_modules.common.plugin.custom_plugin_scanner import PluginScanner
 from ttk.core_modules.common.plugin.loader import clear_plugin_cache
 
 _EXAMPLES = Path(__file__).resolve().parents[4] / "ttk" / "core_modules" / "common" / "plugin" / "examples"
@@ -79,6 +80,56 @@ class TestGetPluginFunction:
         """旧系统 level 域为 kernel/aclnn/e2e；越界 level 抛 ValueError。"""
         with pytest.raises(ValueError, match="Invalid level type"):
             get_plugin_function("any_op", "golden", "geir", str(tmp_path))
+
+    @pytest.mark.parametrize(
+        ("decl", "func_name"),
+        [
+            ("__golden__ = {REG}", "plain"),
+            ("__golden__: dict = {REG}", "annotated"),
+            ("alias = __golden__ = {REG}", "chained_not_first"),
+            ("__golden__ = alias = {REG}", "chained_first"),
+        ],
+        ids=["plain-assign", "annotated-assign", "chained-not-first-target", "chained-first-target"],
+    )
+    def test_declaration_assignment_forms(self, tmp_path, decl, func_name):
+        """注册声明的合法赋值形态均被发现：普通 / 类型注解 / 链式赋值（首/非首目标）。
+
+        IDE 类型检查器会给注册字典自动加注解（AnnAssign），漏识别会使插件
+        静默失效并回退默认 golden。
+        """
+        body = (
+            "def plain(x, **kwargs):\n    return x\n\n"
+            "def annotated(x, **kwargs):\n    return x\n\n"
+            "def chained_not_first(x, **kwargs):\n    return x\n\n"
+            "def chained_first(x, **kwargs):\n    return x\n\n"
+        )
+        reg = f'{{"kernel": {{"decl_op": "{func_name}"}}}}'
+        (tmp_path / "decls.py").write_text(body + decl.replace("{REG}", reg) + "\n")
+        func = get_plugin_function("decl_op", "golden", "kernel", str(tmp_path))
+        assert func is not None
+        assert func.__name__ == func_name
+
+    @pytest.mark.parametrize(
+        "decl",
+        [
+            "__golden__: dict",
+            '__golden__ = "not-a-dict"',
+        ],
+        ids=["annotation-only", "non-dict-value"],
+    )
+    def test_declaration_ignored_forms(self, tmp_path, decl):
+        """仅注解未赋值与非字典声明仍忽略。"""
+        (tmp_path / "ignored.py").write_text(decl + "\n")
+        assert get_plugin_function("decl_op", "golden", "kernel", str(tmp_path)) is None
+
+    def test_declaration_scan_does_not_execute_module(self, tmp_path):
+        """AST 扫描阶段不执行插件模块（模块级副作用不触发，注册表仍命中）。"""
+        (tmp_path / "side_effect.py").write_text(
+            'raise RuntimeError("must not execute")\n\n__golden__ = {"kernel": {"side_op": "plain"}}\n'
+        )
+        scanner = PluginScanner(str(tmp_path), "golden", "__golden__", "kernel")
+        result = scanner.scan()
+        assert "side_op" in result
 
     def test_plugin_path_forms_equivalent(self):
         """str / (Path,) / [str] 同目录输入等价且共享缓存条目。"""

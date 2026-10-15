@@ -19,6 +19,7 @@ from ttk.core_modules.framework_api.api_model import APIParamInfo, ParamInfo, sp
 from ttk.core_modules.framework_api.torch.npu_declaration import _normalize_npu_type, _parse_npu_declaration
 from ttk.core_modules.framework_api.torch.param_extractor import (
     _MANUAL_OVERRIDES,
+    _annotation_to_type,
     _infer_type_from_name,
     _infer_type_from_value,
     _parse_params_from_signature,
@@ -255,6 +256,83 @@ class TestExtractTorchApi:
         assert len(info.overloads) >= 2
         assert info.match_overload(2)[0]
         assert info.match_overload(1)[0]
+
+
+# == Sequence 注解 origin ====================================================
+
+
+class TestSequenceAnnotationOrigin:
+    """序列注解归一化:list/tuple/Sequence(typing 与 collections.abc 两种形态,
+    含 Optional 包裹)统一按元素类型产出 tuple of xxx。"""
+
+    @pytest.mark.parametrize(
+        ("annotation", "expected"),
+        [
+            ("typing.Sequence[torch.Tensor]", "tuple of Tensors"),
+            ("typing.Sequence[int]", "tuple of ints"),
+            ("typing.Sequence[float]", "tuple of floats"),
+            ("abc.Sequence[int]", "tuple of ints"),
+            ("typing.Optional[typing.Sequence[torch.Tensor]]", "tuple of Tensors"),
+            ("typing.Optional[typing.Sequence[int]]", "tuple of ints"),
+            ("list[torch.Tensor]", "tuple of Tensors"),
+            ("typing.List[torch.Tensor]", "tuple of Tensors"),
+            ("tuple[int]", "tuple of ints"),
+            ("typing.Tuple[int]", "tuple of ints"),
+        ],
+        ids=[
+            "typing-seq-tensor",
+            "typing-seq-int",
+            "typing-seq-float",
+            "abc-seq-int",
+            "optional-seq-tensor",
+            "optional-seq-int",
+            "builtin-list-tensor",
+            "typing-list-tensor",
+            "builtin-tuple-int",
+            "typing-tuple-int",
+        ],
+    )
+    def test_annotation_to_type_sequence_origins(self, annotation, expected):
+        """_annotation_to_type 对 Sequence 各形态与 list/tuple 同等归一化。"""
+        import collections.abc
+        import typing
+
+        import torch
+
+        ns = {"typing": typing, "abc": collections.abc, "torch": torch}
+        ann = eval(annotation, ns)  # noqa: S307 测试内受控求值
+        assert _annotation_to_type(ann) == expected
+
+    @pytest.mark.parametrize(
+        ("param_name", "annotation", "expected"),
+        [
+            ("seq", "Sequence[Tensor]", "tuple of Tensors"),
+            ("weights", "Optional[Sequence[Tensor]]", "tuple of Tensors"),
+            ("offsets", "Sequence[int]", "tuple of ints"),
+            ("bins", "Sequence[float]", "tuple of floats"),
+            ("seq", "List[Tensor]", "tuple of Tensors"),
+        ],
+        ids=["seq-tensor", "optional-tensor", "offsets-int", "bins-float", "list-control"],
+    )
+    def test_extract_api_params_sequence_annotation(self, param_name, annotation, expected):
+        """extract_api_params 端到端:Sequence 注解按声明产出序列类型。
+
+        参数名避开命名启发式表(tensors 等会猜中同类型,无法区分注解解析与名字兜底)。"""
+        try:
+            import torch
+        except ImportError:
+            pytest.skip("torch not available")
+        import typing
+
+        ns = {"Sequence": typing.Sequence, "Optional": typing.Optional, "List": typing.List, "Tensor": torch.Tensor}
+        exec(f"def api_func({param_name}: {annotation}):\n    return {param_name}", ns)  # noqa: S102 测试内受控执行
+        torch._ttk_sequence_repro_api = ns["api_func"]
+        try:
+            info = extract_api_params("torch._ttk_sequence_repro_api")
+        finally:
+            del torch._ttk_sequence_repro_api
+        assert info is not None
+        assert info.params[0].type == expected
 
 
 # == APIParamInfo multi-overload =============================================

@@ -242,6 +242,9 @@ def from_nc1hwc0(data, target_shape, target_format: str = "NCHW"):
     """NC1HWC0 (C0-padded) -> NCHW-like, tail C padding stripped."""
     if not is_nchw_like(target_shape, target_format):
         raise RuntimeError(f"shape: {target_shape} of format {target_format} is not NCHW-like.")
+    if data.size == 0 and 0 in target_shape:
+        # 空张量（零元素、逻辑 shape 含零维）无块可拼、无数据需转置
+        return numpy.empty(target_shape, dtype=data.dtype)
     fhd_shape = data.shape
     pad = 1 + (target_shape[target_format.index("C")] - 1) % fhd_shape[-1]
     main_block = data[:, : fhd_shape[1] - 1, :, :, :]  # main block
@@ -268,6 +271,9 @@ def from_ndc1hwc0(data, target_shape, target_format: str = "NDCHW"):
     """NDC1HWC0 (C0-padded) -> NDCHW-like, tail C padding stripped."""
     if not is_ndhwc_like(target_shape, target_format):
         raise RuntimeError(f"shape: {target_shape} of format {target_format} is not NDCHW-like.")
+    if data.size == 0 and 0 in target_shape:
+        # 空张量（零元素、逻辑 shape 含零维）无块可拼、无数据需转置
+        return numpy.empty(target_shape, dtype=data.dtype)
     shd_shape = data.shape
     pad = 1 + (target_shape[target_format.index("C")] - 1) % shd_shape[-1]
     main_block = data[:, :, : shd_shape[2] - 1, :, :, :]
@@ -310,6 +316,9 @@ def from_fractal_nz(data, target_shape):
     (A, M, (N1-1) *N0) + (A, M, pad_n) -> (A, M, (N1-1) *N0 + pad_n) -> (A, M, N)
     (A, M, N) -> (A0, A1, A2, ..., An, M, N)
     """
+    if data.size == 0 and 0 in target_shape:
+        # 空张量（零元素、逻辑 shape 含零维）无块可拼、无数据需转置
+        return numpy.empty(target_shape, dtype=data.dtype)
     if len(data.shape) == 4:
         data = numpy.reshape(data, (1,) + data.shape)
     nd_shape = (1,) + tuple(target_shape)
@@ -597,7 +606,7 @@ FORMAT_TRANSFORMS = {
     "HWCN": {"NC1HWC0": to_nc1hwc0, "FRACTAL_Z": to_fractal_z, "FRACTAL_Z_C04": to_fractal_z_c04},
     "NDHWC": {"NDC1HWC0": to_ndc1hwc0, "FRACTAL_Z_3D": to_fractal_z_3d},
     "NCDHW": {"NDC1HWC0": to_ndc1hwc0, "FRACTAL_Z_3D": to_fractal_z_3d},
-    "DHWCN": {"NC1HWC0": to_ndc1hwc0, "FRACTAL_Z_3D": to_fractal_z_3d},
+    "DHWCN": {"NDC1HWC0": to_ndc1hwc0, "FRACTAL_Z_3D": to_fractal_z_3d},
     "ND": {"FRACTAL_NZ": nd_to_fractal_nz, "FRACTAL_Z": nd_to_fractal_z, "FRACTAL_ZN_RNN": nd_to_fractal_z},
     # revert
     "NC1HWC0": {

@@ -528,6 +528,7 @@ def _annotation_to_type(annotation) -> str:
     """
     if annotation is None:
         return ""
+    import collections.abc
     import types as _types
     import typing
 
@@ -541,7 +542,9 @@ def _annotation_to_type(annotation) -> str:
         args = getattr(annotation, "__args__", ())
         non_none = [a for a in args if a is not type(None)]
         return _annotation_to_type(non_none[0]) if non_none else "Tensor"
-    if origin in (list, tuple, typing.List, typing.Tuple, typing.Sequence):
+    # 序列注解识别:list/tuple 的 origin 即 list/tuple(typing.List/Tuple 亦然),
+    # 而 typing.Sequence[T] 与 collections.abc.Sequence[T] 的 origin 是 collections.abc.Sequence。
+    if origin in (list, tuple, collections.abc.Sequence):
         return _sequence_annotation_to_type(annotation)
     scalar = _SCALAR_ANNOTATION_TYPES.get(annotation)
     if scalar:

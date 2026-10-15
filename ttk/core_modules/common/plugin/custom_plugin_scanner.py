@@ -99,15 +99,22 @@ class PluginScanner:
             return {}
 
     def _find_plugin_declaration(self, tree: ast.AST) -> ast.Dict:
-        """Find __golden__ or __input__ declaration"""
+        """Find __golden__ or __input__ declaration.
+
+        普通赋值检查全部目标（链式赋值 alias = __golden__ = {...} 的非首
+        目标同样合法）；带类型注解的赋值（__golden__: dict = {...}）为
+        AnnAssign 单目标。仅注解未赋值（无 value）与非字典值仍忽略。
+        """
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == self.field_name
-                and isinstance(node.value, ast.Dict)
-            ):
-                return node.value
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets = [node.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id == self.field_name and isinstance(node.value, ast.Dict):
+                    return node.value
         return None
 
     def _parse_operators_dict(self, dict_node: ast.Dict) -> Dict[str, str]:

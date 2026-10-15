@@ -107,8 +107,16 @@ def golden_mode(testcase, switches) -> str:
     return getattr(testcase, "golden_mode_override", None) or getattr(switches, "golden_mode", None) or "Enable"
 
 
+_FRAMEWORK_ROOTS = {"numpy": "numpy", "torch": "torch", "tf": "tf", "tensorflow": "tf"}
+
+
 def _framework_of(func) -> Optional[str]:
     """Classify a callable by its framework: 'numpy'/'torch'/'tf'/None (custom)。
+
+    Namespace matching is root-package exact or dot-prefixed submodule
+    (``mod == root or mod.startswith(root + '.')``) — a bare startswith would
+    swallow look-alike modules: torchair/torch_npu → torch,
+    tf_helpers/tfrecord → tf, numpy_helpers → numpy.
 
     Caveats (verified empirically — do NOT simplify):
     - numpy ufunc has no ``__module__`` → must use getattr fallback.
@@ -118,12 +126,9 @@ def _framework_of(func) -> Optional[str]:
     """
     for obj in (func, type(func)):
         mod = getattr(obj, "__module__", "") or ""
-        if mod.startswith("numpy"):
-            return "numpy"
-        if mod.startswith("torch"):
-            return "torch"
-        if mod.startswith(("tensorflow", "tf")):
-            return "tf"
+        for root, framework in _FRAMEWORK_ROOTS.items():
+            if mod == root or mod.startswith(root + "."):
+                return framework
     if isinstance(func, numpy.ufunc):
         return "numpy"
     return None

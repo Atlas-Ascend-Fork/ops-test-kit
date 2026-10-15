@@ -138,6 +138,51 @@ def test_nd_to_fractal_nz_4d_and_back():
     np.testing.assert_array_equal(from_fractal_nz(fractal, (2, 5, 4, 7)), data)
 
 
+@pytest.mark.parametrize(
+    ("shape", "ori_format"),
+    [
+        ((0, 5), "ND"),
+        ((5, 0), "ND"),
+        ((0, 0), "ND"),
+        ((0, 3, 4, 5), "NCHW"),
+        ((2, 0, 4, 5), "NCHW"),
+        ((2, 3, 0, 5), "NCHW"),
+        ((2, 3, 4, 0), "NCHW"),
+        ((0, 3, 2, 4, 5), "NCDHW"),
+        ((2, 0, 2, 4, 5), "NCDHW"),
+        ((2, 3, 0, 4, 5), "NCDHW"),
+        ((2, 3, 2, 0, 5), "NCDHW"),
+        ((2, 3, 2, 4, 0), "NCDHW"),
+    ],
+    ids=[
+        "nz-m0",
+        "nz-n0",
+        "nz-mn0",
+        "5hd-n0",
+        "5hd-c0",
+        "5hd-h0",
+        "5hd-w0",
+        "6hd-n0",
+        "6hd-c0",
+        "6hd-d0",
+        "6hd-h0",
+        "6hd-w0",
+    ],
+)
+def test_empty_blocked_format_roundtrip(shape, ori_format):
+    """空张量格式往返:正向分块编码接受零维 shape,逆向解码还原原 shape/dtype。
+
+    覆盖 FRACTAL_NZ/NC1HWC0/NDC1HWC0 三布局的全部零维位置组合。"""
+    target_format = {"ND": "FRACTAL_NZ", "NCHW": "NC1HWC0", "NCDHW": "NDC1HWC0"}[ori_format]
+    data = np.empty(shape, dtype=np.float16)
+    packed = transform(data, ori_format, target_format)
+    restored = transform(packed, target_format, ori_format, target_shape=shape)
+    assert restored.shape == shape
+    assert restored.dtype == data.dtype
+    assert restored.size == 0
+    np.testing.assert_array_equal(restored, data)
+
+
 def test_to_fractal_z_shape():
     # cout=2, cin=8, 3x3: h*w*cin1=9 blocks, cout1=1, (16, c0=16)
     weight = np.zeros((2, 8, 3, 3), dtype=np.float16)
@@ -176,10 +221,26 @@ def test_to_fractal_z_3d_and_back():
         ("ND", "FRACTAL_NZ", True),
         ("BOGUS", "NC1HWC0", False),
         ("NCHW", "BOGUS", False),
+        ("DHWCN", "NDC1HWC0", True),
+        ("DHWCN", "NC1HWC0", False),
     ],
 )
 def test_is_transformable(ori, target, expected):
     assert is_transformable(ori, target) is expected
+
+
+def test_dhwcn_ndc1hwc0_roundtrip():
+    """DHWCN(老式 TBE 5D weight 布局) -> NDC1HWC0 六维分块,往返保留数值与逻辑 shape。
+
+    C=19 跨 C1 块边界,覆盖尾块拼接路径;float16/int8 的 C0 不同(16/32)各验证。"""
+    for dtype in (np.float16, np.int8):
+        data = np.arange(2 * 3 * 4 * 19 * 2, dtype=dtype).reshape(2, 3, 4, 19, 2)
+        packed = transform(data, "DHWCN", "NDC1HWC0")
+        c0 = resolve_c0(data.dtype.name)
+        assert packed.shape == (2, 2, -(-19 // c0), 3, 4, c0)
+        restored = transform(packed, "NDC1HWC0", "DHWCN", target_shape=data.shape)
+        assert restored.shape == data.shape
+        np.testing.assert_array_equal(restored, data)
 
 
 def test_transform_returns_none_when_not_transformable():

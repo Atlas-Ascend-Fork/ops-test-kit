@@ -308,7 +308,7 @@ def shapelike_stc_nested(value: str):
         elif isinstance(element, (tuple, list)):
             if len(element) == 0:
                 result.append(tuple(element))
-            elif isinstance(element[0], (tuple, list)):
+            elif any(isinstance(sub, (tuple, list)) for sub in element):
                 sub_shapes = []
                 for sub in element:
                     if sub is None:
@@ -371,7 +371,7 @@ def shapelike_dyn_nested(value: str):
         elif isinstance(element, (tuple, list)):
             if len(element) == 0:
                 result.append(tuple(element))
-            elif isinstance(element[0], (tuple, list)):
+            elif any(isinstance(sub, (tuple, list)) for sub in element):
                 sub_shapes = []
                 for sub in element:
                     if sub is None:
@@ -423,7 +423,7 @@ def shapelike_float_signed_nested(value: str):
         elif isinstance(element, (tuple, list)):
             if len(element) == 0:
                 result.append(tuple(element))
-            elif isinstance(element[0], (tuple, list)):
+            elif any(isinstance(sub, (tuple, list)) for sub in element):
                 sub_items = []
                 for sub in element:
                     if sub is None:
@@ -475,7 +475,7 @@ def shapelike_float_nested(value: str):
         elif isinstance(element, (tuple, list)):
             if len(element) == 0:
                 result.append(tuple(element))
-            elif isinstance(element[0], (tuple, list)):
+            elif any(isinstance(sub, (tuple, list)) for sub in element):
                 sub_items = []
                 for sub in element:
                     if sub is None:
