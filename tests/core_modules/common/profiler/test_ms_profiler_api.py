@@ -22,7 +22,11 @@ import sys
 
 import pytest
 
-from ttk.core_modules.common.profiler.ms_profiler import _MSPROF_EXPORT_TIMEOUT_S, MsProfiler
+from ttk.core_modules.common.profiler.ms_profiler import (
+    _MSPROF_EXPORT_TIMEOUT_S,
+    MsProfiler,
+    _resolve_msprof_tool,
+)
 from ttk.core_modules.common.profiler.types import MsprofCompactInfo, MsProfOpDfx, MsprofTaskType
 
 
@@ -112,6 +116,26 @@ def test_report_op_dfx_noop_before_start():
     assert compact.calls == []
     assert sys_cycle.calls == []
     assert hash_id.calls == []
+
+
+def test_report_op_dfx_profapi_load_failure_degrades(caplog, monkeypatch):
+    """libprofapi.so 缺失：warning 降级不抛（issue #142-8），且 False 哨兵阻断重试。"""
+
+    def _no_such_lib(name):
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(ctypes, "CDLL", _no_such_lib)
+    prof = _bare_profiler()
+    prof._is_model = False
+    prof._msprof_dll = object()
+    prof._prof_started = True
+    prof._prof_api_dll = None
+    with caplog.at_level(logging.WARNING):
+        prof.report_op_dfx(MsProfOpDfx(kernel_name="k", block_dim=1, core_type="AiCore"))  # must not raise
+        assert prof._prof_api_dll is False
+        prof.report_op_dfx(MsProfOpDfx(kernel_name="k", block_dim=1, core_type="AiCore"))
+    assert caplog.text.count("Failed to load libprofapi.so") == 1  # no retry warning
+    assert "cannot open shared object file" in caplog.text
 
 
 def test_get_hash_id_missing_symbol_raises_runtime_error():
@@ -215,6 +239,14 @@ def test_analysis_profile_data_timeout_logged_not_raised(tmp_path, monkeypatch, 
     assert caplog.text.count("timed out") == 2
 
 
+def test_resolve_msprof_tool_warns_when_opp_path_unset(monkeypatch, caplog):
+    """ASCEND_OPP_PATH 未设置：明确提示设置环境变量，而非拼出 /../ 非法路径（issue #142-9）。"""
+    monkeypatch.delenv("ASCEND_OPP_PATH", raising=False)
+    with caplog.at_level(logging.WARNING):
+        assert _resolve_msprof_tool() is None
+    assert "ASCEND_OPP_PATH is not set" in caplog.text
+
+
 # --- 生命周期契约：NONE no-op / step·start_step / report happy path / parse_error ---
 
 
@@ -230,6 +262,24 @@ def test_ms_profiler_none_type_is_noop(tmp_path):
         prof.step()
         prof.report_op_dfx(MsProfOpDfx(kernel_name="k", block_dim=1, core_type="AiCore"))
     assert not prof._prof_inited  # nothing was ever started
+
+
+def test_ms_profiler_libmsprofiler_load_failure_degrades(tmp_path, caplog, monkeypatch):
+    """libmsprofiler.so 缺失：构造降级为不采集（issue #142-8），result()=disabled，不抛。"""
+    from ttk.core_modules.common.profiler.types import TtkMsProfType
+
+    def _no_such_lib(name):
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(ctypes, "CDLL", _no_such_lib)
+    with caplog.at_level(logging.WARNING):
+        prof = MsProfiler(0, str(tmp_path), TtkMsProfType.OP)
+    assert prof._msprof_dll is None
+    assert "Failed to load libmsprofiler.so" in caplog.text
+    with prof:
+        prof.step()
+        prof.report_op_dfx(MsProfOpDfx(kernel_name="k", block_dim=1, core_type="AiCore"))
+    assert prof.result().source == "disabled"
 
 
 def test_ms_profiler_step_starts_only_at_start_step():

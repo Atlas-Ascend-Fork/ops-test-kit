@@ -140,19 +140,28 @@ def test_handle_result_profile_path(switches):
 
 
 def test_handle_task_result_assembles_input_columns(switches):
-    """完整结果行 = 输入列 + 结果列（handle_result 只产结果列，组装归基类）。"""
+    """完整结果行 = 输入列 + 结果列（handle_result 只产结果列，组装归基类）；
+    crash/fail 结果行照常落盘，worker 经 recycle 回收而非裸 resurrect。"""
     from unittest.mock import MagicMock
 
     ins = _make_instance(switches)
     flushed = []
     ins.write_row = flushed.append
+    task = Task(_make_case(), int, (), task_type="profile", pool="profile")
     proc = MagicMock()
     proc.get_result.return_value = object()
     proc.get_pid.return_value = 1
-    task = Task(_make_case(), int, (), task_type="profile", pool="profile")
     ins._handle_task_result(task, proc)
     # pick_data → ("t0", "Add")；handle_result → ("PASS", "PASS")
     assert flushed == [("t0", "Add", "PASS", "PASS")]
+    for err in (SystemError("segv"), RuntimeError("boom")):
+        proc = MagicMock()
+        proc.get_result.return_value = err
+        proc.get_pid.return_value = 1
+        ins._handle_task_result(task, proc)
+        proc.recycle.assert_called_once()
+        proc.resurrect.assert_not_called()
+    assert len(flushed) == 3
 
 
 def test_assemble_result_row_none_passthrough(switches):

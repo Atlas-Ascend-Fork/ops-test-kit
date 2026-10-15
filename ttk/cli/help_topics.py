@@ -251,12 +251,9 @@ def print_topic(name):
     """Print one topic; unknown names list the available ones."""
     topic = HELP_TOPICS.get(name)
     if topic is None:
-        import sys
+        from ttk.core_modules.common.logging import print_error
 
-        print(
-            f"ttk help: unknown topic {name!r}; available: {', '.join(sorted(HELP_TOPICS))}",
-            file=sys.stderr,
-        )
+        print_error(f"ttk help: unknown topic {name!r}; available: {', '.join(sorted(HELP_TOPICS))}")
         raise SystemExit(2)
     width = 100
     print("=" * width)

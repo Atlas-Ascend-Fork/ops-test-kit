@@ -144,15 +144,17 @@ def test_to_fractal_z_shape():
     assert to_fractal_z(weight, "NCHW").shape == (9, 1, 16, 16)
 
 
-@pytest.mark.xfail(
-    reason="to_fractal_z_c04 out_pad 行数按 align(G*cin1_g*h*w, 4) 分配，索引需 4*cin_outer 行——"
-    "init repo 起对 h*w>1 输入必然 IndexError；待 NPU 排布基准对拍后真修",
-    strict=True,
-)
 def test_to_fractal_z_c04_shape():
-    # cin_outer = ceil(ceil(8/4)*4*h*w / 16) = ceil(72/16) = 5
+    # GE format_transfer_fz_c04: (ceil(4*h*w/c0), ceil(n/16), 16, c0)
+    weight = np.zeros((2, 4, 3, 3), dtype=np.float16)
+    assert to_fractal_z_c04(weight, "NCHW").shape == (3, 1, 16, 16)
+
+
+def test_to_fractal_z_c04_rejects_c_above_4():
+    # 原用例输入 (2,8,3,3)：GE 语义下 FRACTAL_Z_C04 要求 C<=4（原先 IndexError，现显式拒绝）
     weight = np.zeros((2, 8, 3, 3), dtype=np.float16)
-    assert to_fractal_z_c04(weight, "NCHW").shape == (5, 1, 16, 16)
+    with pytest.raises(RuntimeError, match="C <= 4"):
+        to_fractal_z_c04(weight, "NCHW")
 
 
 def test_nd_to_fractal_z_shape():

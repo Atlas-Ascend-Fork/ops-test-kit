@@ -7,7 +7,8 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""load_config 显式路径缺失 fail-loud（原实现静默回退默认配置）。"""
+"""loader 单测：load_config 显式路径缺失 fail-loud（原实现静默回退默认配置）；
+deep_merge 合并结果与 base/override 双侧隔离且合并语义不回归。"""
 
 import pytest
 
@@ -27,3 +28,21 @@ def test_explicit_existing_config_loads(tmp_path):
         assert cfg["remote"]["endpoints"] == []
     finally:
         loader.load_config()
+
+
+def test_deep_merge_result_is_independent():
+    base = {"remote": {"endpoints": [{"host": "127.0.0.1"}], "tls": {"ca": "a"}}}
+    override = {"framework": {"items": [1]}}
+    merged = loader.deep_merge(base, override)
+    merged["remote"]["endpoints"].append({"host": "9.9.9.9"})
+    merged["remote"]["tls"]["ca"] = "mutated"
+    merged["framework"]["items"].append(2)
+    assert base == {"remote": {"endpoints": [{"host": "127.0.0.1"}], "tls": {"ca": "a"}}}
+    assert override == {"framework": {"items": [1]}}
+
+
+def test_deep_merge_semantics_unchanged():
+    base = {"a": 1, "nested": {"x": 1, "y": 2}, "lst": [1, 2], "extra": {"keep": True}}
+    override = {"a": 2, "nested": {"y": 3}, "lst": [9]}
+    merged = loader.deep_merge(base, override)
+    assert merged == {"a": 2, "nested": {"x": 1, "y": 3}, "lst": [9], "extra": {"keep": True}}

@@ -61,7 +61,11 @@ _KERNEL_TASK_TYPES = frozenset(
 
 
 def _resolve_msprof_tool() -> Optional[str]:
-    msprof = f"{os.getenv('ASCEND_OPP_PATH', '')}/../tools/profiler/profiler_tool/analysis/msprof/msprof.py"
+    opp_path = os.getenv("ASCEND_OPP_PATH", "")
+    if not opp_path:
+        logging.warning("ASCEND_OPP_PATH is not set; source CANN set_env.sh to locate msprof.py.")
+        return None
+    msprof = f"{opp_path}/../tools/profiler/profiler_tool/analysis/msprof/msprof.py"
     if not os.path.exists(msprof):
         logging.warning(f"File [{msprof}] is not found. Please install CANN-toolkit RUN package.")
         return None
@@ -226,8 +230,12 @@ class MsProfiler(Profiler):
         else:
             if os.path.exists(result_path):
                 shutil.rmtree(result_path)
-            self._msprof_dll = ctypes.CDLL("libmsprofiler.so")
-        self._prof_api_dll = None  # initialize when needed
+            try:
+                self._msprof_dll = ctypes.CDLL("libmsprofiler.so")
+            except OSError as e:
+                logging.warning(f"Failed to load libmsprofiler.so, profiling disabled: {e}")
+                self._msprof_dll = None
+        self._prof_api_dll = None  # lazy; False once load failed (skip dfx report)
 
     def __enter__(self):
         return self
@@ -254,7 +262,13 @@ class MsProfiler(Profiler):
             # aclprof 会话可标注——no-op（该轮本就不在采集窗口内）
             return
         if self._prof_api_dll is None:
-            self._prof_api_dll = ctypes.CDLL("libprofapi.so")
+            try:
+                self._prof_api_dll = ctypes.CDLL("libprofapi.so")
+            except OSError as e:
+                logging.warning(f"Failed to load libprofapi.so, skip op dfx report: {e}")
+                self._prof_api_dll = False
+        if not self._prof_api_dll:
+            return
         api = getattr(self._prof_api_dll, "MsprofReportCompactInfo", None)
         if api is None:
             logging.warning("MsProf API [MsprofReportCompactInfo] is not defined.")

@@ -46,6 +46,29 @@ def test_main_process_writes_no_file(tmp_path, restore_root_logger):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_print_error_red_only_on_tty(capsys, monkeypatch):
+    """print_error 与 _ErrorRedFormatter 同口径：管道/重定向不注入 ANSI，tty 整行红。"""
+    from ttk.core_modules.common.logging import print_error
+
+    print_error("boom")
+    assert capsys.readouterr().err == "boom\n"
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+        def write(self, s):
+            written.append(s)
+
+        def flush(self):
+            pass
+
+    written = []
+    monkeypatch.setattr("sys.stderr", _Tty())
+    print_error("boom")
+    assert "".join(written) == "\033[31mboom\033[0m\n"
+
+
 def test_per_case_two_files_no_level_split(tmp_path, restore_root_logger):
     """per-case：恰好两个文件——ttk.log（非 COMPARE 混写）+ ttk-compare.log。"""
     default_logging_config(file_handler=True, testcase_name="pin_case", log_dir=str(tmp_path))

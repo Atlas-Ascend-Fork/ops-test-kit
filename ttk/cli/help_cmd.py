@@ -20,8 +20,6 @@ is routed to the same logic by ``_cli_main`` before argparse runs — the
 per-mode required ``-i`` check would otherwise reject it.
 """
 
-import sys
-
 from .help_topics import HELP_TOPICS, print_topic
 
 
@@ -92,14 +90,17 @@ def handle_topic_tokens(tokens):
         if _subparser_of(command) is None:
             _unknown(command)
         if param not in HELP_TOPICS:
-            print(
-                f"ttk help: unknown topic {param!r} for {command!r}; available: {', '.join(sorted(HELP_TOPICS))}",
-                file=sys.stderr,
+            from ttk.core_modules.common.logging import print_error
+
+            print_error(
+                f"ttk help: unknown topic {param!r} for {command!r}; available: {', '.join(sorted(HELP_TOPICS))}"
             )
             raise SystemExit(2)
         print_topic(param)
         return
-    print("ttk help: expected 'ttk help [COMMAND] [PARAM]'", file=sys.stderr)
+    from ttk.core_modules.common.logging import print_error
+
+    print_error("ttk help: expected 'ttk help [COMMAND] [PARAM]'")
     raise SystemExit(2)
 
 
@@ -112,12 +113,12 @@ def _subparser_of(command):
 
 def _unknown(token):
     from ttk.cli import build_parser
+    from ttk.core_modules.common.logging import print_error
 
     _, sub_map = build_parser()
     commands = [name for name in sub_map if name != "help"]
-    print(
+    print_error(
         f"ttk help: unknown command or topic {token!r}; "
-        f"commands: {', '.join(commands)}; topics: {', '.join(sorted(HELP_TOPICS))}",
-        file=sys.stderr,
+        f"commands: {', '.join(commands)}; topics: {', '.join(sorted(HELP_TOPICS))}"
     )
     raise SystemExit(2)

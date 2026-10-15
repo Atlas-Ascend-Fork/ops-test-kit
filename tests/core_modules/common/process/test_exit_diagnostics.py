@@ -61,6 +61,16 @@ def _self_segfault():
     os.kill(os.getpid(), signal.SIGSEGV)
 
 
+def _raise_with_slow_teardown():
+    """抛异常自退出，并在 atexit 清理链里滞留 1.5s——模拟真实 worker 的
+    设备清理耗时，供 close() 的 join 行为判定。"""
+    import atexit
+    import time as _time
+
+    atexit.register(_time.sleep, 1.5)
+    raise RuntimeError("teardown probe")
+
+
 class TestWorkerCrashDiagnostics:
     def test_segfault_worker_reports_signal_detail_and_resurrects(self):
         """真 worker 段错误端到端：SystemError 消息带信号名 + 成因提示；崩溃前
@@ -93,5 +103,19 @@ class TestWorkerCrashDiagnostics:
                 proc.update()
                 time.sleep(0.05)
             assert proc.get_result() is True  # 重建后可继续执行 task
+
+            # 异常自退出路径：worker 上报 RuntimeError + DEAD 后走 atexit 清理链；
+            # close() 须按实际存活 join 到真实退出，不得被上报的 DEAD 状态短路
+            proc.send_action(_raise_with_slow_teardown, (), {})
+            deadline = time.time() + 60
+            while not proc.is_completed() and time.time() < deadline:
+                proc.update()
+                time.sleep(0.05)
+            assert isinstance(proc.get_result(), RuntimeError)
+            started = time.time()
+            proc.close()  # join 到真实退出后 parent.close，重复调用须幂等
+            assert proc.is_dead()
+            waited = time.time() - started
+            assert 1.0 <= waited < 15  # 等到了清理链且未触顶宽限
         finally:
             proc.close()

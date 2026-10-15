@@ -686,7 +686,13 @@ class SimpleCommandProcess:
     def close(self, no_update=False):
         if not no_update:
             self.update()
-        if self.status != PROCESS_STATUS_CODE.DEAD:
+        # 以实际存活（exitcode）为准而非上报状态：worker 异常自退出会先上报
+        # DEAD 再走清理链，只认状态会在其退出前跳过 join
+        try:
+            alive = self.get_exitcode() is None
+        except ValueError:
+            return  # process object 已关闭（重复 close）
+        if alive:
             try:
                 # worker 已死时对端关闭，SUICIDE 写失败是预期——直接走 join/terminate
                 with contextlib.suppress(OSError, EOFError):
@@ -700,13 +706,13 @@ class SimpleCommandProcess:
                     self.parent.terminate()
                     self.parent.join(3)
                     self.kill()
-                try:
-                    self.parent.close()
-                except ValueError:
-                    self.parent.terminate()
-                    self.parent.join()
-                    self.parent.close()
-                self.status = PROCESS_STATUS_CODE.DEAD
+        try:
+            self.parent.close()
+        except ValueError:
+            self.parent.terminate()
+            self.parent.join()
+            self.parent.close()
+        self.status = PROCESS_STATUS_CODE.DEAD
 
     def kill(self):
         self.parent.kill()

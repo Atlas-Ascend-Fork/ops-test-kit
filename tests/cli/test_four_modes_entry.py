@@ -269,6 +269,14 @@ def test_cli_top_level_error_is_single_line(capsys, monkeypatch, tmp_path):
     assert "unknown token" in err
     assert "Traceback" not in err
 
+    # argparse 报错同口径：经 _ErrorAwareArgumentParser.error → "ttk: error: invalid choice"
+    monkeypatch.setattr(sys, "argv", ["ttk", "bogus"])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 2
+    assert "ttk: error: argument command: invalid choice: 'bogus'" in capsys.readouterr().err
+
+    monkeypatch.setattr(sys, "argv", ["ttk", "kernel", "-i", "x.csv", "--dump", "in,foo"])
     monkeypatch.setenv("TTK_DEBUG", "1")
     with pytest.raises(ValueError, match="unknown token"):
         main()

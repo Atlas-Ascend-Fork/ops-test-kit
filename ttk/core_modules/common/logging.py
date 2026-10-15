@@ -33,6 +33,7 @@ __all__ = [
     "build_single_log_dir",
     "cann_stdout_capture_enabled",
     "default_logging_config",
+    "print_error",
     "release_case_stdout",
     "reset_case_log",
 ]
@@ -109,6 +110,13 @@ def _formatter_for(handler) -> logging.Formatter:
     stream = getattr(handler, "stream", None)
     is_tty = bool(getattr(stream, "isatty", lambda: False)())
     return _ErrorRedFormatter(_LOG_FORMAT) if is_tty else logging.Formatter(_LOG_FORMAT)
+
+
+def print_error(message: str) -> None:
+    """stderr 直写错误行：tty 上整行红色（与 _ErrorRedFormatter 同口径）。"""
+    if getattr(sys.stderr, "isatty", lambda: False)():
+        message = f"{_ANSI_RED}{message}{_ANSI_RESET}"
+    print(message, file=sys.stderr)
 
 
 def _attach(handler, level=None, flt=None):

@@ -1264,11 +1264,11 @@ class InstanceBase(metaclass=ABCMeta):
         if result is None:
             output_data = self.handle_error(task, "none", None)
         elif isinstance(result, SystemError):
-            last_stage = proc.current_stage()  # resurrect 会重置 data，崩溃 stage 须先取
-            proc.resurrect()
+            last_stage = proc.current_stage()  # recycle 会重置 data，崩溃 stage 须先取
+            proc.recycle()
             output_data = self.handle_error(task, "crash", (last_stage, pid, result))
         elif isinstance(result, RuntimeError):
-            proc.resurrect()
+            proc.recycle()
             output_data = self.handle_error(task, "fail", (pid, result))
         else:
             self._collect_batch_summary(task, result)
@@ -1283,7 +1283,7 @@ class InstanceBase(metaclass=ABCMeta):
         result = proc.get_result()
         pid = proc.get_pid()
         if isinstance(result, (SystemError, RuntimeError)):
-            proc.resurrect()
+            proc.recycle()
             if isinstance(result, SystemError):
                 output_data = self.handle_error(task, "crash", ("MultiDevice", pid, result))
             else:

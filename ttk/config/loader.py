@@ -12,6 +12,7 @@
 配置加载：default.yaml（基础）→ 用户配置（覆盖）→ CLI（覆盖）。
 """
 
+import copy
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -116,14 +117,15 @@ def deep_merge(base: dict, override: dict) -> dict:
 
     仅 dict 类型逐层合并；list 与标量由 override 整体替换
     （配置语义：list 不做元素级合并，整体替换更可预期，避免静默拼凑）。
+    合并结果与 base/override 完全隔离：对结果的嵌套修改不会写回输入。
     """
-    merged = dict(base)
+    merged = copy.deepcopy(base)
     for k, v in override.items():
         cur = merged.get(k)
         if isinstance(cur, dict) and isinstance(v, dict):
             merged[k] = deep_merge(cur, v)
         else:
-            merged[k] = v
+            merged[k] = copy.deepcopy(v)
     return merged
 
 

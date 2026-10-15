@@ -49,6 +49,21 @@ deep-dive help:
   ttk help devices              topic lookup without a mode
 """
 
+
+class _ErrorAwareArgumentParser(argparse.ArgumentParser):
+    """argparse 报错走 print_error（tty 红色），与 CLI 兜底/logging 同口径。
+
+    add_subparsers 默认 parser_class=type(self)，子命令 parser 自动继承。
+    """
+
+    def error(self, message):
+        from ttk.core_modules.common.logging import print_error
+
+        self.print_usage(sys.stderr)
+        print_error(f"{self.prog}: error: {message}")
+        self.exit(2)
+
+
 # 四测试模式：`<mode> help` 别名 + 裸 `<mode>` 打分组 help + 参数级 --help 后缀。
 # 展示序 = 架构分层序（kernel 算子层 → geir GE 图 → aclnn 引擎 API → e2e 框架层）。
 _MODE_COMMANDS = ("kernel", "geir", "aclnn", "e2e")
@@ -58,7 +73,7 @@ _SUBCOMMANDS = ("kernel", "geir", "aclnn", "e2e", "info", "list")
 
 def build_parser():
     """主 parser 装配（help 子命令复用同一构造，避免两份漂移）。"""
-    parser = argparse.ArgumentParser(
+    parser = _ErrorAwareArgumentParser(
         prog="ttk",
         description="TTK — Ascend NPU Single Operator Test Framework",
         epilog=_EPILOG,
@@ -125,5 +140,7 @@ def _cli_main():
         # --xpu-perf 缺远端配置等）——单行报错替代 traceback；TTK_DEBUG=1 看全栈。
         if os.environ.get("TTK_DEBUG"):
             raise
-        print(f"ttk: error: {exc}", file=sys.stderr)
+        from ttk.core_modules.common.logging import print_error
+
+        print_error(f"ttk: error: {exc}")
         raise SystemExit(2) from None

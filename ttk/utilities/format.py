@@ -380,41 +380,31 @@ def to_fractal_z(data: numpy.ndarray, ori_format: str, target_shape: Union[list,
 
 
 def to_fractal_z_c04(data: numpy.ndarray, ori_format: str, target_shape: Union[list, tuple] = None, groups=None):
-    """NCHW-like conv weight -> FRACTAL_Z_C04 (cin 4-way interleave)."""
+    """NCHW-like conv weight (C<=4) -> FRACTAL_Z_C04, GE format_transfer_fz_c04 semantics.
+
+    Pad C to 4 and N to 16-multiple, flatten (H, W, C) to z = h*w*4 + c, pad z to
+    c0-multiple, arrange as (ceil(4*h*w/c0), ceil(N/16), 16, c0). GE rejects C > 4
+    and groups > 1 for this format.
+    """
     data_shape = data.shape
-    # data_format: NCHW or NHWC
+    if not is_nchw_like(data_shape, ori_format):
+        raise RuntimeError(f"shape: {data_shape} of format {ori_format} is not NCHW-like.")
+    if groups is not None and groups not in (0, 1):
+        raise RuntimeError(f"FRACTAL_Z_C04 supports groups=1 only, got groups={groups}.")
     n, c = data_shape[ori_format.index("N")], data_shape[ori_format.index("C")]
     h, w = data_shape[ori_format.index("H")], data_shape[ori_format.index("W")]
-    if groups is None:
-        groups = 1
-    c_in = c * groups
-    c_out = n
+    if not 0 < c <= 4:
+        raise RuntimeError(f"FRACTAL_Z_C04 requires 0 < C <= 4, got C={c}.")
     c0 = resolve_c0(data.dtype.name, target_shape)
-    group_dict = _calculate_group(c_in, c_out, groups, c0)
-    G = group_dict["real_g"]
-    ci_ori = group_dict["cin_ori"]
-    co_ori = group_dict["cout_ori"]
-    cin1_g = group_dict["cin1_g"]
-    cou1_g = group_dict["cout1_g"]
-    # Initialization
-    out = numpy.zeros([G * cou1_g * BLOCK_SIZE, cin1_g * c0, h, w], dtype=data.dtype)
     data = data.transpose([ori_format.index("N"), ori_format.index("C"), ori_format.index("H"), ori_format.index("W")])
-    # NCHW->FractalZ_C04
-    for k in range(co_ori):
-        for ci in range(ci_ori):
-            out[k, ci, :, :] = data[k, ci, :, :]
-    # NCHW->Fractal_Z
-    out = out.reshape((G, cou1_g * BLOCK_SIZE, cin1_g, c0, h, w)).transpose(0, 2, 4, 5, 1, 3)
-    out = out.reshape(G * cin1_g * h * w, cou1_g, BLOCK_SIZE, c0)
-    out_pad = numpy.zeros([align(G * cin1_g * h * w, 4), cou1_g, BLOCK_SIZE, c0], dtype=data.dtype)
-    for i in range(G * cin1_g * h * w):
-        out_pad[i, :, :, :] = out[i, :, :, :]
-    cin_outer = ceil_div(G * ceil_div(c_in, 4) * 4 * h * w, BLOCK_SIZE)
-    fractal_z_c04_res = numpy.zeros([cin_outer, cou1_g, BLOCK_SIZE, c0], dtype=data.dtype)
-    for k in range(cin_outer):
-        for cin0 in range(c0):
-            fractal_z_c04_res[k, :, :, cin0] = out_pad[k * 4 + cin0 // 4, :, :, cin0 % 4]
-    return fractal_z_c04_res
+    n1 = ceil_div(n, BLOCK_SIZE)
+    padded = numpy.zeros((n1 * BLOCK_SIZE, 4, h, w), dtype=data.dtype)
+    padded[:n, :c] = data
+    mat = padded.transpose(0, 2, 3, 1).reshape(n1 * BLOCK_SIZE, h * w * 4)
+    z1 = ceil_div(h * w * 4, c0)
+    buf = numpy.zeros((n1 * BLOCK_SIZE, z1 * c0), dtype=data.dtype)
+    buf[:, : h * w * 4] = mat
+    return buf.reshape(n1, BLOCK_SIZE, z1, c0).transpose(2, 0, 1, 3)
 
 
 def to_fractal_z_3d(data: numpy.ndarray, ori_format: str, target_shape: Union[list, tuple] = None, groups=None):
