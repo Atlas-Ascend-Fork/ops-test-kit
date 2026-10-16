@@ -537,7 +537,11 @@ class KernelExecutor:
 
         round_bytes = self._copy_output_from_hbm()
         digest = hashlib.md5(  # noqa: S324 非安全用途：确定性校验和
-            b"".join(bytes(arr) if isinstance(arr, (bytes, bytearray)) else arr.tobytes() for arr in round_bytes)
+            b"".join(
+                arr.tobytes() if isinstance(arr, numpy.ndarray) else bytes(arr)
+                for arr in round_bytes
+                if arr is not None
+            )
         ).hexdigest()
         md5_list.append(digest)
 

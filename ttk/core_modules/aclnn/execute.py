@@ -427,7 +427,9 @@ class AclOpExecutor:
                             md5_list.append(
                                 hashlib.md5(  # noqa: S324  # 非安全用途：确定性校验和
                                     b"".join(
-                                        bytes(b) if isinstance(b, (bytearray, memoryview)) else b for b in out_bytes
+                                        bytes(b) if isinstance(b, (bytearray, memoryview)) else b
+                                        for b in out_bytes
+                                        if b is not None
                                     )
                                 ).hexdigest()
                             )
