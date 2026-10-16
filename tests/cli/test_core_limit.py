@@ -182,10 +182,13 @@ def test_aclgraph_core_limit_scopes_preprocess_and_captured_model(monkeypatch):
             events.append(("exit", ai_limit, vec_limit))
 
     monkeypatch.setattr(graph_execution, "_get_aclgraph_scope", lambda: FakeScope)
+    # 整体替换 torch.npu（raising=False：未装 torch_npu 时属性不存在），
+    # 用例只需 get_device_properties 的物理核数，无需真实 torch_npu。
     monkeypatch.setattr(
-        graph_execution.torch.npu,
-        "get_device_properties",
-        lambda _dev_id: SimpleNamespace(cube_core_num=20, vector_core_num=40),
+        graph_execution.torch,
+        "npu",
+        SimpleNamespace(get_device_properties=lambda _dev_id: SimpleNamespace(cube_core_num=20, vector_core_num=40)),
+        raising=False,
     )
 
     with graph_execution._aclgraph_core_limit_context((1, None), 0):

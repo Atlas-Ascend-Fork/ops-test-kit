@@ -26,13 +26,35 @@ class TbeCompiler(Compiler):
 
     def __init__(self):
         self._initialized = False
+        self._import_error = None
         try:
             self._tbe = __import__("tbe")
             logging.debug(f"Using tbe module from {self._tbe.__file__}")
         except ModuleNotFoundError as e:
-            logging.info(f"Import `tbe` failed. Maybe it has been removed: {e}")
+            self._import_error = e
+            if e.name == "tbe":
+                logging.info(f"Import `tbe` failed. Maybe it has been removed: {e}")
+            else:
+                logging.warning(
+                    f"Import `tbe` failed: tbe's dependency `{e.name}` is missing. "
+                    f"Install it with `pip3 install {e.name}` and retry."
+                )
         else:
             self._initialized = True
+
+    def __getattr__(self, name):
+        if name == "_tbe":
+            err = self.__dict__.get("_import_error")
+            hint = (
+                f" ({err}). Install the missing dependency and retry"
+                if err is not None and err.name != "tbe"
+                else ". Check that CANN is installed and its environment is sourced (set_env.sh)"
+            )
+            raise RuntimeError(
+                f"`tbe` compiler stack is unavailable: `import tbe` failed{hint}. "
+                "Kernel compilation requires the CANN `tbe` python package."
+            ) from err
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def is_initialized(self) -> bool:
         return self._initialized

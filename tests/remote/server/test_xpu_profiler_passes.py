@@ -65,6 +65,10 @@ def test_tf_xpu_profiler_pass_smoke_cpu():
     import subprocess
     import sys
 
+    probe = subprocess.run([sys.executable, "-c", "import tensorflow"], capture_output=True, timeout=300, check=False)
+    if probe.returncode != 0:
+        pytest.skip("tensorflow not importable")
+
     script = """
 import tensorflow as tf
 from ttk.remote.server.xpu_profiler import tf_xpu_profiler_pass

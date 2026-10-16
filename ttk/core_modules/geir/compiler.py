@@ -38,7 +38,12 @@ def detect_cann_features():
         return None
     from ttk.core_modules.common.device import get_ascend_scene_info
 
-    scene_os, scene_arch = get_ascend_scene_info()
+    try:
+        scene_os, scene_arch = get_ascend_scene_info()
+    except (RuntimeError, OSError):
+        # ASCEND_OPP_PATH 未配置时 get_opp_paths 会 raise；此处按 arch_dir 的
+        # 既有缺省语义降级为 x86_64-linux，而不是让探测整体崩溃。
+        scene_os, scene_arch = "", ""
     arch_dir = f"{scene_arch}-{scene_os}" if scene_arch and scene_os else "x86_64-linux"
 
     def _read(*rel):
@@ -86,7 +91,11 @@ class GeirCompiler:
 
         from ttk.core_modules.common.device import get_ascend_scene_info
 
-        scene_os, scene_arch = get_ascend_scene_info()
+        try:
+            scene_os, scene_arch = get_ascend_scene_info()
+        except (RuntimeError, OSError):
+            # 同 detect_cann_features：OPP 路径缺失时降级默认 arch 目录。
+            scene_os, scene_arch = "", ""
         arch_dir = f"{scene_arch}-{scene_os}" if scene_arch and scene_os else "x86_64-linux"
 
         include_dirs = [

@@ -47,6 +47,8 @@ cd ops-test-kit
 pip install -r requirements.txt
 ```
 
+> GEIR 通路生成 C++ 源码后调用 `g++` 编译，需系统工具链支持（可用 `g++ --version` 检查，缺失时通过系统包管理器安装，如 `yum install gcc-c++` 或 `apt install g++`）。
+
 4、检查环境
 
 ```shell

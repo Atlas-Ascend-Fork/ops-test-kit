@@ -48,6 +48,8 @@ cd ops-test-kit
 pip install -r requirements.txt
 ```
 
+> ACLNN 通路的输入生成与 Golden 计算依赖 `torch`（不在 `requirements.txt` 中，`pip3 install torch` 安装；使用 `npu_preprocess` 钩子或多卡 HCCL 用例时还需 `torch_npu`）。
+
 4、检查环境
 
 ```shell

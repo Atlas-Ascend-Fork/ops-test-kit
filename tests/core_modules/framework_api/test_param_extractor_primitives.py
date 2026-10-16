@@ -11,6 +11,7 @@
 签名解析、类型推断、NPU 声明解析、manual override、aten schema 提取、overload 匹配、
 pyi 加载、pickle 往返。数据模型自 api_model 引用。"""
 
+import importlib.util
 import pickle
 
 import pytest
@@ -732,6 +733,7 @@ class TestReturnCountAndOutUpgrade:
 # == npu_hans decode/encode =================================================
 
 
+@pytest.mark.skipif(importlib.util.find_spec("torch_npu") is None, reason="torch_npu 不可导入，npu_hans 签名无法解析")
 class TestNpuHansDecodeEncode:
     def test_decode_and_encode_signatures(self):
         """torch_npu.npu_hans_decode/encode 的签名：out required、tensor list 布局。"""

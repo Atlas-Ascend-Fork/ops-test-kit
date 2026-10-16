@@ -28,7 +28,8 @@ TTK (ops Test Tool Kit) is a full-pipeline, automated, batch operator testing fr
 
 - Install CANN from the Ascend community: [Official Link](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850alpha001/softwareinst/instg/instg_quick.html)
 - Python 3.8+ recommended
-- The E2E path additionally requires `torch`/`torch_npu` (not in `requirements.txt`; install the pair matching your local CANN version, see the [torch_npu installation guide](https://gitee.com/ascend/pytorch))
+- The GEIR path requires the system toolchain `g++` (for GE graph compilation; verify with `g++ --version`)
+- The ACLNN path additionally requires `torch` (input generation/golden computation); the E2E path additionally requires `torch`/`torch_npu` (neither in `requirements.txt`; install the pair matching your local CANN version, see the [torch_npu installation guide](https://gitee.com/ascend/pytorch))
 
 ```shell
 git clone https://gitcode.com/cann/ops-test-kit.git

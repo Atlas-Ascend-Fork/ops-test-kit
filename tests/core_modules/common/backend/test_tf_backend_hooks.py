@@ -26,11 +26,13 @@ import pytest
 from ttk.core_modules.common.backend.framework_hooks import get_input_factory
 from ttk.core_modules.common.backend.tf_backend import TfBackend
 
-_TORCH_NPU_TF_CONFLICT = (
-    importlib.util.find_spec("torch_npu") is not None and importlib.util.find_spec("tensorflow") is not None
-)
+_TF_INSTALLED = importlib.util.find_spec("tensorflow") is not None
+_TORCH_NPU_TF_CONFLICT = importlib.util.find_spec("torch_npu") is not None and _TF_INSTALLED
 _requires_tf = pytest.mark.skipif(
-    _TORCH_NPU_TF_CONFLICT, reason="torch_npu._C + tensorflow C extension conflict → segfault"
+    not _TF_INSTALLED or _TORCH_NPU_TF_CONFLICT,
+    reason="tensorflow not installed"
+    if not _TF_INSTALLED
+    else "torch_npu._C + tensorflow C extension conflict → segfault",
 )
 
 

@@ -37,6 +37,11 @@ class FrameworkApiInfoKeeper(metaclass=Singleton):
             from .adapter import adapter_for_api_name
 
             info = adapter_for_api_name(api_name).extract_params(api_name)
+        except ModuleNotFoundError as e:
+            # 可选框架（torch_npu/tensorflow 等）未安装属预期环境形态：
+            # 单行告警即可，不刷 ERROR 级整栈回溯污染日志。
+            logging.warning("API signature parsing failed: %s: %s: %s", api_name, type(e).__name__, e)
+            info = None
         except Exception as e:
             logging.exception("API signature parsing failed: %s: %s: %s", api_name, type(e).__name__, e)
             info = None

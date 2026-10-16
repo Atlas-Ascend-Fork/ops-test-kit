@@ -14,6 +14,8 @@ _match_overload, _coerce_value, build_positional_args, ParamPlan.build_args,
 and ttk.core_modules.framework_api.testcase: get_param_plan.
 """
 
+import importlib.util
+
 import pytest
 
 from ttk.core_modules.framework_api.api_model import ParamInfo
@@ -26,6 +28,8 @@ from ttk.core_modules.framework_api.api_param import (
 )
 from ttk.core_modules.framework_api.info_keeper import FrameworkApiInfoKeeper
 from ttk.core_modules.framework_api.torch.param_extractor import _MANUAL_OVERRIDES
+
+_TORCH_NPU_INSTALLED = importlib.util.find_spec("torch_npu") is not None
 
 
 @pytest.fixture(autouse=True)
@@ -534,6 +538,7 @@ class TestGetParamPlan:
         assert isinstance(args[0], np.ndarray)
 
 
+@pytest.mark.skipif(not _TORCH_NPU_INSTALLED, reason="torch_npu 不可导入，npu_weight_quant_batchmatmul 签名无法解析")
 class TestNpuWeightQuantBatchmatmul:
     """Tests for torch_npu.npu_weight_quant_batchmatmul with optional tensors."""
 

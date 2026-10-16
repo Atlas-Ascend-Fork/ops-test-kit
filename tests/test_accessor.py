@@ -23,6 +23,10 @@ import sys
 
 ASCEND_HOME = os.environ.get("ASCEND_HOME_PATH", os.environ.get("ASCEND_TOOLKIT_HOME"))
 if not ASCEND_HOME:
+    if "pytest" in sys.modules:
+        import pytest
+
+        pytest.skip("ASCEND_HOME_PATH/ASCEND_TOOLKIT_HOME not set", allow_module_level=True)
     print("SKIP: Set ASCEND_HOME_PATH")
     sys.exit(0)
 

@@ -62,11 +62,13 @@ def _missing_en_dtypes():
         return True
 
 
-_TORCH_NPU_TF_CONFLICT = (
-    importlib.util.find_spec("torch_npu") is not None and importlib.util.find_spec("tensorflow") is not None
-)
+_TF_INSTALLED = importlib.util.find_spec("tensorflow") is not None
+_TORCH_NPU_TF_CONFLICT = importlib.util.find_spec("torch_npu") is not None and _TF_INSTALLED
 _requires_tf = pytest.mark.skipif(
-    _TORCH_NPU_TF_CONFLICT, reason="torch_npu._C + tensorflow C extension conflict → segfault"
+    not _TF_INSTALLED or _TORCH_NPU_TF_CONFLICT,
+    reason="tensorflow not installed"
+    if not _TF_INSTALLED
+    else "torch_npu._C + tensorflow C extension conflict → segfault",
 )
 
 
