@@ -76,7 +76,7 @@ CHAIN_MATRIX = [
     (
         "torch.ones",
         "TypeError(multi-overload, 2 signatures)",
-        ["size", "names", "dtype", "layout", "device", "pin_memory", "requires_grad"],
+        ["size", "out", "dtype", "layout", "device", "pin_memory", "requires_grad"],
     ),
     (
         "torch.randint",

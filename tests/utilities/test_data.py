@@ -40,6 +40,12 @@ def _missing_en_dtypes():
         ("bfloat16", (2 * CHUNK_ELEMS + 8,), (-1.0, 1.0), "uniform"),
         ("float32", (2 * CHUNK_ELEMS + 8,), (-1.0, 1.0), "normal"),
         ("bfloat16", (2 * CHUNK_ELEMS + 8,), (-1.0, 1.0), "normal"),
+        ("bool", (40000,), (None, None), "uniform"),
+        ("bool", (40000,), (0, 1), "uniform"),
+        ("bool", (3, 4, 5), (None, None), "uniform"),
+        ("bool", (0,), (None, None), "uniform"),
+        ("bool", (8,), (True, True), "uniform"),
+        ("bool", (8,), (False, False), "uniform"),
     ],
     ids=[
         "concat-mix-f32",
@@ -51,16 +57,35 @@ def _missing_en_dtypes():
         "chunked-uni-bf16",
         "chunked-norm-f32",
         "chunked-norm-bf16",
+        "bool-default-range",
+        "bool-explicit-01",
+        "bool-multidim",
+        "bool-zero-axis",
+        "bool-const-true",
+        "bool-const-false",
     ],
 )
 def test_generate_dtype_preserved_across_paths(dtype, shape, data_range, distribution):
     """generate 全路径 dtype 保持声明值（防 float64 提升/降级）：
 
     concat-mix = size<=rc 混入（2053554 修复路径）；flat-mix = 按位覆写混入；
-    empty-guard = size=0 跳过混入；chunked-* = 分块采样（uniform/normal）。
+    empty-guard = size=0 跳过混入；chunked-* = 分块采样（uniform/normal）；
+    bool-* = uniform 覆盖 0/1 时走离散域抽样：双值接近平衡、同 seed 可复现
+    （连续 uniform astype(bool) 会全 True）。
     """
     arr = RandomData(dtype, shape, data_range).generate(distribution=distribution)
     assert str(arr.dtype) == dtype
+
+    if dtype == "bool" and distribution == "uniform":
+        np.random.seed(714)
+        first = RandomData(dtype, shape, data_range).generate(distribution=distribution)
+        np.random.seed(714)
+        second = RandomData(dtype, shape, data_range).generate(distribution=distribution)
+        assert str(first.dtype) == dtype
+        assert np.array_equal(first, second)
+        if first.size and np.unique(first).size == 2:
+            frac_true = float(first.mean())
+            assert 0.2 <= frac_true <= 0.8
 
 
 @pytest.mark.parametrize(
@@ -225,19 +250,23 @@ def test_large_uniform_mix_expect_bitwise_reproducible():
     assert np.array_equal(first, second)
 
 
-def test_large_uniform_must_contain_values_present():
-    """>10M 混入不再跳过：data_range 端点值与显式边界值在结果中出现（uniform 连续采样打不中端点，出现即混入证明）。"""
-    n = 10_000_001
-    rd = RandomData("float32", (n,), (-1.0, 1.0, 3.5))
-    arr = rd.generate()
-
-    assert (arr == -1.0).any()
-    assert (arr == 1.0).any()
-    assert (arr == 3.5).any()
-    # 每值覆写次数封顶 2048（大 tensor 不再按 0.25% 比例膨胀，防高密度采样
-    # 崩溃与边界值淹没正常分布；uniform 本身也可能量化命中端点，故用 >=）
-    for v in (-1.0, 1.0, 3.5):
-        assert (arr == v).sum() >= 2048
+@pytest.mark.parametrize(
+    ("shape", "data_range", "min_count"),
+    [
+        ((10_000_001,), (-1.0, 1.0, 3.5), 2048),  # 大 tensor：每值覆写封顶 2048
+        ((3,), (-1.0, 1.0, 0.0), 1),  # 等容量：必现值全量出现
+        ((4,), (-1.0, 1.0, 0.0), 1),  # 超容量控制
+        ((2,), (-1.0, 1.0, 0.0), 0),  # 装不下：子集抽样
+    ],
+    ids=["large-capped-injection", "equal-capacity", "larger-control", "cannot-hold-all"],
+)
+def test_uniform_must_contain_values_present(shape, data_range, min_count):
+    """data_range 端点与显式必现值必须混入生成结果；等容量覆写注入、装不下才子集抽样。"""
+    np.random.seed(0)
+    arr = RandomData("float32", shape, data_range).generate()
+    assert arr.shape == shape
+    for v in data_range:
+        assert (arr == v).sum() >= min_count
 
 
 @pytest.mark.parametrize("dtype", ["int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64"])
@@ -270,28 +299,62 @@ def test_int64_high_range_is_not_grid_quantized(high):
 
 
 @pytest.mark.parametrize(
-    ("dtype", "low", "high"),
+    ("dtype", "data_range", "expected"),
     [
-        ("int64", 9007199254740993, 9007199254740996),
-        ("uint64", 9223372036854775809, 9223372036854775812),
-        ("int64", 9007199254740992, 9007199254740996),
+        # 超 float64 精确范围（2^53）端点不得被舍入（expected=None 走端点断言）
+        ("int64", (9007199254740993, 9007199254740996), None),
+        ("uint64", (9223372036854775809, 9223372036854775812), None),
+        ("int64", (9007199254740992, 9007199254740996), None),
+        # 小数区间向内取整：生成与混入均不越出声明闭区间
+        ("int32", (1.5, 2.5), {2}),
+        ("int64", (1.5, 2.5), {2}),
+        ("uint64", (0.5, 1.5), {1}),
+        ("int32", (-2.5, -1.5), {-2}),
+        ("int32", (-0.5, 0.5), {0}),
+        ("int32", (0.5, 2.5), {1, 2}),
+        # 显式额外必现值保持 int(x) 截断
+        ("int32", (1, 2, 3.9), {1, 2, 3}),
+        # 固定小数截断（(1.5, 1.5)→1）
+        ("int32", (1.5, 1.5), {1}),
+        # 区间内无可表示整数时明确拒绝
+        ("int32", (1.2, 1.8), "reject"),
     ],
-    ids=["int64-2p53-plus-1", "uint64-2p63-plus-1", "int64-exact-control"],
+    ids=[
+        "int64-2p53-plus-1",
+        "uint64-2p63-plus-1",
+        "int64-exact-control",
+        "int32-pos-fraction",
+        "int64-pos-fraction",
+        "uint64-pos-fraction",
+        "int32-neg-fraction",
+        "int32-cross-zero-fraction",
+        "int32-multi-int-subset",
+        "extra-must-contain-truncation",
+        "fixed-fraction-truncation",
+        "empty-int-subset-reject",
+    ],
 )
-def test_integer_range_endpoints_bypass_float64(dtype, low, high):
-    """超 float64 精确整数范围（2^53）的整型端点不得被舍入。
+def test_integer_range_contract(dtype, data_range, expected):
+    """整数区间契约：2^53+ 端点不经 float64；非固定小数区间向内取整不越边界；
+    显式额外必现值 int(x) 截断；固定小数截断；空整数集合拒绝。"""
+    low, high = data_range[:2]
+    if expected == "reject":
+        with pytest.raises(ValueError, match="no representable"):
+            RandomData(dtype, (128,), data_range).generate()
+        return
+    arr = RandomData(dtype, (8192,), data_range).generate()
+    if expected is None:
+        # 超 float64 精确整数范围（2^53）的整型端点不得被舍入：端点经 float64
+        # 处理时 2^53+1 round-to-even 到 2^53，随机生成会产出低于声明下界的值。
+        assert int(arr.min()) >= low
+        assert int(arr.max()) <= high
+        assert (arr == low).any()
+        assert (arr == high).any()
 
-    端点经 float64 处理时 2^53+1 round-to-even 到 2^53，随机生成会产出低于
-    声明下界的值；常量填充同理填入舍入后的错误值。
-    """
-    arr = RandomData(dtype, (8192,), (low, high)).generate()
-    assert int(arr.min()) >= low
-    assert int(arr.max()) <= high
-    assert (arr == low).any()
-    assert (arr == high).any()
-
-    const = RandomData(dtype, (4,), (low, low)).generate()
-    assert (const == low).all()
+        const = RandomData(dtype, (4,), (low, low)).generate()
+        assert (const == low).all()
+    else:
+        assert set(arr.tolist()) == expected
 
 
 def test_exponential_small_tensor_keeps_single_shot_path():

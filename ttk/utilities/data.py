@@ -146,16 +146,25 @@ class RandomData:
 
     def _must_contain_values(self, dtype, is_complex_imag: bool) -> tuple:
         # border value will always be included
-        replace_list = list(set(self._data_range))
         if _is_native_integer(dtype):
             # 整型端点不经 float64：INT64_MAX 经 float64 会舍入到 2^63 再溢出成 INT64_MIN，
             # 声明的区间端点会拿到符号相反的值。
             info = numpy.iinfo(dtype)
-            clamped = [
-                min(max(int(x), int(info.min)), int(info.max)) for x in replace_list if numpy.isfinite(numpy.float64(x))
+            lo, hi = self._data_range[:2]
+            # 固定值保持向零截断（(1.5, 1.5)→1）；非固定区间向内取整，混入值不越界
+            declared = [lo] if lo == hi else [math.ceil(lo), math.floor(hi)]
+            declared = [x for x in declared if numpy.isfinite(numpy.float64(x))]
+            clamped = [min(max(int(x), int(info.min)), int(info.max)) for x in declared]
+            # 显式额外必现值保持 int(x) 截断
+            clamped += [
+                min(max(int(x), int(info.min)), int(info.max))
+                for x in self._data_range[2:]
+                if numpy.isfinite(numpy.float64(x))
             ]
             replace_np_array = numpy.array(clamped, dtype=dtype)
+            replace_list = list(set(replace_np_array))
         else:
+            replace_list = list(set(self._data_range))
             candidates = numpy.array(replace_list, dtype="float64")
             if not is_float_dtype(dtype):
                 # int/bool cannot represent inf/nan: digitize to dtype bounds / 0,
@@ -163,9 +172,9 @@ class RandomData:
                 # would then inject into the output).
                 candidates = numpy.array([self._digitize_inf_nan(x, dtype) for x in candidates], dtype="float64")
             replace_np_array = candidates.astype(dtype)
-        # dedupe again after the dtype cast: distinct declared values can
-        # collapse into one in a narrower dtype (e.g. 3.5 vs 3.6 in bfloat16)
-        replace_list = list(set(replace_np_array))
+            # dedupe again after the dtype cast: distinct declared values can
+            # collapse into one in a narrower dtype (e.g. 3.5 vs 3.6 in bfloat16)
+            replace_list = list(set(replace_np_array))
         if is_float_dtype(dtype):
             # handle -float(0) & float(0): set() keeps only one signed zero
             # (0.0 == -0.0), so restore the other when both were declared
@@ -199,6 +208,16 @@ class RandomData:
         if dtype_min >= 0 or dtype_max <= 0:
             return False
         return low < 0 < high and low <= dtype_min * 0.99 and high >= dtype_max * 0.99
+
+    @staticmethod
+    def _covers_bool_domain(low, high) -> bool:
+        """Range reaches both bool values (False=0, True=1).
+
+        Nonzero uniform samples cast to True, so a full-domain range must
+        sample the discrete domain; ranges missing 0 or 1 keep declared-range
+        semantics.
+        """
+        return low <= 0 and high >= 1
 
     @staticmethod
     def _gen_exponential_data(dtype, shape) -> numpy.ndarray:
@@ -280,6 +299,23 @@ class RandomData:
         return out
 
     @staticmethod
+    def _gen_bool_data(shape):
+        """bool 离散域均匀抽样，分块写入预分配缓冲区（同 _gen_uniform_data）。
+
+        randint 逐元素消耗 RandomState 流，分块输出与单次全量逐位相同；
+        大 tensor 不承担全尺寸 int64 临时量。
+        """
+        elem_count = shape_numel(shape)
+        if elem_count <= 2 * CHUNK_ELEMS:
+            return numpy.random.randint(0, 2, size=shape).astype("bool", copy=False)
+        out = numpy.empty(shape, dtype="bool")
+        flat = out.ravel()
+        for start in range(0, elem_count, CHUNK_ELEMS):
+            end = min(start + CHUNK_ELEMS, elem_count)
+            flat[start:end] = numpy.random.randint(0, 2, size=end - start)
+        return out
+
+    @staticmethod
     def _gen_integer_data(low, high, dtype, shape):
         """原生整型直接用整型 RNG 生成，不经 float64。
 
@@ -291,9 +327,11 @@ class RandomData:
             (只有一条 RuntimeWarning)，声明的区间端点拿到的是符号相反的值。
         """
         info = numpy.iinfo(dtype)
-        lo = max(int(math.floor(low)), int(info.min))
-        hi = min(int(math.ceil(high)), int(info.max))
-        lo = min(lo, hi)
+        # ceil/floor 向内取整不越声明闭区间（向外 [1.5,2.5]→[1,3]）；整数端点恒等
+        lo = max(int(math.ceil(low)), int(info.min))
+        hi = min(int(math.floor(high)), int(info.max))
+        if lo > hi:
+            raise ValueError(f"integer data_range [{low}, {high}] contains no representable {dtype} value")
         # 种子取自**已播种的全局 legacy RNG**，而不是 default_rng() 的 OS 熵：
         # 后者让原生整型输入无视 np.random.seed，同一用例每次跑数据都不同
         # （batch_seed 的可复现承诺对整型形同虚设，免上传的配方也无从复算）。
@@ -331,6 +369,9 @@ class RandomData:
                 low = max(low, finfo.min / 2)
                 high = min(high, finfo.max / 2)
                 array = numpy.random.uniform(low, high, shape).astype(dtype, copy=False)
+            elif distribution == "uniform" and dtype == "bool" and self._covers_bool_domain(low, high):
+                # bool 非 integer：uniform astype(bool) 非零全 True；覆盖完整域改离散抽样
+                array = self._gen_bool_data(shape)
             elif distribution == "uniform" and self._spans_dtype_range(dtype, low, high):
                 array = self._gen_exponential_data(dtype, shape)
             elif _is_native_integer(dtype):
@@ -410,10 +451,9 @@ class RandomData:
         replace_list = self._must_contain_values(dtype, is_complex_imag)
         replace_count = len(replace_list)
         if replace_count > 1 and np_array.size > 0:  # more than one distinct must-contain value
-            if np_array.size <= replace_count:
-                # replace_list 先落成 np_array.dtype：直接 concatenate typed 数组与
-                # Python float 列表会被 numpy 提升成 float64（如 bf16 输入 + range(-0,+0)
-                # 的小 tensor 被静默改成 double）。
+            if np_array.size < replace_count:
+                # 装不下才子集抽样；等容量覆写注入，必现值全量出现
+                # replace_list 先落成 np_array.dtype，防 float 列表把结果提升成 float64
                 candidate = numpy.concatenate((np_array.reshape([-1]), numpy.array(replace_list, dtype=np_array.dtype)))
                 idx = numpy.random.permutation(candidate.size)
                 # use copy() to discard view of `candidate`

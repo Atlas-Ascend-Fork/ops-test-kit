@@ -43,7 +43,7 @@ class MockProcessContext:
         self.pipe_w.send(("RELEASED", device_id))
 
 
-def child_work(pipe_w, idx, device_id, use_device=True, grant_event=None, granted_idx=None, work_time=2):
+def child_work(pipe_w, idx, device_id, use_device=True, grant_event=None, granted_idx=None, work_time=1):
     """Acquire lock via DeviceLock, work, release."""
     try:
         mock_ctx = MockProcessContext(pipe_w)
@@ -55,8 +55,12 @@ def child_work(pipe_w, idx, device_id, use_device=True, grant_event=None, grante
         pipe_w.send(("ERROR", idx, str(e)))
 
 
-def run_test(test_name, num_children, num_devices, kill_plan, use_device=True, timeout=15):
-    """启动若干子进程并按 kill_plan 杀进程，验证 DeviceLockManager 的获取/释放/回收语义。"""
+def run_test(test_name, num_children, num_devices, kill_plan, use_device=True, timeout=10):
+    """按 kill_plan 杀进程，验证获取/释放/回收语义。
+
+    判定还校验释放配对与同设备持锁区间不重叠；区间取父进程收消息时刻
+    （互斥成立时下一次 ACQUIRED 必晚于上次 RELEASED/死亡到达，跨进程时钟不可比）。
+    """
     print(f"{'=' * 60}")
     print(f"Test: {test_name}")
     print(f"  children={num_children}, devices={num_devices}, use_device={use_device}, kill_plan={kill_plan}")
@@ -92,8 +96,9 @@ def run_test(test_name, num_children, num_devices, kill_plan, use_device=True, t
 
     acquired_order = []
     released_order = []
-    killed = set()
     killed_plan = set()
+    acquire_ts = {}
+    release_ts = {}
 
     start = time.time()
 
@@ -106,21 +111,15 @@ def run_test(test_name, num_children, num_devices, kill_plan, use_device=True, t
                 if child_idx not in killed_plan and elapsed >= delay:
                     print(f"  [{elapsed:.1f}s] >>> KILL child {child_idx} (pid={procs[child_idx]['proc'].pid}) <<<")
                     procs[child_idx]["proc"].kill()
+                    release_ts.setdefault(child_idx, time.monotonic_ns())  # 死亡事件闭合持锁区间
                     killed_plan.add(child_idx)
 
         # Process messages and detect dead children
         for i, (pipe_r, _) in enumerate(pipes):
-            if procs[i]["proc"].exitcode is not None and not procs[i]["dead_processed"]:
-                procs[i]["dead_processed"] = True
-                if i not in killed:
-                    killed.add(i)
-                if use_device:
-                    DeviceLockManager.on_process_dead(procs[i], grant_events, granted_indices)
+            if procs[i]["proc"].exitcode is not None and procs[i]["dead_processed"]:
                 continue
 
-            if procs[i]["proc"].exitcode is not None:
-                continue
-
+            # 先排空再判死：子进程发完 RELEASED 即退出，先看 exitcode 会孤儿化该消息
             if pipe_r.poll(0.01):
                 msg = pipe_r.recv()
                 if msg[0] == "REQUEST":
@@ -131,20 +130,27 @@ def run_test(test_name, num_children, num_devices, kill_plan, use_device=True, t
                     )
                 elif msg[0] == "ACQUIRED":
                     acquired_order.append(msg[1])
+                    acquire_ts[msg[1]] = time.monotonic_ns()
                     print(f"  [{elapsed:.1f}s] child {msg[1]} acquired dev {msg[2]}")
                 elif msg[0] == "RELEASED":
                     dev_id = msg[1]
                     released_order.append(dev_id)
+                    release_ts[i] = time.monotonic_ns()
                     print(f"  [{elapsed:.1f}s] child {i} released dev {dev_id}")
                     DeviceLockManager.release(procs[i], dev_id, grant_events[dev_id], granted_indices[dev_id])
                 elif msg[0] == "ERROR":
                     print(f"  [{elapsed:.1f}s] child {msg[1]} ERROR: {msg[2]}")
+                continue
+
+            if procs[i]["proc"].exitcode is not None and not procs[i]["dead_processed"]:
+                procs[i]["dead_processed"] = True
+                release_ts.setdefault(i, time.monotonic_ns())
+                if use_device:
+                    DeviceLockManager.on_process_dead(procs[i], grant_events, granted_indices)
 
         # Check if all done
         alive = sum(1 for p in procs if not p["dead_processed"])
         if alive == 0:
-            break
-        if use_device and len(acquired_order) >= num_children and len(released_order) + len(killed) >= num_children:
             break
 
     # Collect results
@@ -164,12 +170,29 @@ def run_test(test_name, num_children, num_devices, kill_plan, use_device=True, t
 
     # Verify: all non-killed children eventually acquired
     non_killed_acquired = [i for i in acquired_order if i not in killed_plan]
-    success = len(set(non_killed_acquired)) >= (num_children - len(killed_plan))
+    all_acquired = len(set(non_killed_acquired)) >= (num_children - len(killed_plan))
+    # 非被杀子进程必须配对释放（NoOp 锁注入时 released 为空，此处拦截）
+    all_released = all(release_ts.get(i) is not None for i in range(num_children) if i not in killed_plan)
+    # 同设备持锁区间互不重叠（含被杀子进程经死亡事件闭合的区间）
+    per_dev = {}
+    for i in range(num_children):
+        if acquire_ts.get(i) is not None and release_ts.get(i) is not None:
+            per_dev.setdefault(procs[i]["dev"], []).append((acquire_ts[i], release_ts[i]))
+    overlap = False
+    for intervals in per_dev.values():
+        intervals.sort()
+        for (_, prev_exit), (next_enter, _) in zip(intervals, intervals[1:]):
+            if next_enter < prev_exit:
+                overlap = True
+    success = all_acquired and all_released and not overlap
 
     print(f"\n  Acquired order: {acquired_order}")
     print(f"  Released: {released_order}")
     print(f"  Killed: {sorted(killed_plan)}")
     print(f"  Non-killed acquisitions: {len(set(non_killed_acquired))} (need >= {num_children - len(killed_plan)})")
+    print(f"  Release pairing: {'OK' if all_released else 'MISSING'}")
+    print(f"  Hold intervals per device: {sorted((d, sorted((e1, e2) for e1, e2 in iv)) for d, iv in per_dev.items())}")
+    print(f"  Interval overlap: {'YES' if overlap else 'NO'}")
     print(f"  Result: {'PASS' if success else 'FAIL'}")
     print()
     return success
@@ -181,7 +204,7 @@ def test_1_basic():
         "Basic: kill 1 child, verify next acquires",
         num_children=4,
         num_devices=1,
-        kill_plan=[(1.5, 0)],
+        kill_plan=[(0.8, 0)],
     )
 
 
@@ -191,7 +214,7 @@ def test_2_multi_device():
         "Multi-device: 2 devices, kill 1 on each",
         num_children=4,
         num_devices=2,
-        kill_plan=[(1.0, 0), (1.0, 1)],
+        kill_plan=[(0.5, 0), (0.5, 1)],
     )
 
 
@@ -202,8 +225,8 @@ def test_3_stress():
         "Stress: 8 children, 1 device, kill first 4 sequentially",
         num_children=8,
         num_devices=1,
-        kill_plan=[(1.0, 0), (2.0, 1), (3.0, 2), (4.0, 3)],
-        timeout=20,
+        kill_plan=[(0.5, 0), (1.0, 1), (1.5, 2), (2.0, 3)],
+        timeout=12,
     )
 
 

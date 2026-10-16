@@ -16,6 +16,7 @@ don't cover.
 
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -46,7 +47,8 @@ def _gen_certs(d):
     script = os.path.abspath(_SCRIPT)
     d = str(d)
     subprocess.run(["bash", script, "init-ca", d], check=True, capture_output=True)
-    subprocess.run(["bash", script, "server", d, "IP:127.0.0.1"], check=True, capture_output=True)
+    # 多 SAN（DNS + IP）覆盖拼接与 ${SAN} 边界（Bash 3.2 下 $SAN）会解析失败）
+    subprocess.run(["bash", script, "server", d, "DNS:localhost", "IP:127.0.0.1"], check=True, capture_output=True)
     subprocess.run(["bash", script, "client", d, _TENANT], check=True, capture_output=True)
 
 
@@ -175,7 +177,19 @@ class TestMTLSE2E:
         yield
         _reset_tls()
 
-    def test_handshake_succeeds(self, mtls_env):
+    def test_handshake_succeeds(self, mtls_env, monkeypatch, tmp_path):
         # positive: full client cert + matching CA → mTLS handshake → 200
         _set_tls(mtls_env["ca"], mtls_env["client_crt"], mtls_env["client_key"])
         assert _https_get(mtls_env["host"], mtls_env["port"]) == 200
+
+        # 未指定 tls_ca：默认信任根（SSL_CERT_FILE）承载合法服务端证书 → 200
+        monkeypatch.setenv("SSL_CERT_FILE", mtls_env["ca"])
+        _set_tls("", mtls_env["client_crt"], mtls_env["client_key"])
+        assert _https_get(mtls_env["host"], mtls_env["port"]) == 200
+
+        # 负例：默认信任根指向错误 CA → 握手拒绝
+        wrong = tmp_path / "wrong_ca"
+        subprocess.run(["bash", os.path.abspath(_SCRIPT), "init-ca", str(wrong)], check=True, capture_output=True)
+        monkeypatch.setenv("SSL_CERT_FILE", str(wrong / "ca.crt"))
+        with pytest.raises(ssl.SSLCertVerificationError):
+            _https_get(mtls_env["host"], mtls_env["port"])

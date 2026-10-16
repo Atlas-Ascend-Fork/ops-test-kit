@@ -57,7 +57,7 @@ def _parse_params_from_signature(sig: str) -> Optional[List[ParamInfo]]:
             keyword_only = True
             continue
         default = None
-        is_optional = keyword_only
+        is_optional = False
         is_var_positional = False
         if "=" in part_s:
             main_part, default = part_s.split("=", 1)
@@ -66,6 +66,8 @@ def _parse_params_from_signature(sig: str) -> Optional[List[ParamInfo]]:
             is_optional = True
         else:
             main_part = part_s
+        if re.search(r"Optional\[|\|\s*None\b", part_s):
+            is_optional = True
         # Detect *args (VAR_POSITIONAL) prefix, e.g. "*operands" or "*tensors"
         if main_part.startswith("*") and not main_part.startswith("**"):
             is_var_positional = True

@@ -116,15 +116,29 @@ class TestSplitByComma:
 
 
 class TestParseSignature:
-    def test_typed_and_optional_params(self):
-        """解析带类型和默认值的签名：'Tensor input, int dim=-1, bool keepdim=False'。"""
-        params = _parse_params_from_signature("Tensor input, int dim=-1, bool keepdim=False")
-        assert len(params) == 3
-        assert params[0].name == "input"
-        assert params[0].type == "Tensor"
-        assert params[1].is_optional
-        assert params[1].default == -1
-        assert params[2].is_optional
+    @pytest.mark.parametrize(
+        ("sig", "expected"),
+        [
+            # (签名串, [(参数名, is_optional), ...])
+            ("Tensor input, int dim=-1, bool keepdim=False", [("input", False), ("dim", True), ("keepdim", True)]),
+            ("input: Tensor, *, weight: Tensor, out: Tensor", [("input", False), ("weight", False), ("out", False)]),
+            ("input: Tensor, *, out: Optional[Tensor]", [("input", False), ("out", True)]),
+            ("a: int | None, b: Optional[str]", [("a", True), ("b", True)]),
+            ("input: Tensor, *, alpha: Number = 1", [("input", False), ("alpha", True)]),
+        ],
+        ids=["typed-defaults", "kw-only-required", "kw-only-Optional", "union-None", "kw-only-default"],
+    )
+    def test_typed_and_optional_params(self, sig, expected):
+        """带类型/默认值签名解析：'*' 只标记 keyword-only 传参方式、不改变必填性，
+        可选仅由显式默认值或 Optional/'| None' 标记决定。"""
+        params = _parse_params_from_signature(sig)
+        assert [(p.name, p.is_optional) for p in params] == expected
+        if sig == "Tensor input, int dim=-1, bool keepdim=False":
+            assert params[0].name == "input"
+            assert params[0].type == "Tensor"
+            assert params[1].default == -1
+        if "*" in sig:
+            assert all(p.is_keyword_only for p in params[1:])
 
     def test_empty_and_names_only_fallback(self):
         """空签名→None；无类型签名→按名字推断类型（input→Tensor, dim→int, keepdim→bool）。"""
@@ -197,12 +211,20 @@ class TestParseNpuDeclaration:
         assert len(params) == 1
 
     def test_star_makes_keyword_only(self):
-        """'*' 后的参数标记为 keyword_only。"""
+        """'*' 后的参数标记为 keyword_only 但不自动变为可选：可选性只看默认值/'?' 标记。"""
         params = _parse_npu_declaration("Tensor input, *, Tensor? smooth_scales=None, Tensor? group_index=None")
         assert len(params) == 3
         assert not params[0].is_keyword_only
         assert params[1].is_keyword_only
         assert params[2].is_keyword_only
+        assert params[1].is_optional
+        assert params[2].is_optional
+
+        params = _parse_npu_declaration("Tensor input, *, Tensor weight, Tensor out")
+        assert params[1].is_keyword_only
+        assert params[2].is_keyword_only
+        assert not params[1].is_optional
+        assert not params[2].is_optional
 
 
 # == manual overrides =======================================================
@@ -475,17 +497,28 @@ class TestNnFunctionalPyi:
         spe._PYI_CACHE = None
 
     def test_conv_tbc_reexport_and_signature(self):
-        """torch.nn.functional.conv_tbc 的 pyi reexport 解析：source=pyi-stub，3 个 tensor。"""
+        """torch.nn.functional.conv_tbc 的 pyi reexport 解析：source=pyi-stub，3 个 tensor；
+        pyi 签名解析的 kw-only 规则：无默认值必填、Optional/'| None' 标记可选。"""
         try:
             import torch  # noqa: F401
         except ImportError:
             pytest.skip("torch not available")
+        from ttk.core_modules.framework_api.torch.pyi_loader import _parse_pyi_param_str
+
         info = extract_api_params("torch.nn.functional.conv_tbc")
         assert info is not None
         assert info.source == "pyi-stub"
         assert info.tensor_count == 3
         names = [p.name for p in info.params]
         assert {"input", "weight", "bias", "pad"} <= set(names)
+
+        kw_params = _parse_pyi_param_str("input: Tensor, *, weight: Tensor, out: Tensor")
+        assert not kw_params[1].is_optional
+        assert not kw_params[2].is_optional
+        assert kw_params[1].is_keyword_only
+        assert kw_params[2].is_keyword_only
+        opt_params = _parse_pyi_param_str("input: Tensor, *, out: Tensor | None")
+        assert opt_params[1].is_optional
 
 
 # == var_positional 签名解析 ================================================
@@ -598,24 +631,33 @@ class TestAtenSchemaExtraction:
 
 class TestOverloadTensorLayout:
     @pytest.mark.parametrize(
-        ("out_type", "is_optional", "is_required", "return_count", "expected_out"),
+        ("out_type", "is_optional", "is_required", "return_count", "expected_out", "extra_inputs", "expected_req_in"),
         [
-            ("Tensor[]", False, True, 4, 4),  # required tensor list out
+            ("Tensor[]", False, True, 4, 4, [], 1),  # required tensor list out
+            ("Tensor[]", True, False, 4, 4, [], 1),  # optional tensor list out
+            ("Tensor", False, True, 1, 1, [], 1),  # required single out
+            ("Tensor", True, False, 0, 1, [], 1),  # optional single out
+            # 必填 kw-only 输入：'*' 只表示传参方式，计入 required_input_count
+            ("Tensor", False, True, 1, 1, [ParamInfo("weight", "Tensor", is_keyword_only=True)], 2),
         ],
-        ids=["req-list"],
+        ids=["req-list", "opt-list", "req-single", "opt-single", "req-single-kw-input"],
     )
-    def test_out_layout_variants(self, out_type, is_optional, is_required, return_count, expected_out):
-        """4 种 out 布局：optional/required × single/tensor_list。"""
+    def test_out_layout_variants(
+        self, out_type, is_optional, is_required, return_count, expected_out, extra_inputs, expected_req_in
+    ):
+        """out 布局 optional/required × single/tensor_list 与 required_input_count 计数。"""
         from ttk.core_modules.framework_api.api_model import OverloadTensorLayout
 
         params = [
             ParamInfo("input", "Tensor"),
+            *extra_inputs,
             ParamInfo("out", out_type, is_optional=is_optional, is_keyword_only=True),
         ]
         layout = OverloadTensorLayout.build(params, return_count=return_count)
         assert layout.out_param is not None
         assert layout.is_out_required is is_required
         assert layout.out_expected_count == expected_out
+        assert layout.required_input_count == expected_req_in
 
 
 # == OverloadInfo + pickle ==================================================

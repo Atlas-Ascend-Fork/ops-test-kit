@@ -40,8 +40,6 @@ from .testcase import TestcaseKernel
 
 
 def __use_manual_input(context: TestcaseKernel):
-    logging.info("Using manually configured input data")
-
     flat_binaries = context.flat_manual_input_binaries
     flat_shapes = promote_scalar_shapes(context.flat_input_shapes)
     flat_dtypes = resolve_numpy_dtypes(context.flat_input_dtypes)
@@ -268,7 +266,6 @@ def gen_input(context: TestcaseKernel, stored_inputs=None):
     switches = get_global_storage()
 
     if stored_inputs is not None:
-        logging.info("Using manual-data replay input data")
         flat_inputs = list(stored_inputs)
         context.input_arrays = tuple(nest_by_distribution(flat_inputs, context.input_distribution))
         context.actual_input_data_ranges = tuple(

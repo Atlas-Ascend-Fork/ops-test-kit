@@ -110,26 +110,45 @@ class TestGetPluginFunction:
         assert func.__name__ == func_name
 
     @pytest.mark.parametrize(
-        "decl",
+        ("decl", "plugin_type", "field"),
         [
-            "__golden__: dict",
-            '__golden__ = "not-a-dict"',
+            ("__golden__: dict", "golden", "__golden__"),
+            ('__golden__ = "not-a-dict"', "golden", "__golden__"),
+            ("def helper():\n    __golden__ = {'kernel': {'decl_op': 'plain'}}\n", "golden", "__golden__"),
+            ("async def helper():\n    __golden__ = {'kernel': {'decl_op': 'plain'}}\n", "golden", "__golden__"),
+            ("class Holder:\n    __golden__ = {'kernel': {'decl_op': 'plain'}}\n", "golden", "__golden__"),
+            ("def helper():\n    __input__ = {'kernel': {'decl_op': 'inp'}}\n", "input", "__input__"),
+            ("async def helper():\n    __input__ = {'kernel': {'decl_op': 'inp'}}\n", "input", "__input__"),
+            ("class Holder:\n    __input__ = {'kernel': {'decl_op': 'inp'}}\n", "input", "__input__"),
         ],
-        ids=["annotation-only", "non-dict-value"],
+        ids=[
+            "annotation-only",
+            "non-dict-value",
+            "local-golden",
+            "async-local-golden",
+            "class-golden",
+            "local-input",
+            "async-local-input",
+            "class-input",
+        ],
     )
-    def test_declaration_ignored_forms(self, tmp_path, decl):
-        """仅注解未赋值与非字典声明仍忽略。"""
+    def test_declaration_ignored_forms(self, tmp_path, decl, plugin_type, field):
+        """仅注解未赋值、非字典值与函数/异步函数/类作用域（新命名空间）声明均不注册。"""
         (tmp_path / "ignored.py").write_text(decl + "\n")
-        assert get_plugin_function("decl_op", "golden", "kernel", str(tmp_path)) is None
+        scanner = PluginScanner(str(tmp_path), plugin_type, field, "kernel")
+        assert scanner.scan() == {}
 
     def test_declaration_scan_does_not_execute_module(self, tmp_path):
-        """AST 扫描阶段不执行插件模块（模块级副作用不触发，注册表仍命中）。"""
+        """AST 扫描阶段不执行插件模块（模块级副作用不触发，注册表仍命中）；
+        模块级 if 分支内的声明同样命中。"""
         (tmp_path / "side_effect.py").write_text(
             'raise RuntimeError("must not execute")\n\n__golden__ = {"kernel": {"side_op": "plain"}}\n'
         )
+        (tmp_path / "in_if.py").write_text('if True:\n    __golden__ = {"kernel": {"if_op": "plain"}}\n')
         scanner = PluginScanner(str(tmp_path), "golden", "__golden__", "kernel")
         result = scanner.scan()
         assert "side_op" in result
+        assert "if_op" in result
 
     def test_plugin_path_forms_equivalent(self):
         """str / (Path,) / [str] 同目录输入等价且共享缓存条目。"""

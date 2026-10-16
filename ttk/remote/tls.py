@@ -52,6 +52,9 @@ def build_tls_connection(host, port, timeout, tls):
             ctx.check_hostname = False
         if ca:
             ctx.load_verify_locations(ca)
+        else:
+            # 无 tls_ca：加载默认信任根（SSL_CERT_FILE 等），空信任库必然验证失败
+            ctx.load_default_certs()
         if cert and key:
             ctx.load_cert_chain(cert, key)
         return http.client.HTTPSConnection(host, port, timeout=timeout, context=ctx)

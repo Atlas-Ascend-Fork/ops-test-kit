@@ -335,7 +335,7 @@ ORPHAN_GUARD_INTERVAL_S = 2.0
 
 # SUICIDE 后等待 worker 有序退出的宽限（秒）。须覆盖 atexit 清理链
 # （rtDeviceReset 裸测 ~5s）；terminate 仅作真挂死兜底
-SUICIDE_JOIN_TIMEOUT_S = 15
+SUICIDE_JOIN_TIMEOUT_S = 10
 
 
 def _start_orphan_guard() -> None:

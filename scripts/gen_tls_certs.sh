@@ -68,7 +68,7 @@ case "$OP" in
             -CAcreateserial -out "$D/server.crt" -days "$DAYS" -extfile "$D/server.ext"
         rm -f "$D/server.csr" "$D/server.ext"
         chmod 600 "$D/server.key"
-        echo "Server 证书在 $D/  （server.crt/server.key，SAN=$SAN）"
+        echo "Server 证书在 $D/  （server.crt/server.key，SAN=${SAN}）"
         echo "装到 XPU server：ca.crt + server.crt + server.key（ca.key 留 CA 机，不发）。"
         ;;
 

@@ -16,6 +16,18 @@ import logging
 from pathlib import Path
 from typing import Dict, Tuple
 
+_SCOPE_CONTAINERS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _iter_module_scope_nodes(node: ast.AST):
+    """模块作用域节点遍历：跳过函数/异步函数/类/lambda 的新命名空间，
+    保留模块级条件分支（if/while/try/with 体）内的声明。"""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _SCOPE_CONTAINERS):
+            continue
+        yield child
+        yield from _iter_module_scope_nodes(child)
+
 
 class PluginScanner:
     """Scan plugin declarations using AST without importing modules"""
@@ -99,13 +111,15 @@ class PluginScanner:
             return {}
 
     def _find_plugin_declaration(self, tree: ast.AST) -> ast.Dict:
-        """Find __golden__ or __input__ declaration.
+        """Find __golden__ or __input__ declaration at module scope.
 
         普通赋值检查全部目标（链式赋值 alias = __golden__ = {...} 的非首
         目标同样合法）；带类型注解的赋值（__golden__: dict = {...}）为
         AnnAssign 单目标。仅注解未赋值（无 value）与非字典值仍忽略。
+        函数/异步函数/类内的同名局部字典与类属性不注册（新命名空间），
+        模块级条件分支内的声明仍扫描。
         """
-        for node in ast.walk(tree):
+        for node in _iter_module_scope_nodes(tree):
             if isinstance(node, ast.Assign):
                 targets = node.targets
             elif isinstance(node, ast.AnnAssign) and node.value is not None:

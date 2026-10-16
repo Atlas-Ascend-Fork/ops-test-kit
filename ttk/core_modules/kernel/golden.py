@@ -308,12 +308,10 @@ def __select_golden_source(context: TestcaseKernel, output_dtypes: list, stored_
     """golden 来源四选一：manual-data 复跑装载 > Disable 占位 > 手工 bin > 现算。"""
     switches = get_global_storage()
     if stored_goldens is not None:
-        logging.info("Using manual-data replay golden data")
         return list(stored_goldens)
     if golden_mode(context, switches) == "Disable":
         return ["SUPPRESSED"]
     if context.manual_golden_binaries:
-        logging.info("Using manually configured output data")
         flat_binaries = context.flat_manual_golden_binaries
         flat_shapes = context.flat_output_shapes
         return [

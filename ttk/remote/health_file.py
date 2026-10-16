@@ -31,7 +31,7 @@ def atomic_write_json(path: str, data: dict) -> None:
     os.makedirs(parent, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=parent, prefix=".xpu_health_", suffix=".json")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f)
             f.flush()
             os.fsync(f.fileno())
@@ -53,7 +53,8 @@ def read_health_file(path: str = "") -> Optional[dict]:
     if not path:
         return None
     try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError, OSError):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError, OSError, UnicodeDecodeError):
         return None

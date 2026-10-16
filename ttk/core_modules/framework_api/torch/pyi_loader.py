@@ -24,6 +24,13 @@ from .type_inference import _coerce_default_value, _infer_type_from_name
 
 _PYI_CACHE = None
 
+_OPTIONAL_MARKER_RE = re.compile(r"Optional\[|\|\s*None\b")
+
+
+def _has_optional_marker(part: str) -> bool:
+    """Optional[...] / '| None' 类型标记视为可选（归一化剥壳前的原始串判定）。"""
+    return bool(_OPTIONAL_MARKER_RE.search(part))
+
 
 def _generic_inner(t: str) -> str:
     """泛型容器的完整内参（首个 '[' 起括号配平，支持嵌套泛型）。"""
@@ -134,7 +141,7 @@ def _parse_pyi_param_str(param_str: str) -> Optional[List[ParamInfo]]:
             # VAR_KEYWORD（**kwargs）不占参数位，stub 侧罕见
             continue
         default_str = None
-        is_optional = kw_only
+        is_optional = False
         is_var_positional = False
         main_part = part_s
         if main_part.startswith("*"):
@@ -145,6 +152,7 @@ def _parse_pyi_param_str(param_str: str) -> Optional[List[ParamInfo]]:
             main_part = main_part.strip()
             default_str = default_str.strip()
             is_optional = True
+        is_optional = is_optional or _has_optional_marker(part_s)
         if ":" in main_part:
             name, type_hint = main_part.split(":", 1)
             name = name.strip()

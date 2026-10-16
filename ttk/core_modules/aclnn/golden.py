@@ -98,7 +98,6 @@ class GoldenGenerator:
         flat 输出的声明 dtype，shape 取其 view shape（load_array 按 shape
         重排，4-bit 做打包后处理）。TensorList 输出槽按整槽单文件（存储连续）。
         """
-        logging.info("Using manually configured golden data")
         binaries = self._ctx.manual_golden_binaries or ()
         dtypes = resolve_numpy_dtypes(self._ctx.flat_output_dtypes)
         auto_goldens = None

@@ -169,7 +169,6 @@ class InputGenerator:
         文件经 load_array 读取（.pt/.npy/裸 bin），dtype 按 CSV 声明、
         shape 按 storage shape 推导。
         """
-        logging.info("Using manually configured input data")
         flat_binaries = self._ctx.flat_manual_tensor_binaries
         view_shapes = self._ctx.flat_tensor_view_shapes
         if flat_binaries and len(flat_binaries) > len(view_shapes):

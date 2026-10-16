@@ -7,10 +7,11 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""EndpointView 测试：resolve_providers 交集/优先级、pick_endpoint 轮询。"""
+"""EndpointView 测试：resolve_providers 交集/优先级、pick_endpoint 轮询、健康文件容错。"""
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 import yaml
@@ -94,7 +95,10 @@ def test_cli_alias_filter_resolves_canonical_provider(monkeypatch, tmp_path):
 
 
 def test_pick_endpoint_round_robin_and_none(monkeypatch, tmp_path):
-    """pick_endpoint: 双 endpoint 轮询；dead→None；provider 不存在→None。"""
+    """pick_endpoint: 双 endpoint 轮询；dead→None；provider 不存在→None；
+    损坏健康文件（坏字节/截断/非对象根）读侧 None、视同无存活；UTF-8 往返。"""
+    from ttk.remote.health_file import atomic_write_json, read_health_file
+
     # 轮询
     ev = _make_ev(
         monkeypatch,
@@ -124,3 +128,25 @@ def test_pick_endpoint_round_robin_and_none(monkeypatch, tmp_path):
         [{"host": "10.0.0.1", "port": 9090}],
     )
     assert ev.pick_endpoint("tf") is None
+
+    # 损坏健康文件 → None / 无存活（不得抛异常）
+    hp = Path(tmp_path) / "h.json"
+    for content, as_bytes in [
+        (b'{"endpoints": "\xff"}', True),  # 非法 UTF-8
+        (b'{"endpoints": {"h": {"alive"', True),  # 截断 JSON
+        ('["server"]', False),  # 非对象根
+        ('"server"', False),
+        ("true", False),
+        ("null", False),
+        ("42", False),
+    ]:
+        if as_bytes:
+            hp.write_bytes(content)
+        else:
+            hp.write_text(content, encoding="utf-8")
+        assert read_health_file(str(hp)) is None
+        assert ev.pick_endpoint("torch") is None
+
+    # 写读往返：非 ASCII 值一致（两端显式 UTF-8）
+    atomic_write_json(str(hp), {"endpoints": {"host:1": {"providers": ["torch±"]}}})
+    assert read_health_file(str(hp))["endpoints"]["host:1"]["providers"] == ["torch±"]
