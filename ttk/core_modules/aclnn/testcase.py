@@ -33,7 +33,12 @@ from ...utilities import (
     shape_span,
     shape_stride,
 )
-from ...utilities.container import deep_flatten, flatten_by_distribution, infer_list_distribution_from_nesting
+from ...utilities.container import (
+    deep_flatten,
+    flatten_by_distribution,
+    infer_list_distribution_from_nesting,
+    nest_by_distribution,
+)
 from ..common.testcase.api_base import ApiTestcaseBase
 from ..common.testcase.field_types import FIELD_TYPES
 from ..common.testcase.tensor import (
@@ -402,18 +407,22 @@ class TestcaseAclnn(ApiTestcaseBase):
     @property
     def xpu_attrs(self) -> dict:
         """Return attrs for XPU dispatch: pure_attrs + scalars (scalars are not in
-        X-Input-Schema, which only transports tensors, so they must go via attrs)."""
-        from ...utilities.container import deep_flatten
+        X-Input-Schema, which only transports tensors, so they must go via attrs).
 
+        ScalarList 参数（scalar_list_dist>0）按签名分布聚合为列表整体下发，
+        与执行路径 _create_acl_scalar 的聚合方式一致；普通标量仍单值下发。"""
         attrs = dict(self.pure_attrs)
         op_api_info = OpApiInfoKeeper().info_of(self.api_name)
         if op_api_info and self.scalars is not None:
             flat_scalars = deep_flatten(self.scalars)
-            for idx, name in enumerate(op_api_info.scalars):
-                if idx < len(flat_scalars):
-                    s = flat_scalars[idx]
-                    if s is not None:
-                        attrs[name] = s.item() if hasattr(s, "item") else s
+            dist = self.scalar_list_dist
+            groups = nest_by_distribution(flat_scalars, dist) if dist else flat_scalars
+            for name, group in zip(op_api_info.scalars, groups):
+                if isinstance(group, (tuple, list)):
+                    if any(s is not None for s in group):
+                        attrs[name] = [s.item() if hasattr(s, "item") else s for s in group]
+                elif group is not None:
+                    attrs[name] = group.item() if hasattr(group, "item") else group
         return attrs
 
     @property

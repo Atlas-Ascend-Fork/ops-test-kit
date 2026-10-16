@@ -14,6 +14,7 @@ flat properties, compression, and parameter validation.
 """
 
 from collections import OrderedDict
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -739,3 +740,64 @@ class TestIsTorchDtypeSupportScalarList:
     def test_non_native_scalar_dtype_unsupported(self, make_testcase):
         case = make_testcase(tensor_view_shapes=((4, 6),), tensor_dtypes=("float16",), scalar_dtypes=("hifloat8",))
         assert case.is_torch_dtype_support() is False
+
+
+class TestXpuAttrsScalarList:
+    """xpu_attrs：ScalarList 参数聚合为列表整体下发，普通标量单值下发，None 槽跳过。"""
+
+    @pytest.mark.parametrize(
+        ("params", "scalar_dtypes", "scalars_value", "expected"),
+        [
+            (
+                (("x", "aclTensorList*"), ("scalars", "aclScalarList*")),
+                (("float32", "float32", "float32"),),
+                [[-0.5, 1.0, 0.0]],
+                {"scalars": [-0.5, 1.0, 0.0]},
+            ),
+            (
+                (("x", "aclTensorList*"), ("scalars", "aclScalarList*"), ("alpha", "aclScalar*")),
+                (("float32", "float32"), "float64"),
+                [[0.5, 1.5], 2.0],
+                {"scalars": [0.5, 1.5], "alpha": 2.0},
+            ),
+            (
+                (("x", "aclTensorList*"), ("alpha", "aclScalar*"), ("beta", "aclScalar*")),
+                ("float32", "int64"),
+                [1.0, 2],
+                {"alpha": 1.0, "beta": 2},
+            ),
+            (
+                (("x", "aclTensorList*"), ("alpha", "aclScalar*"), ("beta", "aclScalar*")),
+                ("float32", "int64"),
+                [None, 2],
+                {"beta": 2},
+            ),
+        ],
+        ids=["scalar-list-whole", "mixed-list-and-single", "plain-scalars", "none-scalar-skipped"],
+    )
+    def test_xpu_attrs(self, make_testcase, monkeypatch, params, scalar_dtypes, scalars_value, expected):
+        """验证 scalars 按签名类型（ScalarList 整列表 / Scalar 单值 / None 跳过）写入 attrs。"""
+        info = _make_op_api_info(*zip(*params))
+        monkeypatch.setattr(
+            "ttk.core_modules.aclnn.testcase.OpApiInfoKeeper",
+            lambda: SimpleNamespace(info_of=lambda api: info),
+        )
+        case = make_testcase(scalar_dtypes=scalar_dtypes, scalars=scalars_value)
+        assert case.xpu_attrs == expected
+
+    def test_numpy_scalar_items_converted(self, make_testcase, monkeypatch):
+        """numpy 标量经 item() 转为 Python 原生值，attrs 可 JSON 序列化。"""
+        import json
+
+        import numpy
+
+        info = _make_op_api_info(["x", "scalars"], ["aclTensorList*", "aclScalarList*"])
+        monkeypatch.setattr(
+            "ttk.core_modules.aclnn.testcase.OpApiInfoKeeper",
+            lambda: SimpleNamespace(info_of=lambda api: info),
+        )
+        case = make_testcase(scalar_dtypes=(("float32",),), scalars=[[numpy.float32(0.5)]])
+        attrs = case.xpu_attrs
+        assert attrs == {"scalars": [0.5]}
+        assert isinstance(attrs["scalars"][0], float)
+        json.dumps(attrs)
