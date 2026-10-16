@@ -118,7 +118,7 @@ def _parse_mode(raw):
     raw = (raw or "").strip()
     if raw.isdigit():
         return int(raw)
-    return {"data": DATA, "perf": PERF}.get(raw.lower(), DATA)
+    return {"data": DATA, "perf": PERF, "data_perf": DATA | PERF}.get(raw.lower(), DATA)
 
 
 def _clamp_runtime(raw: str, default: int = 3, lo: int = 1, hi: int = 100) -> int:
@@ -338,9 +338,19 @@ class TenantManager:
         with self._lock:
             info = self._tenants.pop(tenant_id, None)
             if info and os.path.isdir(info["path"]):
-                shutil.rmtree(info["path"], ignore_errors=True)
+                self._safe_rmtree(info["path"])
                 return True
             return False
+
+    def _safe_rmtree(self, path):
+        """仅清理 sync_base_dir 真实路径之内的目录（tenant_id 流入 join，
+        入口校验之外的路径不得越界删除——防御纵深）。"""
+        base = os.path.realpath(self.sync_base_dir)
+        target = os.path.realpath(path)
+        if target != base and not target.startswith(base + os.sep):
+            logging.error("refuse to rmtree outside sync base: %s (base %s)", path, base)
+            return
+        shutil.rmtree(target, ignore_errors=True)
 
     def cleanup_expired(self):
         now = time.time()
@@ -356,7 +366,7 @@ class TenantManager:
         for tid, path in expired:
             logging.info(f"Tenant {tid} expired, cleaning up")
             if os.path.isdir(path):
-                shutil.rmtree(path, ignore_errors=True)
+                self._safe_rmtree(path)
 
 
 def _atomic_write_file(abs_path: str, content: bytes) -> None:
@@ -426,10 +436,12 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _valid_tenant_id(tid):
-        """Reject path-traversal / injection in tenant_id (flows into os.path.join)."""
+        """Reject path-traversal / injection in tenant_id (flows into os.path.join).
+
+        `.`/`..` 匹配字符集但经 join 会逃出 sync base，入口即拒。"""
         import re
 
-        return bool(tid) and bool(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", tid))
+        return bool(tid) and tid not in (".", "..") and bool(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", tid))
 
     def do_GET(self):
         if self.path.startswith("/v1/heartbeat"):
@@ -596,7 +608,6 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
         parsed = self._parse_run_headers(req_api)
         if parsed is None:
             return
-        tenant_id = parsed["tenant_id"]
         gate = self.data_gate
         gate_held = False
         if gate is not None:
@@ -604,15 +615,25 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(503, {"error": "server busy, retry"}, env={"api": req_api})
                 return
             gate_held = True
-        req_dir = tempfile.mkdtemp(prefix=f"req_{tenant_id}_", dir=self.tmp_root)
         try:
-            result, provider, n = self._dispatch_run(req_dir, req_api, parsed)
-            self._send_run_result(result, req_api, provider, n)
+            self._run_under_gate(parsed["tenant_id"], req_api, parsed)
         finally:
-            shutil.rmtree(req_dir, ignore_errors=True)
             if gate_held:
                 with contextlib.suppress(ValueError):
                     gate.release()
+
+    def _run_under_gate(self, tenant_id, req_api, parsed):
+        """data_gate 持有段：mkdtemp → dispatch → 回包 → 清理。
+
+        请求目录创建失败（磁盘满/权限）时已建目录的清理照常执行。"""
+        req_dir = None
+        try:
+            req_dir = tempfile.mkdtemp(prefix=f"req_{tenant_id}_", dir=self.tmp_root)
+            result, provider, n = self._dispatch_run(req_dir, req_api, parsed)
+            self._send_run_result(result, req_api, provider, n)
+        finally:
+            if req_dir is not None:
+                shutil.rmtree(req_dir, ignore_errors=True)
 
     def _parse_run_headers(self, req_api):
         """Parse and validate all /v1/run headers. Returns dict or None (error sent)."""
@@ -847,8 +868,9 @@ def _resolve_devices(devices, cfg):
             role = "cpu"
         device_ids = [int(x) for x in devices.split(",")] if use_device else ["cpu"]
     else:
-        use_device = True
         role, device_ids = detect_hardware(cfg["hardware_config"])
+        # cpu 兜底（/dev 无设备）不得置真：cpu profile 无 torch_lib
+        use_device = role != "cpu"
     return role, device_ids, use_device
 
 

@@ -592,7 +592,7 @@ def _manual_data_dump(
     dump-only 收尾。返回值非 None = 提前结束。
     """
     no_prof_end = switches.no_prof and not (is_multi_device and device_ids)
-    golden_is_xpu = switches.golden_mode == "XPU" and manual_case is None
+    golden_is_xpu = switches.golden_mode == "XPU"
     if not (dump_store is not None and manual_case is None and not golden_is_xpu and prepared_inputs is not None):
         return _dump_only_end(context, process_ctx) if no_prof_end else None
     goldens = context.golden_tensors or ()
@@ -617,34 +617,104 @@ def _manual_data_dump(
     return None
 
 
-def _collect_third_parties(context, switches, process_ctx, need_3party, golden_is_xpu):
-    """XPU 三方采集（cross_check 判据 / XPU golden 模式）。"""
-    third_parties = None
-    xpu_results = None
-    from ..common.xpu import collect_third_party, xpu_mode_of
+def _aclnn_xpu_derived(context, inputs=None, need_3party=False):
+    """aclnn XPU 采集参数派生（同步/重叠共用；重叠路径传快照 inputs）。
+    need_3party 驱动 cross_check 无三方输出的告警。"""
+    return {
+        "inputs": inputs if inputs is not None else _aclnn_xpu_inputs(context),
+        "input_names": _aclnn_xpu_input_names(context),
+        "attrs": dict(context.xpu_attrs or {}),
+        "param_order": _aclnn_param_order(context),
+        "input_dtypes": _aclnn_xpu_input_dtypes(context),
+        "need_3party": need_3party,
+    }
 
-    xpu_mode = xpu_mode_of(switches, need_3party or golden_is_xpu)
-    if xpu_mode:
+
+def _dispatch_xpu(context, switches, process_ctx, need_3party, golden_is_xpu, manual_case=None):
+    """aclnn 三方采集统一入口（dispatch/collect 两段式）。
+
+    aclnn 无执行前三方依赖（golden-XPU 的 golden 回填也在执行后比对前）——
+    重叠形态 collect 一次（NPU 后）。分流：manual 源 / golden-XPU / 自动降级 /
+    总闸关闭 → ready（内联同步完成）；否则 cross_check / PERF / dump_xpu →
+    background（NPU 执行期重叠）。collect 统一返回 (third_parties, xpu_results, provider)。
+    """
+    from ..common.xpu import (
+        MANUAL_XPU_PROVIDER,
+        XpuDispatch,
+        dump_manual_xpu_archive,
+        load_manual_third_parties,
+        manual_xpu_results,
+        overlap_deadline_s,
+        snapshot_xpu_inputs,
+        xpu_join_timeout,
+        xpu_mode,
+        xpu_overlap_enabled,
+    )
+
+    need_data = need_3party or golden_is_xpu
+    if need_data:
+        manual = load_manual_third_parties(context, manual_case)
+        if manual is not None:
+            process_ctx.notify_status("OnLoadManualXpu")
+            dump_manual_xpu_archive(context, manual)
+            return XpuDispatch.ready((manual, manual_xpu_results(), MANUAL_XPU_PROVIDER))
+    if not xpu_mode(switches, need_data):
+        return XpuDispatch.ready((None, None, None))
+    if golden_is_xpu or not xpu_overlap_enabled():
         process_ctx.notify_status("OnXpuProfiling")
-        _, third_parties, xpu_results = collect_third_party(
-            op_name=context.api_name,
-            inputs=_aclnn_xpu_inputs(context),
-            input_names=_aclnn_xpu_input_names(context),
-            op_type=None,
-            attributes=context.xpu_attrs,
-            testcase_name=context.testcase_name,
-            switches=switches,
-            need_data=need_3party or golden_is_xpu,
-            param_order=_aclnn_param_order(context),
-            input_dtypes=_aclnn_xpu_input_dtypes(context),
+        return XpuDispatch.ready(
+            _collect_xpu_remote(context, switches, need_data, _aclnn_xpu_derived(context, need_3party=need_3party))
         )
-        if need_3party and third_parties is None:
-            logging.warning(
-                "[%s] cross_check configured but no third_party output "
-                "(no XPU / endpoint down); cross_check outputs will GOLDEN_FAILURE",
-                context.testcase_name,
-            )
+    # 重叠：主线程派生+快照（attrs 取 dict copy 防 NPU 执行期改写）
+    inputs = snapshot_xpu_inputs(_aclnn_xpu_inputs(context))
+    derived = _aclnn_xpu_derived(context, inputs=inputs, need_3party=need_3party)
+    budget = overlap_deadline_s(switches)
+    process_ctx.notify_status("OnXpuDispatch")
+    return XpuDispatch.background(
+        _collect_xpu_remote, context, switches, need_data, derived, budget, join_timeout=xpu_join_timeout(budget)
+    )
+
+
+def _collect_xpu(context, switches, xpu) -> tuple:
+    """NPU 执行完毕的三方收割（ready 即取/幂等；重叠形态 join）+ case 目录槽位落盘。"""
+    process_ctx = process_context()
+    if xpu.pending:
+        process_ctx.notify_status("OnXpuCollect")
+    third_parties, xpu_results, xpu_provider = xpu.collect()
+    from ..common.xpu import dump_xpu_slot_files
+
+    dump_xpu_slot_files(context, switches, third_parties, xpu_provider)
     return third_parties, xpu_results
+
+
+def _collect_xpu_remote(context, switches, need_data, derived=None, deadline_s=None):
+    """aclnn 远端采集（同步形态 = 现状语义；重叠形态由 _dispatch_xpu 以快照
+    derived 参数调起——inputs/input_names/attrs/param_order/input_dtypes/
+    need_3party 均经 derived 携带，5 参内聚）。"""
+    from ..common.xpu import collect_third_party
+
+    if derived is None:
+        derived = _aclnn_xpu_derived(context)
+    priority, third_parties, xpu_results = collect_third_party(
+        op_name=context.api_name,
+        inputs=derived["inputs"],
+        input_names=derived["input_names"],
+        op_type=None,
+        attributes=derived["attrs"],
+        testcase_name=context.testcase_name,
+        switches=switches,
+        need_data=need_data,
+        param_order=derived["param_order"],
+        input_dtypes=derived["input_dtypes"],
+        deadline_s=deadline_s,
+    )
+    if derived["need_3party"] and third_parties is None:
+        logging.warning(
+            "[%s] cross_check configured but no third_party output "
+            "(no XPU / endpoint down); cross_check outputs will GOLDEN_FAILURE",
+            context.testcase_name,
+        )
+    return third_parties, xpu_results, (priority or "xpu")
 
 
 def _compare_and_finalize(context, switches, process_ctx, standards, third_parties, xpu_results, golden_is_xpu):
@@ -776,18 +846,25 @@ def _run_profile(
     if early_result is not None:
         return early_result
 
+    # ═══ XPU 三方 dispatch（NPU 执行期重叠；golden-XPU/降级形态为内联同步）═══
+    golden_is_xpu = switches.golden_mode == "XPU"
+    xpu = _dispatch_xpu(context, switches, process_ctx, need_3party, golden_is_xpu, manual_case)
+
     # ═══ Device execution under the device lock ═══
     early_result = _device_profiling(
         context, switches, process_ctx, dev_id, device_grant_events, device_granted_indices, is_multi_device, device_ids
     )
     if early_result is not None:
+        xpu.discard()
         return early_result
 
     if context.prof_result.failed():
+        xpu.discard()
         return _execute_failure_row(context, process_ctx)
 
     early_result = _multi_device_row_or_none(context, switches, process_ctx, is_multi_device, device_ids)
     if early_result is not None:
+        xpu.discard()
         return early_result
 
     # ═══ dump out（NPU 执行后）═══
@@ -797,13 +874,9 @@ def _run_profile(
     # ═══ Replay golden reload for dynamic output shapes ═══
     early_result = _reload_replay_golden_if_needed(context, process_ctx, manual_case, golden_loaded)
     if early_result is not None:
+        xpu.discard()
         return early_result
 
-    # ═══ XPU 三方采集（cross_check 判据 / XPU golden）═══
-    golden_is_xpu = switches.golden_mode == "XPU" and manual_case is None
-    third_parties = None
-    xpu_results = None
-    if not context.prof_result.failed():
-        third_parties, xpu_results = _collect_third_parties(context, switches, process_ctx, need_3party, golden_is_xpu)
+    third_parties, xpu_results = _collect_xpu(context, switches, xpu)
 
     return _compare_and_finalize(context, switches, process_ctx, standards, third_parties, xpu_results, golden_is_xpu)

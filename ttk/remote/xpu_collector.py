@@ -65,6 +65,7 @@ def collect_xpu_results(
     runtime: int = 3,
     param_order=None,
     dump_xpu: bool = False,
+    deadline_s=None,
 ):
     """Dispatch specs to xpu-server, return aggregated results.
 
@@ -130,6 +131,7 @@ def collect_xpu_results(
                 tmp_root=tmp_root,
                 runtime=runtime,
                 param_order=param_order,
+                deadline_s=deadline_s,
             )
             # Success: server-resolved API (r.api) wins over the client-side guess.
             resolved_api = (r.api if r else None) or api_label

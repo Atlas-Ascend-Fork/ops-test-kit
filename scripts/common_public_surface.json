@@ -77,5 +77,5 @@
  "run_aclnn_sim",
  "run_kernel_sim",
  "snapshot_manual_values",
- "xpu_mode_of"
+ "xpu_mode"
 ]

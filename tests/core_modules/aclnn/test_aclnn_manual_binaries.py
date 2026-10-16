@@ -25,6 +25,7 @@ import pytest
 
 from ttk.core_modules.aclnn import golden as aclnn_golden
 from ttk.core_modules.aclnn import input_generate as aclnn_input_generate
+from ttk.core_modules.aclnn import worker as aclnn_worker
 from ttk.core_modules.aclnn.testcase import TestcaseAclnn
 from ttk.core_modules.common.testcase.input_data import generate_np_storages
 
@@ -226,3 +227,120 @@ def test_load_golden_from_file_tensorlist_slot_uses_flat_prefix(tmp_path):
     goldens = aclnn_golden.GoldenGenerator(case)._load_golden_from_file()
 
     np.testing.assert_array_equal(goldens[0], g)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# manual_xpu_binaries 三方短路（CSV/case 目录 → 跳过远端 dispatch）
+# ══════════════════════════════════════════════════════════════════════════
+def test_manual_xpu_header_registered():
+    assert "manual_xpu_binaries" in TestcaseAclnn.complete_headers
+
+
+def _mx_case(path):
+    # 装载器 duck-typing：flat 三件套即可（不依赖完整 TestcaseAclnn 解析链）
+    return SimpleNamespace(
+        testcase_name="aclnn_manual_xpu",
+        api_name="aclnnAdd",
+        flat_manual_xpu_binaries=(str(path),) if path else None,
+        flat_output_view_shapes=((8,),),
+        flat_output_dtypes=("float32",),
+        xpu_attrs={},
+    )
+
+
+def _mx_slot_case(paths):
+    # manual-data case 目录槽位形态（load_manual_third_parties 的第二来源）
+    return SimpleNamespace(has_third_parties=True, third_party_paths=lambda: list(paths))
+
+
+def _mx_switches():
+    return SimpleNamespace(dump_config=SimpleNamespace(dump_xpu=False), xpu_perf=False, golden_mode="Enable")
+
+
+def _mx_process_ctx(recorder):
+    return SimpleNamespace(notify_status=lambda stage, *_: recorder.append(stage))
+
+
+def test_manual_xpu_short_circuits_remote_collect(tmp_path, monkeypatch):
+    path = tmp_path / "gpu.bin"
+    expected = np.arange(8, dtype=np.float32)
+    expected.tofile(path)
+
+    recorder = []
+
+    def _no_remote(**kwargs):
+        raise AssertionError("remote collect must not run when manual_xpu_binaries declared")
+
+    monkeypatch.setattr("ttk.core_modules.common.xpu.collect_third_party", _no_remote)
+
+    xpu = aclnn_worker._dispatch_xpu(_mx_case(path), _mx_switches(), _mx_process_ctx(recorder), True, False)
+    assert not xpu.pending  # manual 源 → ready
+    third_parties, xpu_results, provider = xpu.collect()
+
+    np.testing.assert_array_equal(third_parties[0], expected)
+    assert xpu_results == {"manual_binary": {"status": "PASS", "api": "manual_xpu_binaries"}}
+    assert provider == "manual_binary"
+    assert recorder == ["OnLoadManualXpu"]
+
+
+@pytest.mark.parametrize("via_slots", [False, True], ids=["csv-path", "case-dir-slots"])
+def test_golden_xpu_mode_also_short_circuits(tmp_path, monkeypatch, via_slots):
+    """golden-mode XPU + manual（CSV 路径 / case 目录槽位）：golden 位真值源同样来自本地装载。"""
+    path = tmp_path / "gpu.bin"
+    np.arange(8, dtype=np.float32).tofile(path)
+
+    recorder = []
+
+    def _no_remote(**kwargs):
+        raise AssertionError("remote collect must not run when manual_xpu_binaries declared")
+
+    monkeypatch.setattr("ttk.core_modules.common.xpu.collect_third_party", _no_remote)
+
+    golden_switches = SimpleNamespace(dump_config=SimpleNamespace(dump_xpu=False), xpu_perf=False, golden_mode="XPU")
+    manual_case = _mx_slot_case((str(path),)) if via_slots else None
+    xpu = aclnn_worker._dispatch_xpu(
+        _mx_case(None if via_slots else path), golden_switches, _mx_process_ctx(recorder), False, True, manual_case
+    )
+    third_parties, xpu_results, _provider = xpu.collect()
+
+    assert third_parties is not None
+    np.testing.assert_array_equal(third_parties[0], np.arange(8, dtype=np.float32))
+    assert xpu_results["manual_binary"]["status"] == "PASS"
+    assert recorder == ["OnLoadManualXpu"]
+
+
+@pytest.mark.parametrize("miss_third_party", [False, True])
+def test_undeclared_goes_remote(tmp_path, monkeypatch, caplog, miss_third_party):
+    """同步路径：未声明 manual → 远端采集；cross_check 无三方输出时告警。"""
+    import logging
+
+    case = _mx_case(tmp_path / "unused.bin")
+    case.flat_manual_xpu_binaries = None
+    recorder = []
+    sentinel_third = [np.arange(8, dtype=np.float32)]
+
+    def _remote(**kwargs):
+        recorder.append("remote")
+        if miss_third_party:
+            return None, None, None
+        return "remote", sentinel_third, {"remote": {"status": "PASS"}}
+
+    monkeypatch.setattr("ttk.core_modules.common.xpu.collect_third_party", _remote)
+    # 免完整 TestcaseAclnn 解析链：远端分支的输入提取器全部打桩
+    monkeypatch.setattr(aclnn_worker, "_aclnn_xpu_inputs", lambda ctx: [])
+    monkeypatch.setattr(aclnn_worker, "_aclnn_xpu_input_names", lambda ctx: [])
+    monkeypatch.setattr(aclnn_worker, "_aclnn_param_order", lambda ctx: None)
+    monkeypatch.setattr(aclnn_worker, "_aclnn_xpu_input_dtypes", lambda ctx: None)
+    monkeypatch.setattr("ttk.core_modules.common.xpu.xpu_overlap_enabled", lambda: False)  # 本用例钉同步路径
+
+    caplog.set_level(logging.WARNING)
+    xpu = aclnn_worker._dispatch_xpu(case, _mx_switches(), _mx_process_ctx(recorder), True, False)
+    third_parties, xpu_results, provider = xpu.collect()
+
+    assert recorder == ["OnXpuProfiling", "remote"]
+    if miss_third_party:
+        assert third_parties is None
+        assert any("no third_party output" in record.message for record in caplog.records)
+    else:
+        assert third_parties is sentinel_third
+        assert provider == "remote"

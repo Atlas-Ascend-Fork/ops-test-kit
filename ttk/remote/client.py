@@ -22,19 +22,20 @@ op_type、attributes、testcase_name、switches。
 __all__ = [
     "extract_spec_providers",
     "build_spec",
-    "xpu_mode_of",
     "extract_third_party",
     "dispatch_xpu",
     "collect_third_party",
+    "dump_xpu_outputs",
 ]
 
 import hashlib
+import http.client
 import logging
 import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import DATA, PERF, ExecutionSpec, get_tenant_id
+from . import ExecutionSpec, get_tenant_id, xpu_mode
 from .endpoint_view import _TP_ALIASES
 
 
@@ -80,16 +81,6 @@ def build_spec(provider: str, tp, spec_file: Optional[str], spec_class: Optional
     return ExecutionSpec(provider=provider, type="api", api=None)
 
 
-def xpu_mode_of(switches, need_data: bool) -> int:
-    """按位或：xpu_perf→PERF，need_data/--dump xpu→DATA。返回 0/PERF/DATA/DATA|PERF。"""
-    mode = 0
-    if getattr(switches, "xpu_perf", False):
-        mode |= PERF
-    if need_data or switches.dump_config.dump_xpu:
-        mode |= DATA
-    return mode
-
-
 def extract_third_party(xpu_results, priority: Optional[str]):
     """从 priority provider 取 outputs（纯函数，直接索引，不靠 dict 序）。
 
@@ -112,7 +103,7 @@ def _safe_dump_token(value, default: str) -> str:
     return token or default
 
 
-def _dump_xpu_output(output, target_dir, file_name, file_format):
+def dump_xpu_output(output, target_dir, file_name, file_format):
     """按格式落盘单个 XPU 输出（remote 独立部署：不依赖 core_modules 的 formatter 注册制）。"""
     if file_format == "npy":
         import numpy
@@ -123,7 +114,7 @@ def _dump_xpu_output(output, target_dir, file_name, file_format):
             f.write(output.tobytes() if hasattr(output, "tobytes") else bytes(output))
 
 
-def _dump_xpu_outputs(xpu_results, testcase_name: str, switches) -> None:
+def dump_xpu_outputs(xpu_results, testcase_name: str, switches) -> None:
     """Persist successful XPU outputs when --dump xpu is enabled.
 
     文件名对齐归档回放契约：``{testcase}_xpu_golden_{index}.bin``，可直接作为
@@ -154,7 +145,7 @@ def _dump_xpu_outputs(xpu_results, testcase_name: str, switches) -> None:
             if output is None or isinstance(output, str):
                 continue
             file_name = f"{case_token}_xpu_golden_{index}"
-            _dump_xpu_output(output, target_dir, file_name, file_format)
+            dump_xpu_output(output, target_dir, file_name, file_format)
             logging.info("[%s] Dumped XPU output: %s/%s", testcase_name or "testcase", target_dir, file_name)
 
 
@@ -171,18 +162,19 @@ def _probe_endpoints_alive(ev) -> bool:
     但"此刻读到不可用"不等于"这一整批都不可用" —— 直接探一次, 让恢复立刻被看见,
     而不是干等下一次心跳。
     """
-    import http.client
+    from .dispatcher import _create_connection
 
     for ep in getattr(ev, "_endpoints", []) or []:
         try:
-            conn = http.client.HTTPConnection(ep.host, ep.port, timeout=10)
+            # 经 _create_connection 读 RemoteConfig TLS 字段（与 dispatch 同一链路）
+            conn = _create_connection(ep.host, ep.port, timeout=10)
             try:
                 conn.request("GET", "/v1/heartbeat")
                 if 200 <= conn.getresponse().status < 300:
                     return True
             finally:
                 conn.close()
-        except OSError:
+        except (OSError, http.client.HTTPException):
             continue
     return False
 
@@ -243,6 +235,7 @@ def dispatch_xpu(
     switches,
     need_data: bool,
     param_order: Optional[list] = None,
+    deadline_s: Optional[float] = None,
 ):
     """Run XPU dispatch，返回 (xpu_results, priority_provider)。
 
@@ -291,7 +284,7 @@ def dispatch_xpu(
         specs,
         inputs=inputs,
         input_names=input_names,
-        mode=xpu_mode_of(switches, need_data),
+        mode=xpu_mode(switches, need_data),
         tenant_id=get_tenant_id(),
         op_name=op_name,
         op_type=op_type,
@@ -302,9 +295,10 @@ def dispatch_xpu(
         runtime=getattr(switches, "run_time", 3),
         param_order=param_order,
         dump_xpu=switches.dump_config.dump_xpu,
+        deadline_s=deadline_s,
     )
     _record_breaker(switches, **_judge_xpu_results(xpu_results))
-    _dump_xpu_outputs(xpu_results, testcase_name, switches)
+    dump_xpu_outputs(xpu_results, testcase_name, switches)
     return xpu_results, (specs[0].provider if specs else None)
 
 
@@ -339,6 +333,7 @@ def collect_third_party(
     param_order: Optional[list] = None,
     input_formats: Optional[list] = None,
     input_dtypes: Optional[list] = None,
+    deadline_s: Optional[float] = None,
 ) -> Tuple[Optional[str], Optional[list], Optional[dict]]:
     """门面：采集第三方输出，返回 (priority_provider, flat_third_parties, xpu_results)。
 
@@ -359,8 +354,8 @@ def collect_third_party(
     """
     from ttk.utilities import deep_flatten
 
-    xpu_mode = xpu_mode_of(switches, need_data)
-    if not xpu_mode:
+    mode = xpu_mode(switches, need_data)
+    if not mode:
         return None, None, None
 
     xpu_results, priority = dispatch_xpu(
@@ -375,6 +370,7 @@ def collect_third_party(
         param_order=param_order,
         input_formats=input_formats,
         input_dtypes=input_dtypes,
+        deadline_s=deadline_s,
     )
 
     if need_data:

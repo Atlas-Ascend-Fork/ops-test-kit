@@ -23,7 +23,7 @@ from ttk.remote import DATA
 from ttk.remote.client import dispatch_xpu
 from ttk.switches import get_global_storage
 
-from ...utilities import deep_flatten, get, load_array, render_table, resolve_numpy_dtypes
+from ...utilities import deep_flatten, get, render_table, resolve_numpy_dtypes
 from ..common.comparison.batch_consistency import assemble_batch_summary
 from ..common.dump import (
     DataDumper,
@@ -144,13 +144,6 @@ def _xpu_inputs(context):
     return ori or context.input_arrays
 
 
-def _xpu_mode(switches, need_data):
-    """按位或：xpu_perf→PERF，need_data→DATA。委托 ttk.remote.client。"""
-    from ..common.xpu import xpu_mode_of
-
-    return xpu_mode_of(switches, need_data)
-
-
 def _extract_third_party(xpu_results, priority):
     """从 priority provider 取 outputs。委托 ttk.remote.client。"""
     from ..common.xpu import extract_third_party
@@ -158,7 +151,7 @@ def _extract_third_party(xpu_results, priority):
     return extract_third_party(xpu_results, priority)
 
 
-def _do_xpu_profiling(context, xpu_mode):
+def _do_xpu_profiling(context, xpu_mode, deadline_s=None, inputs=None):
     """Run XPU dispatch，return priority provider name（specs[0].provider）。
     resolve_providers 失败 → xpu_results={} + return None（→ _extract_third_party None → GOLDEN_FAILURE）。
 
@@ -175,7 +168,7 @@ def _do_xpu_profiling(context, xpu_mode):
     need_data = bool(xpu_mode & DATA)
     xpu_results, priority = dispatch_xpu(
         op_name=context.op_name,
-        inputs=_xpu_inputs(context),
+        inputs=inputs if inputs is not None else _xpu_inputs(context),
         input_names=input_names,
         op_type=op_type,
         attributes=context.attributes if hasattr(context, "attributes") else {},
@@ -185,6 +178,7 @@ def _do_xpu_profiling(context, xpu_mode):
         switches=sw,
         need_data=need_data,
         param_order=_kernel_param_order(op_info),
+        deadline_s=deadline_s,
     )
     context.xpu_results = xpu_results
     return priority
@@ -254,6 +248,7 @@ def _resolve_manual_stores(context: TestcaseKernel, switches, process_ctx, dump_
             "kernel",
             switches,
             before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
+            require_goldens=switches.golden_mode != "XPU",
         )
     except Exception as exc:
         logging.exception("Manual Kernel data loading failure")
@@ -428,30 +423,76 @@ def _write_manual_dump(context: TestcaseKernel, dump_store, prepared_inputs):
     return None
 
 
-def _run_xpu_and_workspace(context: TestcaseKernel, need_3party):
+def _dispatch_xpu(context: TestcaseKernel, need_3party, golden_is_xpu, manual_case=None):
+    """kernel 三方采集统一入口（dispatch/collect 两段式）。
+
+    分流：manual 源 / golden-XPU / 自动降级 / 总闸关闭 → ready（内联同步完成，
+    collect 即取）；否则 cross_check / PERF / dump_xpu → background（NPU 执行期
+    重叠）。collect 统一返回 (third_parties, xpu_results, provider)。
+    """
+    from ..common.xpu import (
+        MANUAL_XPU_PROVIDER,
+        XpuDispatch,
+        dump_manual_xpu_archive,
+        load_manual_third_parties,
+        manual_xpu_results,
+        overlap_deadline_s,
+        snapshot_xpu_inputs,
+        xpu_join_timeout,
+        xpu_mode,
+        xpu_overlap_enabled,
+    )
+
     switches = get_global_storage()
     process_ctx = process_context()
-    if need_3party and context.manual_xpu_binaries:
+    need_data = need_3party or golden_is_xpu
+
+    manual = load_manual_third_parties(context, manual_case) if need_data else None
+    if manual is not None:
+        # 双来源短路：CSV manual_xpu_binaries 显式路径 / manual-data case 目录槽位
         process_ctx.notify_status("OnLoadManualXpu")
-        third_parties = _load_manual_xpu_binaries(context)
-        context.xpu_results = {
-            "manual_binary": {
-                "status": "PASS",
-                "api": "manual_xpu_binaries",
-            }
-        }
-    else:
+        context.xpu_results = manual_xpu_results()
+        dump_manual_xpu_archive(context, manual)
+        return XpuDispatch.ready((manual, context.xpu_results, MANUAL_XPU_PROVIDER))
+
+    mode = xpu_mode(switches, need_data)
+    if mode == 0:
+        return XpuDispatch.ready((None, None, None))
+    if golden_is_xpu or not xpu_overlap_enabled():
         process_ctx.notify_status("OnXpuProfiling")
-        xpu_mode = _xpu_mode(switches, need_3party)
-        xpu_priority = _do_xpu_profiling(context, xpu_mode) if xpu_mode else None
-        third_parties_nested = _extract_third_party(getattr(context, "xpu_results", None), xpu_priority)
-        if need_3party and third_parties_nested is None:
-            logging.warning(
-                "[%s] cross_check configured but no third_party output (no XPU / endpoint down); "
-                "cross_check outputs will GOLDEN_FAILURE",
-                context.op_name,
-            )
-        third_parties = list(deep_flatten(third_parties_nested)) if third_parties_nested is not None else None
+        return XpuDispatch.ready(_collect_xpu_remote(context, mode, None, None, need_3party))
+    # 重叠：主线程快照输入（防 NPU 执行原地改写 vs 线程序列化读竞争），线程跑采集
+    budget = overlap_deadline_s(switches)
+    _xpu_inputs_snapshot = snapshot_xpu_inputs(_xpu_inputs(context))
+    process_ctx.notify_status("OnXpuDispatch")
+    return XpuDispatch.background(
+        _collect_xpu_remote,
+        context,
+        mode,
+        budget,
+        _xpu_inputs_snapshot,
+        need_3party,
+        join_timeout=xpu_join_timeout(budget),
+    )
+
+
+def _collect_xpu_remote(context: TestcaseKernel, mode, deadline_s=None, inputs=None, need_3party=False):
+    """kernel 远端采集（同步形态 = 现状语义；重叠形态由 _dispatch_xpu 以
+    deadline_s/快照 inputs 调起）。返回 (third_parties, xpu_results, provider)。"""
+    xpu_priority = _do_xpu_profiling(context, mode, deadline_s=deadline_s, inputs=inputs)
+    third_parties_nested = _extract_third_party(getattr(context, "xpu_results", None), xpu_priority)
+    if need_3party and third_parties_nested is None:
+        logging.warning(
+            "[%s] cross_check configured but no third_party output (no XPU / endpoint down); "
+            "cross_check outputs will GOLDEN_FAILURE",
+            context.op_name,
+        )
+    third_parties = list(deep_flatten(third_parties_nested)) if third_parties_nested is not None else None
+    return third_parties, getattr(context, "xpu_results", None), (xpu_priority or "xpu")
+
+
+def _gen_workspaces(context: TestcaseKernel):
+    process_ctx = process_context()
     process_ctx.notify_status("OnGenWorkspace")
     context.dyn_workspace_arrays = __gen_workspaces(
         context.dyn_compile_result.workspaces, context.dyn_compile_result.debug_buf_size
@@ -462,7 +503,6 @@ def _run_xpu_and_workspace(context: TestcaseKernel, need_3party):
     context.bin_workspace_arrays = __gen_workspaces(
         context.bin_compile_result.workspaces, context.bin_compile_result.debug_buf_size
     )
-    return third_parties
 
 
 def _dump_prepared_data(context: TestcaseKernel):
@@ -494,26 +534,6 @@ def _assemble_xpu_golden(context: TestcaseKernel, third_parties, golden_is_xpu: 
         return return_structure
     context.golden_arrays = list(third_parties)
     return None
-
-
-def _load_manual_xpu_binaries(context: TestcaseKernel):
-    paths = context.flat_manual_xpu_binaries or ()
-    shapes = context.flat_output_shapes or ()
-    dtypes = resolve_numpy_dtypes(context.flat_output_dtypes)
-    arrays = []
-    for index, shape in enumerate(shapes):
-        path = paths[index] if index < len(paths) else None
-        if path is None or shape is None:
-            arrays.append(None)
-            continue
-        logging.info("Reading manual XPU file: %s ...", path)
-        array = load_array(path, get(dtypes, index), shape)
-        if tuple(array.shape) != tuple(shape):
-            raise ValueError(
-                f"Manual XPU output[{index}] shape {tuple(array.shape)} does not match expected {tuple(shape)}"
-            )
-        arrays.append(array)
-    return arrays
 
 
 def _device_profiling(context: TestcaseKernel, dev_id, device_grant_events, device_granted_indices):
@@ -652,16 +672,41 @@ def _run_profile(
     if early_result is not None:
         return early_result
 
-    golden_is_xpu = switches.golden_mode == "XPU" and manual_case is None
-    third_parties = _run_xpu_and_workspace(context, tol_state.need_3party or golden_is_xpu)
+    golden_is_xpu = switches.golden_mode == "XPU"
+    xpu = _dispatch_xpu(context, tol_state.need_3party, golden_is_xpu, manual_case)  # 三方 dispatch
+    _gen_workspaces(context)
     _dump_prepared_data(context)
-    early_result = _assemble_xpu_golden(context, third_parties, golden_is_xpu)
-    if early_result is not None:
-        return early_result
+    if golden_is_xpu:
+        # golden-XPU：三方即 golden，设备前收割（FAIL 不空跑设备 + golden 落盘契约）
+        early_result = _xpu_promote_golden(context, xpu)
+        if early_result is not None:
+            return early_result
     _device_profiling(context, dev_id, device_grant_events, device_granted_indices)
+    third_parties = _collect_xpu(context, switches, xpu)
     return _compare_and_finalize(
         context, tol_state.standards, third_parties, tol_state.pre_compare, tol_state.custom_compare
     )
+
+
+def _xpu_promote_golden(context: TestcaseKernel, xpu):
+    """golden-XPU 装配（设备前收割）：三方即 golden，缺失则整例 FAIL 提前返回。"""
+    third_parties, _results, _provider = xpu.collect()
+    early_result = _assemble_xpu_golden(context, third_parties, golden_is_xpu=True)
+    if early_result is not None:
+        xpu.discard()
+    return early_result
+
+
+def _collect_xpu(context: TestcaseKernel, switches, xpu):
+    """NPU 执行完毕的三方收割（ready 即取/幂等；重叠形态 join）+ case 目录槽位落盘。"""
+    process_ctx = process_context()
+    if xpu.pending:
+        process_ctx.notify_status("OnXpuCollect")
+    third_parties, xpu_results, provider = xpu.collect()
+    from ..common.xpu import dump_xpu_slot_files
+
+    dump_xpu_slot_files(context, switches, third_parties, provider)
+    return third_parties
 
 
 def __profiling_end_print(context: TestcaseKernel, compare_result: ComparisonResult, passed: str):

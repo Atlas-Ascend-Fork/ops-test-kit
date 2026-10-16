@@ -321,6 +321,7 @@ def _health_inst(**overrides):
         "mode": MODE.ASCEND_ONBOARD,
         "compile_only": False,
         "backend": None,
+        "force_cpu": False,
         "no_prof": False,
         "manual_data_dirs": (),
     }
@@ -366,6 +367,10 @@ class TestFilterUnhealthyDevices:
     @pytest.mark.usefixtures("_fake_health_dsmi")
     def test_npusim_skipped(self):
         assert InstanceBase._filter_unhealthy_devices(_health_inst(backend="npusim"), [0, 1]) == ()
+
+    @pytest.mark.usefixtures("_fake_health_dsmi")
+    def test_force_cpu_skipped(self):
+        assert InstanceBase._filter_unhealthy_devices(_health_inst(force_cpu=True), [0, 1]) == ()
 
     @pytest.mark.usefixtures("_fake_health_dsmi")
     def test_manual_dump_skipped(self):

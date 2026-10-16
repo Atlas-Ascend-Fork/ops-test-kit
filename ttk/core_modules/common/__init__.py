@@ -14,7 +14,7 @@
    子包 ``__init__`` 的 ``__all__`` 即契约，包根 re-export 亦可
    ``from ..common import Task, ...``）；跨目录 import 下划线成员违规。
 2. 新增公开名 = 同时改本文件 ``__all__`` 与 scripts/common_public_surface.json
-   （CI 经 scripts/check_refactor.py 断言）。
+   （经 scripts/check_conventions.py 断言）。
 """
 
 __all__ = [
@@ -83,7 +83,7 @@ __all__ = [
     "register_xpu_resolver",
     "invoke_third_party",
     "UnknownParamError",
-    "xpu_mode_of",
+    "xpu_mode",
     "extract_third_party",
     # invoke.py
     "Invoke",
@@ -205,7 +205,7 @@ from .xpu import (
     get_xpu_resolver,
     invoke_third_party,
     register_xpu_resolver,
-    xpu_mode_of,
+    xpu_mode,
 )
 
 # 懒导出：兑现 __all__ 声明但不 eager import（plugin/ 公开名经子包

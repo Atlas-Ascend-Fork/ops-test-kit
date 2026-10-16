@@ -11,7 +11,10 @@
 
 import os
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 from ttk.remote.server import xpu_server
 from ttk.remote.server.xpu_server import XpuRequestHandler
@@ -103,3 +106,80 @@ def test_handle_run_uses_assign_device(monkeypatch):
     finally:
         if os.path.exists(FAKE_IN):
             os.remove(FAKE_IN)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# /v1/run 请求侧守护：tenant_id 校验 / TenantManager 清理边界 / gate 释放
+# ══════════════════════════════════════════════════════════════════════════
+class TestTenantIdValidation:
+    """tenant_id 入口校验：拒绝 `.`/`..`（经 join 逃出 sync base）、路径分隔、超长。"""
+
+    @pytest.mark.parametrize(
+        ("tid", "expected"),
+        [
+            (".", False),
+            ("..", False),
+            ("a/b", False),
+            ("x" * 65, False),
+            ("abc", True),
+            ("a.b_c-1", True),
+        ],
+    )
+    def test_tenant_id_validation(self, tid, expected):
+        assert xpu_server.XpuRequestHandler._valid_tenant_id(tid) is expected
+
+
+class TestTenantManagerSafeRmtree:
+    """TenantManager 清理边界：越界路径拒绝删除，界内照常。"""
+
+    @pytest.mark.parametrize("escape_kind", ["sibling", "parent"])
+    def test_outside_base_refused(self, tmp_path, escape_kind):
+        target = tmp_path / (".." if escape_kind == "parent" else "outside")
+        target.mkdir() if escape_kind == "sibling" else None
+        keep = target / "keep.txt"
+        keep.write_text("x")
+        mgr = xpu_server.TenantManager(str(tmp_path / "base"))
+        mgr._tenants["evil"] = {"last_heartbeat": 0, "path": str(target)}
+
+        mgr.cleanup("evil")
+        assert keep.exists()  # 未被删除
+
+    def test_inside_base_removed(self, tmp_path):
+        base = tmp_path / "base"
+        tenant = base / "t1"
+        tenant.mkdir(parents=True)
+        (tenant / "data.bin").write_bytes(b"1")
+        mgr = xpu_server.TenantManager(str(base))
+        mgr._tenants["t1"] = {"last_heartbeat": 0, "path": str(tenant)}
+
+        assert mgr.cleanup("t1") is True
+        assert not tenant.exists()
+
+
+class TestMkdtempGateLeak:
+    """请求目录创建失败时 data_gate 必须释放。"""
+
+    def test_gate_released_when_mkdtemp_fails(self, tmp_path, monkeypatch):
+        handler = SimpleNamespace(
+            data_gate=threading.Semaphore(1),
+            gate_wait_s=0.1,
+            tmp_root=str(tmp_path),
+        )
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(xpu_server.tempfile, "mkdtemp", _boom)
+        monkeypatch.setattr(
+            xpu_server.XpuRequestHandler,
+            "_dispatch_run",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("unreachable")),
+        )
+        sent = []
+        monkeypatch.setattr(xpu_server.XpuRequestHandler, "_send_run_result", lambda *a, **k: sent.append(a))
+
+        with pytest.raises(OSError, match="disk full"):
+            xpu_server.XpuRequestHandler._run_under_gate(handler, "t1", "api", {})
+
+        # 关键断言：gate 已释放（可再次立即获取）
+        assert handler.data_gate.acquire(timeout=0.01) is True

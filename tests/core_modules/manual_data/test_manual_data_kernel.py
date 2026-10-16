@@ -259,7 +259,10 @@ def test_kernel_replay_keeps_store_intact_and_loads(monkeypatch, tmp_path):
     monkeypatch.setattr(profiling, "SpecResolver", _SpecResolverStub(lambda *_: None))
     monkeypatch.setattr(profiling, "execute_on_device", device_execution)
     monkeypatch.setattr(profiling, "_device_profiling", device_execution)
-    monkeypatch.setattr(profiling, "_run_xpu_and_workspace", lambda *_, **__: None)
+    from ttk.core_modules.common.xpu import XpuDispatch
+
+    monkeypatch.setattr(profiling, "_dispatch_xpu", lambda *_, **__: XpuDispatch.ready((None, None, None)))
+    monkeypatch.setattr(profiling, "_gen_workspaces", lambda *_: None)
     monkeypatch.setattr(profiling, "_dump_prepared_data", lambda *_: None)
     monkeypatch.setattr(profiling, "_compare_and_finalize", lambda *_: object())
 

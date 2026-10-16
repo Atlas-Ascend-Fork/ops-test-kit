@@ -86,7 +86,7 @@ _TIMEOUT_ELIGIBLE_STATES = frozenset(
 )
 # 设备锁获取是协调性等待：同卡他 worker 跑长用例时锁等待可合法超时——
 # 锁持有方死亡由 on_process_dead 回收兜底（四通路锁 stage 统一 "OnAcquireLock"）
-_TIMEOUT_EXEMPT_STAGES = frozenset({"OnAcquireLock"})
+_TIMEOUT_EXEMPT_STAGES = frozenset({"OnAcquireLock", "OnXpuCollect"})
 
 
 class PROCESS_RPC(Enum):

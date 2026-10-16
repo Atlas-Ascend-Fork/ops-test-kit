@@ -18,6 +18,21 @@ DATA = 0b01  # return remote xpu outputs
 PERF = 0b10  # collect performance
 
 
+def xpu_mode(switches, need_data: bool) -> int:
+    """三方采集模式位：xpu_perf→PERF，need_data/--dump xpu→DATA。
+
+    正本在协议层（client/dispatcher 与 xpu_mode 消费方共享）；
+    ttk.core_modules.common.xpu re-export 供 worker 侧统一导入。
+    """
+    mode = 0
+    if getattr(switches, "xpu_perf", False):
+        mode |= PERF
+    dump_config = getattr(switches, "dump_config", None)
+    if need_data or (dump_config is not None and getattr(dump_config, "dump_xpu", False)):
+        mode |= DATA
+    return mode
+
+
 def has_data(mode: int) -> bool:
     return bool(mode & DATA)
 

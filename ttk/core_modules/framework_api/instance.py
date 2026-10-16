@@ -49,6 +49,9 @@ class FrameworkApiInstance(InstanceBase):
         self.backend = get_backend(switches.force_cpu, framework=framework)
         if not self.backend.has_device():
             switches.proc_no_reuse = True
+            # 探测失败回落 CPU 后把运行定格为 CPU：设备池 id 是 CPU 槽位而非
+            # NPU id（DSMI 健康过滤按 force_cpu 跳过），worker 也免于二次探测。
+            switches.force_cpu = True
         logging.info(f"Framework API mode: backend={self.backend.device_type()}, framework={framework}")
 
     @staticmethod

@@ -1194,31 +1194,156 @@ def _manual_data_dump(
     return False
 
 
-def _collect_xpu(testcase, switches, process_ctx, manual_case, raw_inputs, ref_nps, golden_nps, perf, return_struct):
-    """三方采集与 XPU golden 回填。返回 (third_parties, xpu_results, golden_nps, early)。"""
-    third_parties = None
-    xpu_results = None
-    golden_is_xpu = switches.golden_mode == "XPU" and manual_case is None
-    if golden_is_xpu or (golden_nps and not any(isinstance(g, str) for g in golden_nps)):
-        tolerance = SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_tolerance()
-        # 按被测输出的 dtype 解析容差(golden 可能已被 Promote 抬精度,拿它解析会走偏);
-        # 拿不到 device 结果时退回 golden,保持原行为。
-        dtype_src = ref_nps if ref_nps else golden_nps
-        output_dtypes = tuple(str(g.dtype) if g is not None and hasattr(g, "dtype") else None for g in dtype_src)
+def _dispatch_xpu(testcase, switches, process_ctx, manual_case, raw_inputs):
+    """e2e 三方 dispatch 前置（NPU 执行期重叠）。
+
+    判据预解析对齐 _needs_promote 先例（flat_output_dtypes 声明 dtype——e2e
+    是唯一在执行后解析判据的通路，重叠 dispatch 需要执行前知道 need_3party）。
+    预解析失败/无声明 dtype/非 cross_check/golden-XPU/manual 命中/降级 → None
+    （_collect_xpu 走现状同步路径）；命中 → background 句柄。
+    """
+    from ttk.core_modules.common.xpu import (
+        XpuDispatch,
+        collect_third_party,
+        has_manual_xpu_source,
+        overlap_deadline_s,
+        snapshot_xpu_inputs,
+        xpu_join_timeout,
+        xpu_overlap_enabled,
+    )
+
+    golden_is_xpu = switches.golden_mode == "XPU"
+    if golden_is_xpu:
+        return None
+    if has_manual_xpu_source(testcase, manual_case):
+        return None  # manual 源——_collect_xpu 同步短路（声明探测，不读文件）
+    if not xpu_overlap_enabled():
+        return None
+    try:
+        output_dtypes = tuple(str(d) for d in (getattr(testcase, "flat_output_dtypes", ()) or ()))
+        if not output_dtypes:
+            return None
         standards = resolve_tolerance(
-            tolerance,
+            SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_tolerance(),
             testcase.flat_precision_tolerances,
             testcase.flat_absolute_precision,
             output_dtypes,
             switches.compare_method,
         )
-        need_3party = any(s.token == "cross_check" for s in standards)  # noqa: S105
-        from ttk.core_modules.common.xpu import collect_third_party, xpu_mode_of
+        if not any(s.token == "cross_check" for s in standards):  # noqa: S105  # token 为精度标准名，非凭据
+            return None
+    except Exception:  # noqa: BLE001  预解析失败（dtype 档缺失/配置错）回退同步
+        return None
+    inputs = snapshot_xpu_inputs(e2e_xpu_inputs(testcase, raw_inputs))
+    budget = overlap_deadline_s(switches)
+    process_ctx.notify_status("OnXpuDispatch")
 
-        xpu_mode = xpu_mode_of(switches, need_3party or golden_is_xpu)
-        if xpu_mode:
+    def _collect():
+        priority, third_parties, xpu_results = collect_third_party(
+            op_name=testcase.api_name,
+            inputs=inputs,
+            input_names=e2e_xpu_input_names(testcase),
+            op_type=None,
+            attributes=testcase.attributes or {},
+            testcase_name=testcase.testcase_name,
+            switches=switches,
+            need_data=True,
+            input_dtypes=e2e_xpu_input_dtypes(testcase),
+            deadline_s=budget,
+        )
+        return third_parties, xpu_results, (priority or "xpu")
+
+    return XpuDispatch.background(_collect, join_timeout=xpu_join_timeout(budget))
+
+
+def _discard_unconsumed(xpu_dispatch):
+    """句柄未被消费时弃置——外门未开（golden 全占位串，比对必败）的后台请求止损。"""
+    if xpu_dispatch is not None and xpu_dispatch.pending:
+        xpu_dispatch.discard()
+
+
+def _cross_check_declared(testcase, switches, ref_nps, golden_nps, golden_is_xpu) -> bool:
+    """cross_check 判据解析。dtype 源 = 设备输出 → 真 golden 兜底，golden-XPU
+    恒解析（dtype 缺省走空档）；占位 golden（SUPPRESSED/UNSUPPORTED/
+    GOLDEN_FAILURE）不阻断判定。"""
+    golden_real = bool(golden_nps) and not any(isinstance(g, str) for g in golden_nps)
+    if not (golden_is_xpu or golden_real or ref_nps):
+        return False
+    tolerance = SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_tolerance()
+    # 按被测输出的 dtype 解析容差(golden 可能已被 Promote 抬精度,拿它解析会走偏);
+    # 拿不到 device 结果时退回 golden。
+    dtype_src = ref_nps if ref_nps else (golden_nps or ())
+    output_dtypes = tuple(str(g.dtype) if g is not None and hasattr(g, "dtype") else None for g in dtype_src)
+    standards = resolve_tolerance(
+        tolerance,
+        testcase.flat_precision_tolerances,
+        testcase.flat_absolute_precision,
+        output_dtypes,
+        switches.compare_method,
+    )
+    return any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为精度标准名，非凭据
+
+
+def _collect_xpu(
+    testcase,
+    switches,
+    process_ctx,
+    manual_case,
+    raw_inputs,
+    ref_nps,
+    golden_nps,
+    perf,
+    return_struct,
+    xpu_dispatch=None,
+):
+    """三方采集与 XPU golden 回填。返回 (third_parties, xpu_results, golden_nps, early)。
+
+    判据解析（cross_check 判定）依赖输出 dtype：设备输出优先、真 golden 兜底，
+    占位 golden 不阻断。采集段由 cross_check / golden-XPU / --xpu-perf /
+    --dump xpu 任一触发；golden 为占位串（SUPPRESSED/UNSUPPORTED/
+    GOLDEN_FAILURE）时比对按占位语义走，采集照常。
+
+    xpu_dispatch：_dispatch_xpu 预派发的重叠句柄——存在则 collect（NPU
+    执行已在进行/完成），跳过本函数的 dispatch 段（判据/golden 升格逻辑不变）。
+    """
+    third_parties = None
+    xpu_results = None
+    golden_is_xpu = switches.golden_mode == "XPU"
+    need_3party = _cross_check_declared(testcase, switches, ref_nps, golden_nps, golden_is_xpu)
+    # 采集段门槛：判据需要 DATA（cross_check/golden-XPU）或显式采集开关
+    # （--xpu-perf/--dump xpu）——与 golden 状态解耦
+    from ttk.core_modules.common.xpu import (
+        MANUAL_XPU_PROVIDER,
+        collect_third_party,
+        dump_manual_xpu_archive,
+        dump_xpu_slot_files,
+        load_manual_third_parties,
+        manual_xpu_results,
+        xpu_mode,
+    )
+
+    collection_mode = xpu_mode(switches, need_3party or golden_is_xpu)
+    if golden_is_xpu or collection_mode:
+        if xpu_dispatch is not None:
+            # 预派发重叠句柄：NPU 执行期已在采集，collect 收割（本函数 dispatch 段跳过）
+            if xpu_dispatch.pending:
+                process_ctx.notify_status("OnXpuCollect")
+            third_parties, xpu_results, xpu_provider = xpu_dispatch.collect()
+            dump_xpu_slot_files(testcase, switches, third_parties, xpu_provider)
+        # manual 三方输出（CSV 显式路径 / manual-data case 目录槽位）：DATA 需求
+        # 时本地装载短路，跳过远端 dispatch；PERF-only 不走 manual（性能指标
+        # 只能来自在线执行）。references 供 e2e 无声明输出槽时取 shape/dtype。
+        elif need_3party or golden_is_xpu or getattr(getattr(switches, "dump_config", None), "dump_xpu", False):
+            manual = load_manual_third_parties(testcase, manual_case, references=ref_nps)
+            if manual is not None:
+                process_ctx.notify_status("OnLoadManualXpu")
+                dump_manual_xpu_archive(testcase, manual)
+                dump_xpu_slot_files(testcase, switches, manual, MANUAL_XPU_PROVIDER)
+                third_parties = manual
+                xpu_results = manual_xpu_results()
+        if collection_mode and xpu_results is None:
             process_ctx.notify_status("OnXpuProfiling")
-            _, third_parties, xpu_results = collect_third_party(
+            priority, third_parties, xpu_results = collect_third_party(
                 op_name=testcase.api_name,
                 inputs=e2e_xpu_inputs(testcase, raw_inputs),
                 input_names=e2e_xpu_input_names(testcase),
@@ -1229,12 +1354,15 @@ def _collect_xpu(testcase, switches, process_ctx, manual_case, raw_inputs, ref_n
                 need_data=need_3party or golden_is_xpu,
                 input_dtypes=e2e_xpu_input_dtypes(testcase),
             )
-            if need_3party and third_parties is None:
-                logging.warning(
-                    "[%s] cross_check configured but no third_party output "
-                    "(no XPU / endpoint down); cross_check outputs will GOLDEN_FAILURE",
-                    testcase.testcase_name,
-                )
+            dump_xpu_slot_files(testcase, switches, third_parties, priority or "xpu")
+        # cross_check 三方缺失告警：同步/重叠/manual 三来源统一在此判
+        if need_3party and third_parties is None:
+            logging.warning(
+                "[%s] cross_check configured but no third_party output "
+                "(no XPU / endpoint down); cross_check outputs will GOLDEN_FAILURE",
+                testcase.testcase_name,
+            )
+    _discard_unconsumed(xpu_dispatch)
     if golden_is_xpu:
         # 三方输出升格 golden 位：三方输出即 golden；失败语义 = 整例 FAIL
         # （golden 位真值源缺失，在 compare 前显式落败——比等占位串走
@@ -1360,6 +1488,9 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
 
     api = _resolve_api(testcase, adapter, backend, switches)
 
+    # XPU 三方 dispatch 前置（NPU 执行期重叠；预解析不命中返回 None 走同步）
+    xpu_dispatch = _dispatch_xpu(testcase, switches, process_ctx, manual_case, raw_inputs)
+
     outputs = _execute_phases(
         testcase,
         backend,
@@ -1387,15 +1518,26 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
             testcase, switches, process_ctx, manual_case, raw_inputs, backend, golden.promote, ref_nps, return_struct
         )
         if early:
+            _discard_unconsumed(xpu_dispatch)
             return
         # deferred 装载后补落盘（此处必为 full-flow——no-prof 已在上文收尾）
         if _manual_data_dump(
             testcase, switches, process_ctx, dump_store, manual_case, prepared_inputs, golden_nps, return_struct
         ):
+            _discard_unconsumed(xpu_dispatch)
             return
 
     third_parties, _, golden_nps, early = _collect_xpu(
-        testcase, switches, process_ctx, manual_case, raw_inputs, ref_nps, golden_nps, outputs.perf, return_struct
+        testcase,
+        switches,
+        process_ctx,
+        manual_case,
+        raw_inputs,
+        ref_nps,
+        golden_nps,
+        outputs.perf,
+        return_struct,
+        xpu_dispatch=xpu_dispatch,
     )
     if early:
         return

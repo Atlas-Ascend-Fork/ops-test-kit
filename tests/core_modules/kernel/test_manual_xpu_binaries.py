@@ -101,14 +101,23 @@ def test_manual_xpu_tensor_list_is_flattened():
     assert case.flat_manual_xpu_binaries == ("gpu0.bin", "gpu1.bin")
 
 
-def test_manual_xpu_bypasses_xpu_dispatch(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("need_3party", "golden_is_xpu", "via_slots"),
+    [(True, False, False), (False, True, True)],
+    ids=["csv-cross-check", "case-dir-golden-xpu"],
+)
+def test_manual_xpu_bypasses_xpu_dispatch(tmp_path, monkeypatch, need_3party, golden_is_xpu, via_slots):
     gpu_path = tmp_path / "gpu.bin"
     expected = np.arange(8, dtype=np.float32)
     expected.tofile(gpu_path)
 
     case = _make_testcase()
-    case.manual_xpu_binaries = (str(gpu_path),)
-    _validate(case)
+    if via_slots:
+        manual_case = SimpleNamespace(has_third_parties=True, third_party_paths=lambda: [str(gpu_path)])
+    else:
+        case.manual_xpu_binaries = (str(gpu_path),)
+        _validate(case)
+        manual_case = None
     case.dyn_compile_result = SimpleNamespace(workspaces=(), debug_buf_size=0)
     case.cst_compile_result = SimpleNamespace(workspaces=(), debug_buf_size=0)
     case.bin_compile_result = SimpleNamespace(workspaces=(), debug_buf_size=0)
@@ -122,15 +131,19 @@ def test_manual_xpu_bypasses_xpu_dispatch(tmp_path, monkeypatch):
         lambda *_: (_ for _ in ()).throw(AssertionError("XPU dispatch must not run")),
     )
 
-    actual = profiling._run_xpu_and_workspace(case, need_3party=True)
+    # dispatch/collect 两段式：manual 源 → ready 句柄，collect 即取（远端零调用）
+    xpu = profiling._dispatch_xpu(case, need_3party=need_3party, golden_is_xpu=golden_is_xpu, manual_case=manual_case)
+    assert not xpu.pending  # ready 形态
+    third_parties, xpu_results, provider = xpu.collect()
 
-    np.testing.assert_array_equal(actual[0], expected)
-    assert case.xpu_results == {
+    np.testing.assert_array_equal(third_parties[0], expected)
+    assert xpu_results == {
         "manual_binary": {
             "status": "PASS",
             "api": "manual_xpu_binaries",
         }
     }
+    assert provider == "manual_binary"
 
 
 def test_manual_xpu_wrong_element_count_is_rejected(tmp_path):
@@ -141,5 +154,7 @@ def test_manual_xpu_wrong_element_count_is_rejected(tmp_path):
     case.manual_xpu_binaries = (str(gpu_path),)
     _validate(case)
 
-    with pytest.raises(ValueError, match="does not match expected"):
-        profiling._load_manual_xpu_binaries(case)
+    from ttk.core_modules.common.xpu import ManualXpuLoadError, load_manual_third_parties
+
+    with pytest.raises(ManualXpuLoadError, match="does not match"):
+        load_manual_third_parties(case)

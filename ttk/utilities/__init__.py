@@ -12,7 +12,7 @@ ttk.utilities 懒加载门面：模块级 __getattr__ 按名转发，
 import ttk.utilities 零副作用。
 
 新增公开名的流程：在所属子模块声明（有 __all__ 加 __all__），并同步本表
-（CI 断言 scripts/check_refactor.py 对照公开面时按 __all__ 校验）。
+（scripts/check_conventions.py 对照公开面时按 __all__ 校验）。
 """
 
 import importlib

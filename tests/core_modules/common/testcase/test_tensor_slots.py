@@ -23,6 +23,7 @@ import numpy
 import pytest
 
 from ttk.core_modules.aclnn.testcase import TestcaseAclnn
+from ttk.core_modules.common.testcase.api_base import ApiTestcaseBase
 from ttk.core_modules.common.testcase.tensor import (
     Tensor,
     flat_slots,
@@ -639,3 +640,66 @@ class TestKernelInputSlots:
         numpy.testing.assert_array_equal(restored.input_arrays[0], physical)
         numpy.testing.assert_array_equal(restored.original_input_arrays[0], logical)
         assert restored.input_tensor_slots[0].shape == (2, 2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# manual_xpu_binaries 槽位（ApiTestcaseBase 共享字段：flat 展开 + 校验）
+# ══════════════════════════════════════════════════════════════════════════
+class _ManualXpuCase(ApiTestcaseBase):
+    """最小可实例化载体：覆写输出槽访问器（基类无 flat_output_view_shapes）。"""
+
+    __slots__ = ("_out_shapes",)
+
+    def __init__(self, out_shapes=()):
+        super().__init__()
+        self._out_shapes = out_shapes
+
+    @property
+    def flat_output_view_shapes(self):
+        return self._out_shapes
+
+
+class TestApiBaseManualXpuField:
+    """ApiTestcaseBase 共享字段：flat 展开（分布缓存直填）+ 校验（不成套）。"""
+
+    def test_flat_undeclared_is_none(self):
+        case = _ManualXpuCase()
+        assert case.flat_manual_xpu_binaries is None
+
+    def test_flat_passthrough_without_distribution(self):
+        case = _ManualXpuCase()
+        case.manual_xpu_binaries = ("gpu.bin",)
+        assert case.flat_manual_xpu_binaries == ("gpu.bin",)
+
+    def test_flat_deep_flattens_with_distribution(self):
+        case = _ManualXpuCase()
+        case._output_dist = (2,)  # 输出分布缓存直填（property 契约）
+        case.manual_xpu_binaries = (("gpu0.bin", "gpu1.bin"),)
+        assert case.flat_manual_xpu_binaries == ("gpu0.bin", "gpu1.bin")
+
+    def test_check_passes_without_manual_golden_pairing(self, tmp_path):
+        """aclnn/e2e 与 kernel 的差异：真跑设备，不要求 manual_input/golden 成套。"""
+        path = tmp_path / "gpu.bin"
+        numpy.arange(8, dtype=numpy.float32).tofile(path)
+
+        case = _ManualXpuCase(((8,),))
+        case.is_valid = True
+        case.manual_xpu_binaries = (str(path),)
+        case._check_manual_xpu_binaries()
+
+        assert case.is_valid is True
+
+    @pytest.mark.parametrize("paths_count", [1, 2])  # 1=缺文件 2=数量超槽
+    def test_check_rejects_invalid_declaration(self, tmp_path, paths_count):
+        path = tmp_path / "gpu.bin"
+        numpy.arange(8, dtype=numpy.float32).tofile(path)
+        target = str(path) if paths_count == 2 else str(tmp_path / "nope.bin")
+        declared = (target, str(path))[:paths_count] if paths_count == 2 else (target,)
+
+        case = _ManualXpuCase(((8,),))
+        case.is_valid = True
+        case.manual_xpu_binaries = declared if paths_count == 2 else (str(tmp_path / "nope.bin"),)
+        case._check_manual_xpu_binaries()
+
+        assert case.is_valid is False
+        assert case.fail_reason == "MANUAL_XPU_BINARIES_INVALID"

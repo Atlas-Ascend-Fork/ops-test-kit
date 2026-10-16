@@ -8,7 +8,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""TTK 架构守护断言。
+"""TTK 开发规范守护断言。
 
 检查项：
   1. 依赖方向——ttk/core_modules/common 存在时附加目标规则
@@ -18,16 +18,20 @@
      根公开面对照 scripts/common_public_surface.json
   4. ruff 复杂度基线（参数≤5 / 实现≤50 行）——PLR0913/C901/PLR0915，
      存量计数进基线，新违例即失败，存量清零后 --update-baseline 缩基线
+  5. 注释规范——注释/docstring 只描述代码功能：不引用 issue/PR 编号
+     （井号后接两位以上数字）、不含变更叙事词（旧 bug/旧实现）；
+     存量登记进基线（人工 reason），新违例即失败
 
 用法：
-  python3 scripts/check_refactor.py                     # 检查（新违例退出码 1）
-  python3 scripts/check_refactor.py --update-baseline   # 刷新基线（保留人工 reason）
+  python3 scripts/check_conventions.py                   # 检查（新违例退出码 1）
+  python3 scripts/check_conventions.py --update-baseline # 刷新基线（保留人工 reason）
 """
 
 import argparse
 import ast
 import json
 import pathlib
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -35,7 +39,7 @@ from collections import Counter
 REPO = pathlib.Path(__file__).resolve().parent.parent
 TTK = REPO / "ttk"
 COMMON = TTK / "core_modules" / "common"
-BASELINE = REPO / "scripts" / "refactor_baseline.json"
+BASELINE = REPO / "scripts" / "conventions_baseline.json"
 SURFACE = REPO / "scripts" / "common_public_surface.json"
 RUFF_CODES = ["PLR0913", "C901", "PLR0915"]
 
@@ -263,13 +267,79 @@ def check_ruff(baseline):
 # ── 主流程 ─────────────────────────────────────────────────────────────────
 
 
+COMMENT_BASELINE_KEY = "comments"
+_COMMENT_SCAN_TOPS = ("ttk", "tests", "scripts")
+_COMMENT_ISSUE_RE = re.compile(r"#\d{2,}")
+_COMMENT_NARRATIVE_RE = re.compile(r"旧\s?bug|旧实现")
+
+
+def _comment_violations():
+    """扫描注释与 docstring：issue/PR 编号引用、变更叙事词。
+
+    返回 [(relpath, lineno, 违例文本)]。编号与修复历史的追踪关系归 commit
+    message / issue 平台，注释只描述代码当前行为与契约。
+    """
+    import ast
+    import io
+    import tokenize
+
+    viol = []
+    for top in _COMMENT_SCAN_TOPS:
+        for path in sorted((REPO / top).rglob("*.py")):
+            if not path.is_file() or path.name == pathlib.Path(__file__).name:
+                continue  # 本脚本自身的规则描述豁免
+            rel = path.relative_to(REPO).as_posix()
+            src = path.read_text(encoding="utf-8", errors="ignore")
+            try:
+                for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+                    if tok.type != tokenize.COMMENT:
+                        continue
+                    for kind_re in (_COMMENT_ISSUE_RE, _COMMENT_NARRATIVE_RE):
+                        m = kind_re.search(tok.string)
+                        if m:
+                            viol.append((rel, tok.start[0], m.group()))
+                            break
+            except tokenize.TokenError:
+                pass
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                doc = ast.get_docstring(node)
+                if not doc:
+                    continue
+                for kind_re in (_COMMENT_ISSUE_RE, _COMMENT_NARRATIVE_RE):
+                    m = kind_re.search(doc)
+                    if m:
+                        # ast.Module 无 lineno（函数/类有），统一回退首行
+                        viol.append((rel, getattr(node, "lineno", 1), m.group()))
+                        break
+    return viol
+
+
+def check_comments(baseline):
+    """返回 (存量外新增违例, 存量计数)。基线键 = 文件 → {违例文本: reason}。"""
+    allow = baseline.get(COMMENT_BASELINE_KEY, {})
+    viol = []
+    total = 0
+    for rel, lineno, text in _comment_violations():
+        total += 1
+        if text in allow.get(rel, {}):
+            continue
+        viol.append((rel, lineno, text))
+    return viol, total
+
+
 def load_baseline():
     if BASELINE.exists():
         return json.loads(BASELINE.read_text(encoding="utf-8"))
     return {}
 
 
-def save_baseline(viol_direction, viol_underscore, ruff_counts, old):
+def save_baseline(viol_direction, viol_underscore, ruff_counts, old, comment_viol):
     """生成基线：direction/underscore 保留既有 reason；ruff 存按文件计数。"""
     doc = {}
     direction = {}
@@ -289,6 +359,11 @@ def save_baseline(viol_direction, viol_underscore, ruff_counts, old):
     for (fname, code), n in sorted(ruff_counts.items()):
         per_file.setdefault(fname, {})[code] = n
     doc[RUFF_BASELINE_KEY] = per_file
+    comments = {}
+    for rel, _lineno, text in comment_viol:
+        existing = old.get(COMMENT_BASELINE_KEY, {}).get(rel, {}).get(text)
+        comments.setdefault(rel, {})[text] = existing or "TODO: 补充理由"
+    doc[COMMENT_BASELINE_KEY] = comments
     BASELINE.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"基线已写入 {_rel(BASELINE)}（请为 TODO 条目补充理由）")
 
@@ -316,13 +391,14 @@ def main():
     viol_underscore = check_underscore(edges, baseline)
     viol_surface, surface_note = check_common_surface()
     viol_ruff, ruff_note = check_ruff(baseline)
+    viol_comments, comments_total = check_comments(baseline)
 
     if args.update_baseline:
         # 基线更新必须捕获**全量**违例（不过滤）——否则已基线条目会在二次更新时丢失
         all_direction = check_direction(edges, phase_common, {})
         all_underscore = check_underscore(edges, {})
         counts = _current_ruff_counts()
-        save_baseline(all_direction, all_underscore, counts, baseline)
+        save_baseline(all_direction, all_underscore, counts, baseline, _comment_violations())
         return 0
 
     failed = False
@@ -336,6 +412,11 @@ def main():
         print(f"\n[FAIL] 跨目录下划线 import 违例 {len(viol_underscore)} 处:")
         for fname, src, name in viol_underscore:
             print(f"  {fname} → from {src} import {name}")
+    if viol_comments:
+        failed = True
+        print(f"\n[FAIL] 注释规范违例 {len(viol_comments)} 处（issue/PR 编号、变更叙事词——追踪关系归 commit message）:")
+        for rel, lineno, text in viol_comments:
+            print(f"  {rel}:{lineno}  {text}")
     if viol_surface:
         failed = True
         print(f"\n[FAIL] common 公开面违例 {len(viol_surface)} 处:")
@@ -357,7 +438,8 @@ def main():
     if base_ruff:
         total = sum(n for f in base_ruff for n in base_ruff[f].values())
         print(
-            f"[INFO] 基线存量：ruff 复杂度 {total} 处 / "
+            f"[INFO] 基线存量：注释 {comments_total} 处 / "
+            f"ruff 复杂度 {total} 处 / "
             f"依赖方向 {sum(len(v) for v in baseline.get(DIRECTION_BASELINE_KEY, {}).values())} 处 / "
             f"下划线 {sum(len(v) for v in baseline.get(UNDERSCORE_BASELINE_KEY, {}).values())} 处"
         )
@@ -401,7 +483,7 @@ def dump_graph(edges, target):
         if e.file.startswith(src_dir + "/") or src_dir.startswith(f_dir + "/"):
             continue
         cross.append((f_dir, src_dir, e))
-    lines.append("# TTK 跨目录 import 图（生成: scripts/check_refactor.py --dump-graph）")
+    lines.append("# TTK 跨目录 import 图（生成: scripts/check_conventions.py --dump-graph）")
     lines.append(f"# 边数: {len(cross)}\n")
     agg = Counter((a, b) for a, b, _e in cross)
     lines.append("## 目录级汇总（from → to: 条数）")

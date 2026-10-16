@@ -1,4 +1,42 @@
 {
+  "comments": {
+    "tests/core_modules/aclnn/test_aclnn_device_args.py": {
+      "旧 bug": "上游已合入内容（#6fd9eb3），存量登记"
+    },
+    "tests/core_modules/aclnn/test_worker_golden_order.py": {
+      "#178": "上游已合入内容（#6fd9eb3），存量登记"
+    },
+    "tests/core_modules/common/comparison/test_binary_equal_cross_dtype.py": {
+      "#257": "存量测试 docstring 追踪引用，登记基线"
+    },
+    "tests/core_modules/common/comparison/test_chunked_parity.py": {
+      "旧实现": "上游已合入内容（#6fd9eb3），存量登记"
+    },
+    "tests/core_modules/common/comparison/test_compare_integration.py": {
+      "#57": "存量测试 docstring 追踪引用，登记基线",
+      "#283": "存量测试 docstring 追踪引用，登记基线"
+    },
+    "tests/core_modules/common/comparison/test_cross_check.py": {
+      "#292": "存量测试 docstring 追踪引用，登记基线"
+    },
+    "tests/core_modules/common/comparison/test_registry_infra.py": {
+      "#257": "存量测试 docstring 追踪引用，登记基线"
+    },
+    "tests/core_modules/common/comparison/test_stat_rel_err.py": {
+      "旧实现": "上游已合入内容（#6fd9eb3），存量登记",
+      "#76": "存量测试 docstring 追踪引用，登记基线",
+      "#257": "存量测试 docstring 追踪引用，登记基线"
+    },
+    "tests/core_modules/common/profiler/test_ms_profiler_api.py": {
+      "#142": "存量测试 docstring 追踪引用，登记基线"
+    },
+    "tests/core_modules/framework_api/test_determinism_md5.py": {
+      "#287": "存量测试 docstring 追踪引用，登记基线"
+    },
+    "tests/core_modules/geir/test_geir_prof_diff_scope.py": {
+      "#185": "存量测试 docstring 追踪引用，登记基线"
+    }
+  },
   "import_direction": {
     "ttk/core_modules/aclnn/instance.py": {
       "ttk.core_modules.kernel.compile.compiler": "helper kernel 编译为 kernel/aclnn 执行链共享设施"
@@ -85,11 +123,6 @@
     },
     "ttk/core_modules/common/device/platform.py": {
       "C901": 2
-    },
-    "ttk/core_modules/common/dump/manual_data.py": {
-      "C901": 1,
-      "PLR0913": 2,
-      "PLR0915": 1
     },
     "ttk/core_modules/common/instance.py": {
       "C901": 1

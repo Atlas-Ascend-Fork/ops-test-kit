@@ -38,7 +38,20 @@ from ..common.result import format_xpu_metrics
 from ..common.testcase.batch import resolve_deterministic_level
 from ..common.testcase.input_data import reseed_per_testcase
 from ..common.testcase.tensor import values_match_slots
-from ..common.xpu import collect_third_party, xpu_mode_of
+from ..common.xpu import (
+    MANUAL_XPU_PROVIDER,
+    XpuDispatch,
+    collect_third_party,
+    dump_manual_xpu_archive,
+    dump_xpu_slot_files,
+    load_manual_third_parties,
+    manual_xpu_results,
+    overlap_deadline_s,
+    snapshot_xpu_inputs,
+    xpu_join_timeout,
+    xpu_mode,
+    xpu_overlap_enabled,
+)
 from .compare import CompareInputs, compare_case
 from .compiler import GeirCompiler
 from .execute import GraphExecPlan, execute_graph
@@ -357,10 +370,13 @@ def _geir_run(
     if dump_store is not None:
         _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_snapshot)
 
-    third_parties, xpu_results = _xpu_stage(testcase, switches, need_3party or golden_is_xpu, process_ctx)  # 三方采集
+    xpu = _dispatch_xpu(testcase, switches, process_ctx, manual_case, need_3party)  # 三方 dispatch
     if golden_is_xpu:
+        # golden-XPU：三方即 golden，设备前收割（_xpu_golden_missing 提前失败省编译执行）
+        third_parties, _results, _provider = xpu.collect()
         early = _xpu_golden_missing(testcase, third_parties)
         if early is not None:
+            xpu.discard()
             return early
         testcase.golden_arrays = list(third_parties)
 
@@ -376,7 +392,9 @@ def _geir_run(
         prof_path=_prof_path(switches, testcase, mode),
         input_prefix=input_prefix,
     )
-    exec_result = execute_graph(testcase, dev_id, switches, plan, pre_compare)  # 图执行
+    exec_result = execute_graph(testcase, dev_id, switches, plan, pre_compare)  # 图执行（XPU 并行中）
+
+    third_parties, xpu_results = _collect_xpu(testcase, switches, xpu)
 
     process_ctx.notify_status("OnGeirCompare")
     inputs = CompareInputs(
@@ -521,18 +539,55 @@ def _golden_stage(testcase, golden_is_xpu, stored_goldens=None) -> None:
     testcase.output_arrays = ()
 
 
-def _xpu_stage(testcase, switches, need_data, process_ctx) -> tuple:
-    """三方输出采集（cross_check 需要 / xpu-perf 需要 / golden-mode XPU 升格 golden 位）。
+def _dispatch_xpu(testcase, switches, process_ctx, manual_case, need_3party) -> XpuDispatch:
+    """geir 三方采集统一入口（dispatch/collect 两段式）。
 
-    经 common.xpu 门面（local/remote 路由），不再直连 ttk.remote.client。
-    GEIR 的 input_names 来自 ProtoLoader，op_type 无概念传 None（服务端靠 op_name 推导）。
+    分流：manual 源 / golden-XPU（升格 golden + 提前失败）/ 总闸关闭 →
+    ready（内联同步完成）；否则 cross_check / PERF / dump_xpu →
+    background（NPU 执行期重叠）。collect 统一返回
+    (third_parties, xpu_results, provider)。
     """
-    if not xpu_mode_of(switches, need_data):
-        return None, None
-    process_ctx.notify_status("OnXpuProfiling")
-    _, third_parties, xpu_results = collect_third_party(
+    golden_is_xpu = switches.golden_mode == "XPU"
+    need_data = need_3party or golden_is_xpu
+    if need_data:
+        manual = load_manual_third_parties(testcase, manual_case)
+        if manual is not None:
+            process_ctx.notify_status("OnLoadManualXpu")
+            dump_manual_xpu_archive(testcase, manual)
+            return XpuDispatch.ready((manual, manual_xpu_results(), MANUAL_XPU_PROVIDER))
+    if not xpu_mode(switches, need_data):
+        return XpuDispatch.ready((None, None, None))
+    if golden_is_xpu or not xpu_overlap_enabled():
+        process_ctx.notify_status("OnXpuProfiling")
+        return XpuDispatch.ready(_collect_xpu_remote(testcase, switches, need_data))
+    # 重叠：主线程派生+快照（防图执行原地改写 backing storage vs 线程序列化读竞争）
+    inputs = snapshot_xpu_inputs(getattr(testcase, "original_input_arrays", None) or testcase.input_arrays)
+    budget = overlap_deadline_s(switches)
+    process_ctx.notify_status("OnXpuDispatch")
+    return XpuDispatch.background(
+        _collect_xpu_remote, testcase, switches, need_data, inputs, budget, join_timeout=xpu_join_timeout(budget)
+    )
+
+
+def _collect_xpu(testcase, switches, xpu) -> tuple:
+    """NPU 执行完毕的三方收割（ready 即取/幂等；重叠形态 join）+ case 目录槽位落盘。"""
+    process_ctx = process_context()
+    if xpu.pending:
+        process_ctx.notify_status("OnXpuCollect")
+    third_parties, xpu_results, xpu_provider = xpu.collect()
+    dump_xpu_slot_files(testcase, switches, third_parties, xpu_provider)
+    return third_parties, xpu_results
+
+
+def _collect_xpu_remote(testcase, switches, need_data, inputs=None, deadline_s=None) -> tuple:
+    """geir 远端采集（同步形态 = 现状语义；重叠形态由 _dispatch_xpu 以快照
+    inputs/deadline 调起）。经 common.xpu 门面，GEIR 的 input_names 来自
+    ProtoLoader，op_type 无概念传 None（服务端靠 op_name 推导）。"""
+    if inputs is None:
+        inputs = getattr(testcase, "original_input_arrays", None) or testcase.input_arrays
+    priority, third_parties, xpu_results = collect_third_party(
         op_name=testcase.op_name,
-        inputs=getattr(testcase, "original_input_arrays", None) or testcase.input_arrays,
+        inputs=inputs,
         input_names=_proto_input_names(testcase),
         op_type=None,
         attributes=getattr(testcase, "attributes", {}) or {},
@@ -542,8 +597,9 @@ def _xpu_stage(testcase, switches, need_data, process_ctx) -> tuple:
         param_order=_geir_param_order(testcase),
         input_formats=getattr(testcase, "input_formats", None),
         input_dtypes=getattr(testcase, "input_dtypes", None),
+        deadline_s=deadline_s,
     )
-    return third_parties, xpu_results
+    return third_parties, xpu_results, (priority or "xpu")
 
 
 def _proto_input_names(testcase) -> list:

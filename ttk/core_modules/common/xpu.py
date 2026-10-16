@@ -12,7 +12,7 @@
 - XpuResolver 注册制（加 provider = 加一行装饰器）
 - invoke_third_party + bind_params：三方 API 直调的绑定单份实现
   （整仓部署后 remote server 同源使用）
-- xpu_mode_of / extract_third_party / collect_third_party：worker 三方标杆编排层
+- xpu_mode / extract_third_party / collect_third_party：worker 三方标杆编排层
   与 remote client 的稳定查询面（三方采集仅 remote：ttk.conf.yaml remote.endpoints）
 
 三套装配分层（并存不合并）：
@@ -29,8 +29,23 @@ __all__ = [
     "invoke_third_party",
     "UnknownParamError",
     "bind_params",
-    "xpu_mode_of",
+    "xpu_mode",
+    "XPU_DATA",
+    "XPU_PERF",
+    "XpuDispatch",
+    "overlap_deadline_s",
+    "xpu_join_timeout",
+    "snapshot_xpu_inputs",
+    "xpu_overlap_enabled",
     "extract_third_party",
+    # manual_xpu 装载/落盘（--dump xpu 回放契约）
+    "ManualXpuLoadError",
+    "load_manual_third_parties",
+    "has_manual_xpu_source",
+    "manual_xpu_results",
+    "dump_manual_xpu_archive",
+    "dump_xpu_slot_files",
+    "collect_third_party",
 ]
 
 # Standard Packages
@@ -38,9 +53,156 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-# 数据位模式（need_data / need_perf 按位组合）
-XPU_DATA = 1
-XPU_PERF = 2
+# 数据位模式（need_data / need_perf 按位组合）——正本在 ttk.remote（协议层
+# client/server 共享），此处 re-export 保持 worker 侧统一从 common.xpu 导入
+from ...remote import DATA as XPU_DATA  # noqa: F401
+from ...remote import PERF as XPU_PERF
+from ...remote import xpu_mode
+
+# manual 装载在三方结果中的伪 provider 名（对齐远端产出的 dict 形态，屏显/报告零改动）
+MANUAL_XPU_PROVIDER = "manual_binary"
+
+# 重叠请求的 NPU 预算默认缓冲（--proc-timeout 未配置时）
+_DEFAULT_NPU_BUDGET_S = 600.0
+
+# collect 收割上界的固定余量：重试退避/建连等残余开销
+_JOIN_SLACK_S = 300.0
+
+
+def xpu_overlap_enabled() -> bool:
+    """重叠总闸（ttk.conf.yaml remote 段 xpu_overlap，缺省 true）——XPU 服务端
+    负载紧张时运维全局关闭，回到串行时序。"""
+    from ...config.loader import get_remote_config
+
+    try:
+        config = get_remote_config()
+    except Exception:  # noqa: BLE001  配置不可用时保守取默认（不因配置问题关掉功能）
+        return True
+    return bool(getattr(config, "xpu_overlap", True)) if config is not None else True
+
+
+def overlap_deadline_s(switches) -> float:
+    """重叠请求的 deadline 预算：dispatch_deadline + NPU 预算。
+
+    NPU 预算锚点 ``--proc-timeout``（SWITCHES 默认 3600s = 用例全程上界，
+    语义即 NPU 段上界；测试桩无该字段时取 600s 缓冲）——重叠请求横跨整个
+    NPU 执行期，deadline 须覆盖。XPU 侧自身的执行上界由服务端 run_deadline
+    兜底（与等待期无关），客户端预算只需覆盖"等待 NPU + XPU 执行 + 传输"。
+    """
+    from ...config.loader import get_remote_config
+
+    try:
+        config = get_remote_config()
+        dispatch_deadline = float(getattr(config, "dispatch_deadline_s", 300.0) or 300.0) if config else 300.0
+    except Exception:  # noqa: BLE001
+        dispatch_deadline = 300.0
+    proc_timeout = getattr(switches, "proc_timeout", None)
+    npu_budget = float(proc_timeout) if proc_timeout else _DEFAULT_NPU_BUDGET_S
+    return dispatch_deadline + npu_budget
+
+
+def xpu_join_timeout(deadline_s: float) -> float:
+    """重叠句柄 collect 的 join 上界：2×deadline + 余量。
+
+    线程上界 ≈ deadline（重试主循环）+ 一份 socket timeout（deadline
+    之后的末次在途请求）；超界 collect 抛 TimeoutError，不无限等待。
+    """
+    return 2.0 * float(deadline_s) + _JOIN_SLACK_S
+
+
+def snapshot_xpu_inputs(values):
+    """输入深快照（numpy 叶子 copy、嵌套容器递归、其余原样）。
+
+    重叠路径的竞争防线：后台线程序列化读输入 vs NPU 执行原地改写输入
+    （geir 图执行 backing storage / e2e inplace 算子）。派生与快照必须在
+    主线程 dispatch 之前完成。
+    """
+    import numpy
+
+    if isinstance(values, (list, tuple)):
+        return type(values)(snapshot_xpu_inputs(v) for v in values)
+    if isinstance(values, numpy.ndarray):
+        return values.copy()
+    return values
+
+
+class XpuDispatch:
+    """三方采集统一句柄（dispatch/collect 两段式，NPU 执行期重叠）。
+
+    ready：同步路径（golden-XPU / manual 源 / 自动降级 / 总闸关闭）——dispatch
+    时已内联完成采集，collect 即取。background：重叠路径——现同步采集函数
+    原样入 daemon 线程，结果/异常装箱，collect 时 join 收割；daemon 保证 NPU
+    失败早退不背长等待、进程退出不挂死（线程上界 = join_timeout）。
+
+    collect 幂等（首查缓存）；线程内异常在 collect 处重放；带 join_timeout
+    的 background 形态收割有界，超时抛 TimeoutError。
+    """
+
+    def __init__(self):
+        self._result = None
+        self._error = None
+        self._thread = None
+        self._collected = False
+        self._discarded = False
+        self._join_timeout = None
+
+    @property
+    def pending(self) -> bool:
+        """background 形态且未收割（通路据此发 OnXpuCollect 阶段通知）。"""
+        return self._thread is not None and not self._collected
+
+    @classmethod
+    def ready(cls, result) -> "XpuDispatch":
+        handle = cls()
+        handle._result = result
+        handle._collected = True
+        return handle
+
+    @classmethod
+    def background(cls, fn, *args, join_timeout=None, **kwargs) -> "XpuDispatch":
+        import threading
+
+        handle = cls()
+        handle._join_timeout = join_timeout
+
+        def _run():
+            try:
+                handle._result = fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001  装箱重放，collect 侧统一处理
+                handle._error = exc
+
+        handle._thread = threading.Thread(target=_run, daemon=True, name="xpu-dispatch")
+        handle._thread.start()
+        return handle
+
+    def collect(self):
+        """收割（幂等）：ready 即取；background join 后异常重放；
+        join_timeout 超界抛 TimeoutError（线程 daemon 自然消亡）。"""
+        if self._discarded:
+            raise RuntimeError("XpuDispatch already discarded")
+        if not self._collected:
+            if self._thread is not None:
+                self._thread.join(self._join_timeout)
+                if self._thread.is_alive():
+                    self._collected = True
+                    raise TimeoutError(
+                        f"XPU collect join timeout ({self._join_timeout:.0f}s): background dispatch stuck"
+                    )
+            self._collected = True
+            if self._error is not None:
+                raise self._error
+        return self._result
+
+    def discard(self, timeout: float = 5.0) -> None:
+        """弃置句柄：短超时 join 后放弃（daemon 线程自然消亡）。
+
+        供编排分支提前结束时调用，不阻塞失败上报；弃置后 collect 抛错。
+        """
+        if self._collected:
+            return
+        self._discarded = True
+        if self._thread is not None:
+            self._thread.join(timeout)
 
 
 class UnknownParamError(ValueError):
@@ -50,21 +212,6 @@ class UnknownParamError(ValueError):
     Turns a misspelled parameter name from a silent mis-computation into a
     loud failure.
     """
-
-
-def xpu_mode_of(switches, need_data: bool) -> int:
-    """三方采集编排：need_data/need_perf → DATA|PERF 按位模式。
-
-    --dump xpu（dump_config.dump_xpu）也触发 DATA 采集（三方数据落盘）。"""
-    mode = 0
-    if need_data:
-        mode |= XPU_DATA
-    dump_config = getattr(switches, "dump_config", None)
-    if dump_config is not None and getattr(dump_config, "dump_xpu", False):
-        mode |= XPU_DATA
-    if getattr(switches, "xpu_perf", False):
-        mode |= XPU_PERF
-    return mode
 
 
 def extract_third_party(xpu_results, priority):
@@ -250,6 +397,126 @@ def invoke_third_party(func, named: dict, attrs: dict, device, param_order: Opti
         return inst(*call_args, **call_kwargs)
     args, kwargs = bind_params(func, merged, device=device)
     return func(*args, **kwargs)
+
+
+class ManualXpuLoadError(ValueError):
+    """manual_xpu_binaries 装载失败（shape 与声明不符等）。"""
+
+
+def manual_xpu_results() -> dict:
+    """manual 装载的 xpu_results 伪条目（status=PASS，api 标记来源）。"""
+    return {MANUAL_XPU_PROVIDER: {"status": "PASS", "api": "manual_xpu_binaries"}}
+
+
+def has_manual_xpu_source(testcase, manual_case=None) -> bool:
+    """manual 三方输出源是否已声明（不读文件）。
+
+    判定口径与 load_manual_third_parties 的双来源一致：CSV
+    ``flat_manual_xpu_binaries`` 非空，或 manual-data case 目录含 xpu 槽位
+    文件。适用于 dispatch 前置探测等只需要"有没有源"的场景；文件内容仍由
+    load_manual_third_parties 在消费点装载。
+    """
+    if getattr(testcase, "flat_manual_xpu_binaries", None):
+        return True
+    return manual_case is not None and bool(getattr(manual_case, "has_third_parties", False))
+
+
+def load_manual_third_parties(testcase, manual_case=None, references=None) -> Optional[list]:
+    """manual 三方输出本地装载（--dump xpu 回放契约的对侧），双来源：
+
+    ① CSV ``manual_xpu_binaries`` 显式路径（NPU_DUMP_PATH 归档回放形态）；
+    ② manual-data case 目录槽位（``--manual-data-dirs`` 回放形态）——
+       ``xpu_{provider}_{idx}_{dtype}.{ext}`` 按 idx 对位（文件名一致即可读取，
+       多 provider 同 idx 取字典序首个）。
+
+    两来源均未声明返回 None（调用方走远端采集）；已声明按 flat 输出槽位对齐
+    装载：路径数不足的槽位 / 动态 shape 槽（None）补 None（该输出无三方数据，
+    cross_check 判据按既有占位语义处理）。shape/dtype 槽取声明槽
+    （``flat_output_shapes``/``flat_output_dtypes``，kernel/aclnn）；e2e 输出
+    为执行派生（无声明槽），经 ``references``（设备输出）取 shape 与 dtype，
+    口径同 golden 的 references 装载。
+    """
+    from ...utilities import get, load_array, resolve_numpy_dtypes
+    from .dump.manual_data import physical_array_spec
+
+    paths = getattr(testcase, "flat_manual_xpu_binaries", None)
+    if not paths and manual_case is not None and getattr(manual_case, "has_third_parties", False):
+        paths = manual_case.third_party_paths()
+    if not paths:
+        return None
+    shapes = getattr(testcase, "flat_output_shapes", None)
+    if shapes is None:
+        shapes = getattr(testcase, "flat_output_view_shapes", None)
+    if not shapes and references:
+        # e2e：输出无声明槽，shape/dtype 取设备输出（值不参与，仅槽位元数据）
+        shapes = tuple(tuple(r.shape) if r is not None and hasattr(r, "shape") else None for r in references)
+    shapes = shapes or ()
+    dtypes = resolve_numpy_dtypes(getattr(testcase, "flat_output_dtypes", ()) or ())
+    if not dtypes and references:
+        dtypes = tuple(getattr(r, "dtype", None) if r is not None and hasattr(r, "dtype") else None for r in references)
+    name = getattr(testcase, "testcase_name", None) or getattr(testcase, "op_name", None)
+    arrays = []
+    for index, shape in enumerate(shapes):
+        path = paths[index] if index < len(paths) else None
+        if path is None or shape is None:
+            arrays.append(None)
+            continue
+        logging.info("Reading manual XPU file: %s ...", path)
+        dtype = get(dtypes, index)
+        array = load_array(path, dtype, shape)
+        # load_array 返回 dtype 物理存储形态（complex32 尾维 [2] fp16 实/虚、
+        # int1 位打包、4bit 解包）——校验须按物理形态比，口径同 manual-data
+        # 的 physical_array_spec；错文件（元素数不符）经 _reshape_storage 宽容
+        # 回退后由本检查拦截。
+        _, storage_shape = physical_array_spec(dtype, shape)
+        if tuple(array.shape) != storage_shape:
+            raise ManualXpuLoadError(
+                f"[{name}] manual XPU output[{index}] shape {tuple(array.shape)} does not match "
+                f"declared {tuple(shape)} (storage {storage_shape})"
+            )
+        arrays.append(array)
+    return arrays
+
+
+def dump_manual_xpu_archive(testcase, arrays) -> None:
+    """--dump xpu 开启时，manual 装载产物按归档回放协议落盘（与远端产物同命名）。
+
+    复用 client.dump_xpu_outputs 的目录/命名/格式协议
+    （``{testcase}_xpu_golden_{index}.bin``）——manual 回放的用例再 dump 出来
+    仍是可回放形态，闭环完整。manual 不经远端，此函数是 manual 侧唯一归档点。
+    """
+    from ...switches import get_global_storage
+
+    switches = get_global_storage()
+    if not getattr(getattr(switches, "dump_config", None), "dump_xpu", False):
+        return
+    from ...remote.client import dump_xpu_outputs
+
+    testcase_name = getattr(testcase, "testcase_name", None) or getattr(testcase, "op_name", None) or "case"
+    dump_xpu_outputs(
+        {MANUAL_XPU_PROVIDER: {"status": "PASS", "outputs": list(arrays)}},
+        testcase_name,
+        switches,
+    )
+
+
+def dump_xpu_slot_files(testcase, switches, third_parties, provider) -> None:
+    """--dump xpu 开启时，三方输出按 case 目录槽位协议落盘。
+
+    ``xpu_{provider}_{idx}_{dtype}.{ext}``（DataDumper.dump_xpu 单份实现）——
+    ``--manual-data-dirs`` 回放侧按文件名 idx 对位读取（ManualDataCase.third_party_paths），
+    与 input/golden 槽同目录共存。远端/manual 两来源统一经此入口。
+    命名前缀：dump_file_prefix or testcase_name（kernel/aclnn 约定；e2e/geir
+    无该字段自然回退 testcase_name）。
+    """
+    if not third_parties:
+        return
+    if not getattr(getattr(switches, "dump_config", None), "dump_xpu", False):
+        return
+    from .dump.dumper import DataDumper
+
+    name_prefix = getattr(testcase, "dump_file_prefix", None) or getattr(testcase, "testcase_name", None) or "case"
+    DataDumper(switches, name_prefix).dump_xpu({provider: list(third_parties)})
 
 
 def collect_third_party(**kwargs):

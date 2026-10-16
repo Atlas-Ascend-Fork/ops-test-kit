@@ -8,7 +8,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-"""kernel worker XPU 辅助单元：_xpu_inputs 数据选择与 _xpu_mode 位运算 gate。
+"""kernel worker XPU 辅助单元：_xpu_inputs 数据选择与 xpu_mode 位运算 gate。
 
 自 tests/cli/test_xpu_perf_collect.py 拆出——本文件测 kernel.worker 内部辅助，
 CLI 参数/开关/校验用例留在 tests/cli/test_xpu_perf_collect.py。"""
@@ -37,31 +37,32 @@ def test_xpu_inputs_falls_back_to_input_arrays():
     assert _xpu_inputs(ctx) == ("NPU_FMT",)
 
 
-# -- _xpu_mode 位运算 --------------------------------------------------------
+# -- xpu_mode 位运算 ---------------------------------------------------------
 
 
 def test_xpu_mode_bitwise_or():
-    """_xpu_mode = xpu_perf(PERF) | need_data(DATA)；全 False 返回 0。"""
-    from ttk.core_modules.kernel import worker as prof
-    from ttk.remote import DATA, PERF
+    """xpu_mode = xpu_perf(PERF) | need_data(DATA)；全 False 返回 0。"""
+    from ttk.core_modules.common.xpu import XPU_DATA as DATA
+    from ttk.core_modules.common.xpu import XPU_PERF as PERF
+    from ttk.core_modules.common.xpu import xpu_mode
 
     sw_off = SWITCHES()
     sw_off.xpu_perf = False
-    assert prof._xpu_mode(sw_off, need_data=False) == 0
-    assert prof._xpu_mode(sw_off, need_data=True) == DATA
+    assert xpu_mode(sw_off, need_data=False) == 0
+    assert xpu_mode(sw_off, need_data=True) == DATA
 
     sw_on = SWITCHES()
     sw_on.xpu_perf = True
-    assert prof._xpu_mode(sw_on, need_data=False) == PERF
-    assert prof._xpu_mode(sw_on, need_data=True) == (DATA | PERF)
+    assert xpu_mode(sw_on, need_data=False) == PERF
+    assert xpu_mode(sw_on, need_data=True) == (DATA | PERF)
 
     sw_dump = SWITCHES()
     sw_dump.dump_config = DumpConfig()
     sw_dump.dump_config.dump_xpu = True
-    assert prof._xpu_mode(sw_dump, need_data=False) == DATA
+    assert xpu_mode(sw_dump, need_data=False) == DATA
 
     sw_both = SWITCHES()
     sw_both.xpu_perf = True
     sw_both.dump_config = DumpConfig()
     sw_both.dump_config.dump_xpu = True
-    assert prof._xpu_mode(sw_both, need_data=False) == (DATA | PERF)
+    assert xpu_mode(sw_both, need_data=False) == (DATA | PERF)

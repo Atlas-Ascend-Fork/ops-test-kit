@@ -24,6 +24,8 @@ from ttk.core_modules.common.dump import (
     load_manual_data_case,
     manual_data_dump_store,
 )
+from ttk.core_modules.common.dump.manual_data import ManualDataCase, _ManualDataFile
+from ttk.core_modules.common.xpu import dump_xpu_slot_files, load_manual_third_parties
 from ttk.core_modules.framework_api.input_generate import generate_inputs
 from ttk.core_modules.framework_api.testcase import TestcaseE2e
 from ttk.utilities import resolve_numpy_dtypes
@@ -434,10 +436,13 @@ def test_tensor_list_grouping_is_rebuilt_from_csv_structure(tmp_path):
         ("corrupt_file", "byte size"),
         ("unknown_sidecar", "unexpected file"),
         ("extra_slot", "slot count"),
+        ("dump_on_fail_input", "post-execution dump-on-fail input"),
+        ("unknown_input_segment", "unexpected file"),
     ],
 )
 def test_invalid_manual_data_is_rejected(tmp_path, scenario, expected_match):
-    """各类数据完整性违规（dtype 改写/文件损坏/未知 sidecar/多余槽位）均在 load_case 阶段被拒绝。"""
+    """各类数据完整性违规（dtype 改写/文件损坏/未知 sidecar/多余槽位/调试 dump
+    越界产物）均在 load_case 阶段被拒绝。"""
     case = _e2e_case(f"reject_{scenario}")
     store = ManualDataStore(tmp_path)
     case_dir = store.write_case(
@@ -456,6 +461,10 @@ def test_invalid_manual_data_is_rejected(tmp_path, scenario, expected_match):
         (case_dir / "manifest.json").write_text("{}", encoding="utf-8")
     elif scenario == "extra_slot":
         (case_dir / "input_2_float32.bin").write_bytes(b"")
+    elif scenario == "dump_on_fail_input":
+        (case_dir / "input_eager_0_float32.bin").write_bytes(b"")
+    elif scenario == "unknown_input_segment":
+        (case_dir / "input_mystery_0_float32.bin").write_bytes(b"")
 
     with pytest.raises(ManualDataError, match=expected_match):
         store.load_case(case, "e2e")
@@ -1060,3 +1069,296 @@ def test_aclnn_restore_rebuilds_tensor_and_scalar_without_plugins(monkeypatch):
 
     assert tuple(case.tensors[0].stride()) == (1,)
     assert float(case.scalars[0]) == pytest.approx(0.5)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# XPU 三方槽位（xpu_{provider}_{idx}_{dtype} 协议：识别 / 对位 / dump→load 回环）
+# ══════════════════════════════════════════════════════════════════════════
+def _switches(dump_xpu=True, root="/unused"):
+    return SimpleNamespace(
+        dump_config=SimpleNamespace(dump_xpu=dump_xpu, file_format="bin"),
+        root_path=root,
+        golden_mode="Enable",
+        xpu_perf=False,
+    )
+
+
+def _make_case_dir(tmp_path, files, name="manual_xpu_case"):
+    """files: {filename: bytes}——直接铺 case 目录。"""
+    case_dir = tmp_path / name
+    case_dir.mkdir()
+    for filename, payload in files.items():
+        (case_dir / filename).write_bytes(payload)
+    return case_dir
+
+
+def _array_file(arr):
+    return arr.tobytes()
+
+
+class TestScanCaseXpuSlots:
+    """_scan_case 对 xpu 槽位文件的识别/拒绝。"""
+
+    def test_xpu_file_recognized_alongside_input_golden(self, tmp_path):
+        arr = np.arange(8, dtype=np.float32)
+        case_dir = _make_case_dir(
+            tmp_path,
+            {
+                "input_0_float32.bin": _array_file(arr),
+                "golden_0_float32.bin": _array_file(arr),
+                "xpu_torch_0_float32.bin": _array_file(arr),
+            },
+        )
+
+        entries, xpu_entries, file_format = ManualDataStore._scan_case(case_dir)
+
+        assert file_format == "bin"
+        assert ("golden", 0) in entries
+        assert len(xpu_entries) == 1
+        assert xpu_entries[0].provider == "torch"
+        assert xpu_entries[0].index == 0
+        assert xpu_entries[0].dtype == "float32"
+
+    def test_unexpected_xpu_name_still_rejected(self, tmp_path):
+        arr = np.arange(8, dtype=np.float32)
+        case_dir = _make_case_dir(
+            tmp_path,
+            {"input_0_float32.bin": _array_file(arr), "xpu_torch_0_.bin": _array_file(arr)},
+        )
+
+        with pytest.raises(ManualDataError, match="unexpected file"):
+            ManualDataStore._scan_case(case_dir)
+
+    def test_duplicate_provider_slot_rejected(self, tmp_path):
+        """同格式同 provider+idx 不同 dtype = 槽位冲突（跨格式同名是协议允许——格式优先级择一）。"""
+        arr = np.arange(8, dtype=np.float32)
+        case_dir = _make_case_dir(
+            tmp_path,
+            {
+                "input_0_float32.bin": _array_file(arr),
+                "xpu_torch_0_float32.bin": _array_file(arr),
+                "xpu_torch_0_int32.bin": _array_file(arr.astype(np.int32)),
+            },
+        )
+
+        with pytest.raises(ManualDataError, match="duplicate"):
+            ManualDataStore._scan_case(case_dir)
+
+
+@pytest.mark.parametrize(
+    ("debug_files", "expected_entries"),
+    [
+        (
+            # kernel 调试 dump：input_dyn 去段映射，output/tiling 忽略
+            [
+                "input_dyn_0_float32.bin",
+                "golden_0_float32.bin",
+                "output_dyn_0_float32.bin",
+                "output_bin_0_float32.bin",
+                "tiling_data_dyn.bin",
+                "tiling_data_bin.bin",
+            ],
+            [("golden", 0), ("input", 0)],
+        ),
+        (
+            # aclnn 调试 dump：无段 output 忽略、无段 input 直读
+            ["input_0_float32.bin", "golden_0_float32.bin", "output_0_float32.bin"],
+            [("golden", 0), ("input", 0)],
+        ),
+        (
+            # geir 调试 dump：const/dynamic 双段等价去重
+            ["input_const_0_float32.bin", "input_dynamic_0_float32.bin", "golden_0_float32.bin"],
+            [("golden", 0), ("input", 0)],
+        ),
+    ],
+)
+def test_debug_dump_directory_scans_to_protocol_slots(tmp_path, debug_files, expected_entries):
+    """调试 dump 目录扫描：调试产物忽略/去段后，槽位集合与协议目录等价。"""
+    arr = np.arange(8, dtype=np.float32)
+    case_dir = _make_case_dir(tmp_path, {name: _array_file(arr) for name in debug_files})
+
+    entries, _xpu, file_format = ManualDataStore._scan_case(case_dir)
+
+    assert file_format == "bin"
+    assert sorted(entries) == expected_entries
+
+
+@pytest.mark.parametrize(
+    "variants",
+    [
+        ["input_const_0_float32.bin", "input_dynamic_0_float32.bin"],  # geir 双段内容不一致
+        ["input_0_float32.bin", "input_dyn_0_float32.bin"],  # 协议槽与调试段内容不一致
+    ],
+)
+def test_conflicting_debug_input_variants_rejected(tmp_path, variants):
+    """同槽多来源（多段/协议+段）内容不一致 → 槽位冲突。"""
+    arr = np.arange(8, dtype=np.float32)
+    files = {"golden_0_float32.bin": _array_file(arr), variants[0]: _array_file(arr)}
+    files[variants[1]] = _array_file(arr + 1)
+    case_dir = _make_case_dir(tmp_path, files)
+
+    with pytest.raises(ManualDataError, match="conflicting input slot 0"):
+        ManualDataStore._scan_case(case_dir)
+
+
+class TestThirdPartyPaths:
+    """ManualDataCase.third_party_paths：idx 对位 + 缺位补 None + 多 provider 取首。"""
+
+    @staticmethod
+    def _case(xpu_entries):
+        return ManualDataCase(
+            inputs=[], scalars=[], case_dir=None, file_format="bin", _golden_files=(), _xpu_files=tuple(xpu_entries)
+        )
+
+    @staticmethod
+    def _entry(index, provider, path="p.bin"):
+        return _ManualDataFile("xpu", index, "float32", "bin", path, None, provider)
+
+    def test_empty_case_has_no_third_parties(self):
+        case = self._case(())
+        assert case.has_third_parties is False
+        assert case.third_party_paths() == ()
+
+    def test_paths_ordered_by_index_with_none_gaps(self):
+        case = self._case([self._entry(0, "torch"), self._entry(2, "torch")])
+
+        assert case.has_third_parties is True
+        paths = case.third_party_paths()
+        assert len(paths) == 3  # 0..2 连续，缺位 1 补 None
+        assert paths[1] is None
+
+    def test_multi_provider_same_index_takes_lexicographic_first(self):
+        case = self._case([self._entry(0, "vllm"), self._entry(0, "torch")])
+
+        paths = case.third_party_paths()
+        assert len(paths) == 1
+        assert paths[0] == "p.bin"  # 排序后首个 = vllm（字典序先于 torch）
+
+
+class TestDumpLoadClosedLoop:
+    """DataDumper.dump_xpu 落盘 → _scan_case 识别 → load_manual_third_parties 装载。"""
+
+    def test_full_roundtrip(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
+        arr = np.arange(8, dtype=np.float32)
+
+        # ── dump 侧：case 目录槽位协议落盘 ──
+        testcase = SimpleNamespace(testcase_name="roundtrip_case", flat_manual_xpu_binaries=None)
+        dump_xpu_slot_files(testcase, _switches(dump_xpu=True), [arr], "torch")
+
+        case_dir = tmp_path / "roundtrip_case"
+        assert (case_dir / "xpu_torch_0_float32.bin").is_file()
+
+        # ── load 侧：manual case 从该目录建立，槽位装载 ──
+        store = ManualDataStore((str(tmp_path),))
+        manual_case = store.load_case(SimpleNamespace(testcase_name="roundtrip_case"), "kernel", require_goldens=False)
+        assert manual_case.has_third_parties
+
+        consumer = SimpleNamespace(
+            testcase_name="roundtrip_case",
+            flat_manual_xpu_binaries=None,
+            flat_output_shapes=((8,),),
+            flat_output_dtypes=("float32",),
+        )
+        arrays = load_manual_third_parties(consumer, manual_case)
+
+        np.testing.assert_array_equal(arrays[0], arr)
+
+        # 声明探测与装载同口径：case 目录命中判 True；无声明判 False；
+        # 纯声明（路径未触达）也判 True
+        from ttk.core_modules.common.xpu import has_manual_xpu_source
+
+        assert has_manual_xpu_source(consumer, manual_case) is True
+        assert has_manual_xpu_source(SimpleNamespace(flat_manual_xpu_binaries=None), None) is False
+        assert has_manual_xpu_source(SimpleNamespace(flat_manual_xpu_binaries=("/nonexistent",)), None) is True
+
+    def test_dump_disabled_writes_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
+
+        testcase = SimpleNamespace(testcase_name="off_case", flat_manual_xpu_binaries=None)
+        dump_xpu_slot_files(testcase, _switches(dump_xpu=False), [np.arange(8, dtype=np.float32)], "torch")
+
+        assert not (tmp_path / "off_case").exists()
+
+    @pytest.mark.parametrize("provider", ["a_12_b", "cuda_0", "x/1"])
+    def test_ambiguous_provider_rejected_at_dump(self, tmp_path, monkeypatch, provider):
+        """provider 名无法编码为可回放槽位文件名时，dump_xpu 抛 ValueError。"""
+        monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
+
+        testcase = SimpleNamespace(testcase_name="provider_case", flat_manual_xpu_binaries=None)
+        with pytest.raises(ValueError, match="cannot be encoded in dump slot filenames"):
+            dump_xpu_slot_files(testcase, _switches(dump_xpu=True), [np.arange(8, dtype=np.float32)], provider)
+
+
+class TestPathwayShortCircuitViaManualCase:
+    """manual-data case 目录形态的通路短路（geir 为代表）。"""
+
+    def test_geir_xpu_stage_loads_from_manual_case(self, tmp_path, monkeypatch):
+        from ttk.core_modules.geir import worker as geir_worker
+
+        arr = np.arange(8, dtype=np.float32)
+        monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
+        dump_xpu_slot_files(
+            SimpleNamespace(testcase_name="geir_replay"),
+            _switches(dump_xpu=True),
+            [arr],
+            "torch",
+        )
+
+        store = ManualDataStore((str(tmp_path),))
+        manual_case = store.load_case(SimpleNamespace(testcase_name="geir_replay"), "geir", require_goldens=False)
+
+        recorder = []
+
+        def _no_remote(**kwargs):
+            raise AssertionError("remote collect must not run when manual case carries xpu slots")
+
+        monkeypatch.setattr(geir_worker, "collect_third_party", _no_remote)
+
+        case = SimpleNamespace(
+            testcase_name="geir_replay",
+            op_name="Add",
+            flat_manual_xpu_binaries=None,  # CSV 未声明——纯 case 目录形态
+            flat_output_shapes=((8,),),
+            flat_output_dtypes=("float32",),
+        )
+        xpu = geir_worker._dispatch_xpu(
+            case,
+            _switches(dump_xpu=False),
+            SimpleNamespace(notify_status=lambda s, *a: recorder.append(s)),
+            manual_case,
+            True,
+        )
+        third_parties, xpu_results, _provider = xpu.collect()
+
+        np.testing.assert_array_equal(third_parties[0], arr)
+        assert xpu_results == {"manual_binary": {"status": "PASS", "api": "manual_xpu_binaries"}}
+        assert recorder == ["OnLoadManualXpu"]
+
+    def test_manual_case_without_xpu_slots_goes_remote(self, tmp_path):
+        """无 xpu 槽位的 manual case（纯 input/golden 回放）不受影响——远端照常。"""
+        arr = np.arange(8, dtype=np.float32)
+        _make_case_dir(
+            tmp_path,
+            {"input_0_float32.bin": _array_file(arr), "golden_0_float32.bin": _array_file(arr)},
+        )
+        store = ManualDataStore((str(tmp_path),))
+        manual_case = store.load_case(
+            SimpleNamespace(
+                testcase_name="manual_xpu_case",
+                flat_input_shapes=((8,),),
+                flat_input_dtypes=("float32",),
+                flat_output_dtypes=("float32",),
+            ),
+            "kernel",
+        )
+
+        assert manual_case.has_third_parties is False  # 无 xpu 槽
+
+        consumer = SimpleNamespace(
+            testcase_name="x",
+            flat_manual_xpu_binaries=None,
+            flat_output_shapes=((8,),),
+            flat_output_dtypes=("float32",),
+        )
+        assert load_manual_third_parties(consumer, manual_case) is None  # 回退远端

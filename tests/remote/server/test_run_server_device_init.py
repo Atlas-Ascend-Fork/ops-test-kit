@@ -9,6 +9,11 @@
 # ----------------------------------------------------------------------------
 """_init_device_locks 单元测试：覆盖 GPU/CPU/非连续 id 初始化及 stale 锁清理。"""
 
+from types import SimpleNamespace
+
+import pytest
+
+from ttk.remote.server import xpu_server
 from ttk.remote.server.xpu_server import _init_device_locks
 
 
@@ -18,3 +23,22 @@ def test_init_device_locks_empty_for_cpu():
     from ttk.remote.server import xpu_server
 
     assert xpu_server._device_locks == {}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# _resolve_devices：自动探测 use_device 跟随角色（cpu 兜底不置真）
+# ══════════════════════════════════════════════════════════════════════════
+class TestResolveDevicesCpuFallback:
+    """自动探测：use_device 跟随探测角色（cpu 兜底为 False）。"""
+
+    @pytest.mark.parametrize(
+        ("detected", "expect_use_device"),
+        [(("cpu", []), False), (("npu", [0, 1]), True)],
+    )
+    def test_auto_detect_use_device_follows_role(self, monkeypatch, detected, expect_use_device):
+        monkeypatch.setattr(xpu_server, "detect_hardware", lambda cfg: detected)
+        role, ids, use_device = xpu_server._resolve_devices(None, {"hardware_config": {}})
+        assert use_device is expect_use_device
+        if not expect_use_device:
+            # cpu 分支不依赖 torch_lib 配置
+            assert xpu_server._build_device_opts(SimpleNamespace(use_device=False), "cpu") == {"device_id": "cpu"}

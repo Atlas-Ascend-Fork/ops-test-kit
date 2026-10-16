@@ -63,6 +63,12 @@ class TestTimeoutRule:
         proc = _proc_at(PROCESS_STATUS_CODE.RUNNING, "OnDynOpTiling", age=1)
         proc._update()
 
+    def test_xpu_collect_wait_exempt(self):
+        """OnXpuCollect（XPU/NPU 重叠的远端收割等待）豁免——协调性等待语义，
+        join 上界由 dispatch deadline 兜底，不受 --proc-timeout 惩罚。"""
+        proc = _proc_at(PROCESS_STATUS_CODE.RUNNING, "OnXpuCollect")
+        proc._update()  # 远端等待不受罚
+
     def test_timeout_disabled_never_fires(self):
         proc = _proc_at(PROCESS_STATUS_CODE.RUNNING, "OnDynOpTiling", timeout=0)
         proc._update()

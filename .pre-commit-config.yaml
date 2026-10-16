@@ -32,9 +32,9 @@ repos:
   # TTK 架构守护断言（依赖方向/公开面/复杂度基线）
   - repo: local
     hooks:
-      - id: ttk-refactor-check
-        name: ttk refactor guard
-        entry: python3 scripts/check_refactor.py
+      - id: ttk-conventions-check
+        name: ttk conventions guard
+        entry: python3 scripts/check_conventions.py
         language: system
         pass_filenames: false
         types: [python]

@@ -101,6 +101,8 @@ class TestcaseE2e(ApiTestcaseBase):
 
     option_headers = {
         **ApiTestcaseBase.option_headers,
+        # XPU 三方输出本地装载（--dump xpu 回放契约；FREE_EVAL 支持嵌套 TensorList 声明）
+        "manual_xpu_binaries": (FIELD_TYPES.FREE_EVAL, None, ()),
     }
 
     complete_headers = {
@@ -434,6 +436,7 @@ class TestcaseE2e(ApiTestcaseBase):
         self._check_dyn_shape_slots()
         self._check_tensor_configuration()
         self._check_output_configuration()
+        self._check_manual_xpu_binaries()
         self._generate_batch_consistency_id()
 
     def _try_get_api_info_for_factory(self):

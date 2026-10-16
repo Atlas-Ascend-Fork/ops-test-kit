@@ -131,6 +131,40 @@ class TestFrameworkApiInstanceNpusim:
             FrameworkApiInstance._inject_camodel_env(sw)
 
 
+class TestFrameworkApiInstanceCpuFallback:
+    """torch_npu/npu_device 缺失探测回落 CPU 时，实例把运行定格为 CPU（force_cpu）。"""
+
+    def _run_instance(self, monkeypatch, backend):
+        monkeypatch.setattr(
+            "ttk.core_modules.framework_api.instance.get_backend",
+            lambda force_cpu, framework="torch": backend,
+        )
+        sw = SWITCHES()
+        sw.backend = "npu"
+        sw.force_cpu = False
+        original = get_global_storage()
+        try:
+            set_global_storage(sw)
+            FrameworkApiInstance()
+        finally:
+            set_global_storage(original)
+        return sw
+
+    def test_fallback_pins_force_cpu(self, monkeypatch):
+        """CPU 回落（has_device=False）时置 force_cpu，健康过滤随之跳过。"""
+        backend = _FakeBackend()
+        backend._dev = False
+        sw = self._run_instance(monkeypatch, backend)
+        assert sw.force_cpu is True
+        assert sw.proc_no_reuse is True
+
+    def test_npu_backend_keeps_switches(self, monkeypatch):
+        """NPU 后端不动 force_cpu/proc_no_reuse。"""
+        sw = self._run_instance(monkeypatch, _FakeBackend())
+        assert sw.force_cpu is False
+        assert sw.proc_no_reuse is False
+
+
 class TestE2eCliSimArgs:
     """E2E CLI 解析器暴露 --backend 并默认 npu。"""
 

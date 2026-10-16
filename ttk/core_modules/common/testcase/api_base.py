@@ -16,6 +16,7 @@ __all__ = ["ApiTestcaseBase"]
 
 # Standard Packages
 import logging
+import os
 
 from ....utilities import get, shape_stride
 from ....utilities.container import (
@@ -74,6 +75,9 @@ class ApiTestcaseBase(TestcaseBase):
         "const_input_values",
         # backward 协议标志（api_name 物化时剥离 .backward 后缀置位）
         "backward_mode",
+        # manual XPU 三方输出本地装载（--dump xpu 回放契约；aclnn/e2e 共享，
+        # 装载/校验语义见 common/xpu.py load_manual_third_parties）
+        "manual_xpu_binaries",
         # === 私有：六列声明原始存储（property 双模——物化前 raw 透传）=== #
         "_tensor_view_shapes",
         "_tensor_dtypes",
@@ -100,6 +104,7 @@ class ApiTestcaseBase(TestcaseBase):
         "_flat_input_data_ranges",
         "_flat_precision_tolerances",
         "_flat_absolute_precision",
+        "_flat_manual_xpu_binaries",
         "_pure_output_indexes",
         "_is_torch_dtype_support",
         "_is_tf_dtype_support",
@@ -130,6 +135,8 @@ class ApiTestcaseBase(TestcaseBase):
         # 后缀，forward 名进 api_name 生态（keeper/param_plan/签名对账），backward
         # 标志独立。执行链按 backward_mode 走 autograd 分支（只采反向）。
         self.backward_mode: bool = False
+        # manual XPU 三方输出本地装载（未声明 None；声明后 worker 侧短路远端采集）
+        self.manual_xpu_binaries = None
         # ── 六列声明原始存储 ──
         self._tensor_view_shapes = None
         self._tensor_dtypes = None
@@ -156,6 +163,7 @@ class ApiTestcaseBase(TestcaseBase):
         self._flat_input_data_ranges = None
         self._flat_precision_tolerances = None
         self._flat_absolute_precision = None
+        self._flat_manual_xpu_binaries = None
         self._pure_output_indexes = None
         self._is_torch_dtype_support = None
         self._is_tf_dtype_support = None
@@ -347,6 +355,23 @@ class ApiTestcaseBase(TestcaseBase):
         else:
             self._flat_tensor_view_shapes = flatten_groups(raw)
         return self._flat_tensor_view_shapes
+
+    @property
+    def flat_manual_xpu_binaries(self):
+        """manual_xpu_binaries 扁平化（TensorList 嵌套声明随输出分布展开；str 视为叶子）。
+
+        口径对齐 kernel flat_manual_xpu_binaries（deep_flatten）与
+        flat_manual_tensor_binaries；无声明/无分布时原样返回。
+        """
+        if self._flat_manual_xpu_binaries is not None:
+            return self._flat_manual_xpu_binaries
+        if not self.manual_xpu_binaries or not self.output_dist:
+            self._flat_manual_xpu_binaries = self.manual_xpu_binaries
+        else:
+            from ttk.utilities import deep_flatten
+
+            self._flat_manual_xpu_binaries = deep_flatten(self.manual_xpu_binaries)
+        return self._flat_manual_xpu_binaries
 
     @property
     def flat_tensor_dtypes(self):
@@ -773,6 +798,32 @@ class ApiTestcaseBase(TestcaseBase):
             "hook returned None and no input slot was refreshed "
             "(materialize via dict return or slot-table write)"
         )
+
+    def _check_manual_xpu_binaries(self):
+        """aclnn/e2e 的 manual_xpu_binaries 校验：路径存在 + 数量不超 flat 输出槽数。
+
+        与 kernel 的差异：aclnn/e2e 真跑设备（golden 有设备真值源），不要求与
+        manual_input/golden 成套——manual_xpu 仅替代三方采集的远端产出。
+        输出槽取子类 ``flat_output_view_shapes``（kernel 通路名 ``flat_output_shapes``）。
+        """
+        if not self.is_valid or not self.manual_xpu_binaries:
+            return
+        flat_paths = self.flat_manual_xpu_binaries or ()
+        for path in flat_paths:
+            if path is None:
+                continue
+            if not isinstance(path, str) or not os.path.isfile(path):
+                self.is_valid = False
+                self.fail_reason = "MANUAL_XPU_BINARIES_INVALID"
+                logging.error("manual_xpu_binaries path invalid: %r", path)
+                return
+        outputs = getattr(self, "flat_output_view_shapes", None)
+        if outputs is None:
+            outputs = getattr(self, "flat_output_shapes", None)
+        if outputs and len(flat_paths) > len(outputs):
+            self.is_valid = False
+            self.fail_reason = "MANUAL_XPU_BINARIES_INVALID"
+            logging.error("manual_xpu_binaries count %d exceeds flat output slots %d", len(flat_paths), len(outputs))
 
     def _check_dyn_shape_slots(self):
         """Validate constraints shared by E2E and ACLNN dynamic input slots."""

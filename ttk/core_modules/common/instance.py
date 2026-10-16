@@ -850,12 +850,16 @@ class InstanceBase(metaclass=ABCMeta):
         """DSMI 健康态过滤（仅在线板态）：CRITICAL/OFF 及未知健康码的卡
         不进调度池（授权域/派发池/CSV 校验域同步收缩）。WARNING/IMPORTANT 视为
         可用（IMPORTANT 打告警放行——挡单卡开发机过激进，结果可信度由告警留痕）；
-        单卡查询失败保留该卡；查询能力缺失（无驱动/.so——asys 同源层）打告警不做检查。"""
+        单卡查询失败保留该卡；查询能力缺失（无驱动/.so——asys 同源层）打告警不做检查。
+        CPU 运行（--backend cpu 或 torch_npu 缺失回落）时池内是 CPU 槽位而非
+        NPU id，不做健康检查。"""
         if not device_ids:
             return ()
         if not self.switches.mode.is_online_board():
             return ()
         if getattr(self.switches, "compile_only", False) or getattr(self.switches, "backend", None) == "npusim":
+            return ()
+        if getattr(self.switches, "force_cpu", False):
             return ()
         if self.switches.no_prof and self.switches.manual_data_dirs:
             return ()

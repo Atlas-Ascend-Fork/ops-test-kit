@@ -9,6 +9,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """Restorable input and CPU-golden data shared by E2E, ACLNN, and Kernel."""
 
+import filecmp
 import hashlib
 import logging
 import math
@@ -18,7 +19,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy
 
@@ -33,8 +34,30 @@ _DATA_FILE_NAME = re.compile(
     r"^(input|scalar|golden)_(0|[1-9][0-9]*)_([A-Za-z0-9][A-Za-z0-9_.-]*?)"
     r"(?:__shape_(scalar|[0-9]+(?:x[0-9]+)*))?\.(bin|pt|npy)$"
 )
+# XPU 三方输出槽位（--dump xpu 落盘协议）：xpu_{provider}_{idx}_{dtype}.{ext}
+# ——provider 占 segment 位（DataDumper.dump_xpu 同款命名），回放按 idx 对位、
+# 多 provider 同 idx 取字典序首个（回放取单一真值源）。
+_XPU_FILE_NAME = re.compile(
+    r"^xpu_([A-Za-z0-9][A-Za-z0-9_.-]*?)_(0|[1-9][0-9]*)_([A-Za-z0-9][A-Za-z0-9_.-]*?)\.(bin|pt|npy)$"
+)
 _NONE_DTYPE = "none"
 _UNKNOWN_SHAPE = object()
+# 调试 dump（{root}/dump/{case}/）产物读回放行协议：
+# - output[_{segment}]_{idx}_{dtype} / tiling_data[_{segment}]：执行期派生产物，
+#   读回侧会重新执行/编译产出——扫描时忽略，但把目录标记为"含调试产物"；
+# - input_{segment}_{idx}_{dtype}：按段分流——dyn（kernel 执行前）/const、dynamic
+#   （geir 数据集与模式无关）去段映射 input 槽；eager/graph_*（e2e dump-on-fail
+#   执行后补漏，in-place API 可能已改写）与未知段一律拒绝。
+_DEBUG_OUTPUT_FILE_NAME = re.compile(
+    r"^output(?:_[A-Za-z0-9][A-Za-z0-9_.-]*?)?_(0|[1-9][0-9]*)_([A-Za-z0-9][A-Za-z0-9_.-]*?)"
+    r"\.(bin|pt|npy)$"
+)
+_DEBUG_TILING_FILE_NAME = re.compile(r"^tiling_data(?:_[A-Za-z0-9][A-Za-z0-9_.-]*?)?\.(bin|pt|npy)$")
+_DEBUG_INPUT_FILE_NAME = re.compile(
+    r"^input_([A-Za-z0-9][A-Za-z0-9_.-]*?)_(0|[1-9][0-9]*)_([A-Za-z0-9][A-Za-z0-9_.-]*?)\.(bin|pt|npy)$"
+)
+_DEBUG_INPUT_ACCEPTED_SEGMENTS = ("dyn", "const", "dynamic")
+_DEBUG_INPUT_REJECTED_SEGMENTS = ("eager", "graph_cst", "graph_dyn", "graph_aclgraph")
 
 _RAW_UINT8_COMPATIBLE_DTYPES = {
     "int4",
@@ -60,6 +83,7 @@ class _ManualDataFile:
     file_format: str
     path: pathlib.Path
     saved_shape: Optional[Tuple[int, ...]] = None
+    provider: Optional[str] = None  # xpu 槽位专属（其余 role 恒 None）
 
 
 @dataclass
@@ -69,10 +93,29 @@ class ManualDataCase:
     case_dir: pathlib.Path
     file_format: str
     _golden_files: Tuple[_ManualDataFile, ...]
+    _xpu_files: Tuple[_ManualDataFile, ...] = ()  # 按 (index, provider) 排序
 
     @property
     def has_goldens(self) -> bool:
         return bool(self._golden_files)
+
+    @property
+    def has_third_parties(self) -> bool:
+        """case 目录含 xpu_{provider}_{idx}_{dtype} 槽位文件（--dump xpu 回放）。"""
+        return bool(self._xpu_files)
+
+    def third_party_paths(self) -> tuple:
+        """三方输出文件路径，按槽位 idx 对位（0..max 连续，缺位补 None）。
+
+        多 provider 同 idx 取字典序首个（_xpu_files 已按 (index, provider)
+        排序）——回放取单一真值源。"""
+        if not self._xpu_files:
+            return ()
+        by_index: Dict[int, str] = {}
+        for entry in self._xpu_files:
+            by_index.setdefault(entry.index, str(entry.path))
+        count = max(by_index) + 1
+        return tuple(by_index.get(index) for index in range(count))
 
     def load_goldens(self, references=None, shapes=None, dtypes=None) -> List[Any]:
         """Load saved goldens after device output shapes are available.
@@ -120,7 +163,7 @@ class ManualDataCase:
                 if dtypes is None:
                     storage_shape = _saved_array_shape(shape)
                 else:
-                    storage_shape = _physical_array_spec(dtype_values[index], shape)[1]
+                    storage_shape = physical_array_spec(dtype_values[index], shape)[1]
                 expected_shape = logical_shape if not logical_shape and math.prod(storage_shape) == 1 else storage_shape
                 expected_shapes.append(expected_shape)
                 storage_shapes.append(storage_shape)
@@ -148,6 +191,7 @@ class ManualDataCase:
             if expected_shape is None:
                 values.append(_load_none(entry, "golden"))
                 continue
+            logging.info("Reading manual golden file: %s ...", entry.path)
             if (
                 entry.saved_shape is not None
                 and expected_shape is not _UNKNOWN_SHAPE
@@ -308,7 +352,7 @@ def _saved_array_shape(shape) -> Tuple[int, ...]:
     return result if result else (1,)
 
 
-def _physical_array_spec(logical_dtype, logical_shape) -> Tuple[str, Tuple[int, ...]]:
+def physical_array_spec(logical_dtype, logical_shape) -> Tuple[str, Tuple[int, ...]]:
     """Return the dtype/shape of the numpy backing array saved by TTK."""
     dtype_name = getattr(logical_dtype, "name", str(logical_dtype))
     shape = tuple(int(dimension) for dimension in logical_shape)
@@ -343,9 +387,9 @@ def _input_specs(testcase, case_type: str) -> List[Optional[Tuple[str, Tuple[int
             # from a CPU input file.  A replay store may carry a None marker.
             result.append(None)
         elif case_type in ("kernel", "geir"):
-            result.append(_physical_array_spec(dtypes[index], shape))
+            result.append(physical_array_spec(dtypes[index], shape))
         else:
-            result.append(_physical_array_spec(dtypes[index], testcase.flat_storage_shape(index)))
+            result.append(physical_array_spec(dtypes[index], testcase.flat_storage_shape(index)))
     return result
 
 
@@ -383,7 +427,7 @@ def _scalar_specs(testcase, case_type: str) -> List[Optional[Tuple[str, Tuple[in
         if dtype is None:
             result.append(None)
         else:
-            result.append(_physical_array_spec(dtype, ()))
+            result.append(physical_array_spec(dtype, ()))
     return result
 
 
@@ -415,6 +459,14 @@ def _expected_bin_size(dtype_name: str, shape: Tuple[int, ...]) -> int:
         if isinstance(exc, ManualDataError):
             raise
         raise ManualDataError(f"cannot determine byte size for dtype {dtype_name!r}") from exc
+
+
+def _same_bytes(left: pathlib.Path, right: pathlib.Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    if left.samefile(right):
+        return True
+    return filecmp.cmp(str(left), str(right), shallow=False)
 
 
 def _load_array(entry: _ManualDataFile, shape: Optional[Tuple[int, ...]]) -> numpy.ndarray:
@@ -638,6 +690,8 @@ class ManualDataStore:
     @staticmethod
     def _scan_case(case_dir: pathlib.Path):
         entries_by_format = {file_format: {} for file_format in SUPPORTED_MANUAL_DATA_FORMATS}
+        xpu_by_format = {file_format: {} for file_format in SUPPORTED_MANUAL_DATA_FORMATS}
+        ignored_debug_files = []
         try:
             paths = sorted(case_dir.iterdir(), key=lambda item: item.name)
         except Exception as exc:
@@ -648,31 +702,82 @@ class ManualDataStore:
         for path in paths:
             if path.is_symlink() or not path.is_file():
                 raise ManualDataError(f"manual-data case contains a non-regular file: {path}")
+            xpu_match = _XPU_FILE_NAME.fullmatch(path.name)
             match = _DATA_FILE_NAME.fullmatch(path.name)
-            if match is None:
-                raise ManualDataError(f"unexpected file in manual-data case: {path.name}")
-            role, index_text, dtype_name, shape_token, current_format = match.groups()
-            # shape 段仅存量数据携带（早期版本落盘）：兼容解析用于 load 侧
-            # 核对/reshape 兜底，新数据无此段；出现于其他位置仍是协议违规
-            if shape_token is not None and (role != "golden" or current_format != "bin" or dtype_name == _NONE_DTYPE):
-                raise ManualDataError(f"shape suffix is only valid for non-None bin Golden files: {path.name}")
-            key = (role, int(index_text))
-            format_entries = entries_by_format[current_format]
-            if key in format_entries:
-                raise ManualDataError(f"duplicate {current_format} manual-data slot {role}[{index_text}]")
-            if dtype_name != _NONE_DTYPE:
-                _resolve_file_dtype(dtype_name)
-            format_entries[key] = _ManualDataFile(
-                role,
-                int(index_text),
-                dtype_name,
-                current_format,
-                path,
-                _decode_shape(shape_token),
+            if xpu_match is not None and match is None:
+                provider, index_text, dtype_name, current_format = xpu_match.groups()
+                key = (provider, int(index_text))
+                format_entries = xpu_by_format[current_format]
+                if key in format_entries:
+                    raise ManualDataError(f"duplicate {current_format} manual-data slot xpu[{provider}][{index_text}]")
+                if dtype_name != _NONE_DTYPE:
+                    _resolve_file_dtype(dtype_name)
+                format_entries[key] = _ManualDataFile(
+                    "xpu", int(index_text), dtype_name, current_format, path, None, provider
+                )
+                continue
+            if match is not None:
+                role, index_text, dtype_name, shape_token, current_format = match.groups()
+                # shape 段仅存量数据携带（早期版本落盘）：兼容解析用于 load 侧
+                # 核对/reshape 兜底，新数据无此段；出现于其他位置仍是协议违规
+                if shape_token is not None and (
+                    role != "golden" or current_format != "bin" or dtype_name == _NONE_DTYPE
+                ):
+                    raise ManualDataError(f"shape suffix is only valid for non-None bin Golden files: {path.name}")
+                key = (role, int(index_text))
+                format_entries = entries_by_format[current_format]
+                if key in format_entries:
+                    raise ManualDataError(f"duplicate {current_format} manual-data slot {role}[{index_text}]")
+                if dtype_name != _NONE_DTYPE:
+                    _resolve_file_dtype(dtype_name)
+                format_entries[key] = _ManualDataFile(
+                    role,
+                    int(index_text),
+                    dtype_name,
+                    current_format,
+                    path,
+                    _decode_shape(shape_token),
+                )
+                continue
+            debug_input_match = _DEBUG_INPUT_FILE_NAME.fullmatch(path.name)
+            if debug_input_match is not None:
+                segment, index_text, dtype_name, current_format = debug_input_match.groups()
+                if segment in _DEBUG_INPUT_REJECTED_SEGMENTS:
+                    raise ManualDataError(
+                        f"post-execution dump-on-fail input {path.name} cannot be replayed "
+                        "(in-place APIs may have overwritten it); re-dump with --no-prof --dump in,golden"
+                    )
+                if segment not in _DEBUG_INPUT_ACCEPTED_SEGMENTS:
+                    raise ManualDataError(f"unexpected file in manual-data case: {path.name}")
+                key = ("input", int(index_text))
+                format_entries = entries_by_format[current_format]
+                existing = format_entries.get(key)
+                if existing is not None:
+                    if not _same_bytes(existing.path, path):
+                        raise ManualDataError(
+                            f"conflicting input slot {index_text}: {existing.path.name} != {path.name}"
+                        )
+                    continue
+                if dtype_name != _NONE_DTYPE:
+                    _resolve_file_dtype(dtype_name)
+                format_entries[key] = _ManualDataFile("input", int(index_text), dtype_name, current_format, path, None)
+                continue
+            if _DEBUG_OUTPUT_FILE_NAME.fullmatch(path.name) or _DEBUG_TILING_FILE_NAME.fullmatch(path.name):
+                ignored_debug_files.append(path.name)
+                continue
+            raise ManualDataError(f"unexpected file in manual-data case: {path.name}")
+
+        if ignored_debug_files:
+            logging.info(
+                "manual-data case %s: ignoring debug-dump artifacts %s (replayed by re-execution)",
+                case_dir,
+                sorted(ignored_debug_files),
             )
 
         available_formats = [
-            file_format for file_format in SUPPORTED_MANUAL_DATA_FORMATS if entries_by_format[file_format]
+            file_format
+            for file_format in SUPPORTED_MANUAL_DATA_FORMATS
+            if entries_by_format[file_format] or xpu_by_format[file_format]
         ]
         selected_format = available_formats[0]
         if len(available_formats) > 1:
@@ -682,7 +787,10 @@ class ManualDataStore:
                 available_formats,
                 selected_format,
             )
-        return entries_by_format[selected_format], selected_format
+        xpu_entries = tuple(
+            sorted(xpu_by_format[selected_format].values(), key=lambda entry: (entry.index, entry.provider))
+        )
+        return entries_by_format[selected_format], xpu_entries, selected_format
 
     @staticmethod
     def _ordered_files(entries, role: str, expected_count: Optional[int], required: bool = True):
@@ -708,6 +816,7 @@ class ManualDataStore:
             expected_dtype, expected_shape = expected
             if entry.dtype == _NONE_DTYPE:
                 raise ManualDataError(f"{role}[{entry.index}] is None but CSV declares a tensor")
+            logging.info("Reading manual %s file: %s ...", role, entry.path)
             load_entry = entry
             if entry.dtype != expected_dtype:
                 raw_bin_compatible = (
@@ -733,7 +842,7 @@ class ManualDataStore:
     def load_case(self, testcase, case_type: str, require_goldens: bool = True) -> ManualDataCase:
         self._validate_case_type(case_type)
         case_dir = self._find_case(testcase.testcase_name)
-        entries, file_format = self._scan_case(case_dir)
+        entries, xpu_entries, file_format = self._scan_case(case_dir)
         full_input_specs = _input_specs(testcase, case_type)
         saved_input_indexes = _saved_input_indexes(testcase, case_type, len(full_input_specs))
         compact_input_specs = [full_input_specs[index] for index in saved_input_indexes]
@@ -758,5 +867,13 @@ class ManualDataStore:
         if compact_inputs and len(compact_input_specs) != len(full_input_specs):
             inputs = _restore_pure_outputs(testcase, inputs, full_input_specs, saved_input_indexes)
         scalars = self._load_expected_values(scalar_files, scalar_specs, "scalar")
-        logging.info("[%s] loaded manual input/scalar data from %s", testcase.testcase_name, case_dir)
-        return ManualDataCase(inputs, scalars, case_dir, file_format, tuple(golden_files))
+        logging.info(
+            "[%s] loaded manual data (%d input, %d scalar, %d golden, %d xpu) from %s",
+            testcase.testcase_name,
+            len(inputs),
+            len(scalars),
+            len(golden_files),
+            len(xpu_entries),
+            case_dir,
+        )
+        return ManualDataCase(inputs, scalars, case_dir, file_format, tuple(golden_files), xpu_entries)

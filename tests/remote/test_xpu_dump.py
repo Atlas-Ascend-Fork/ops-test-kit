@@ -49,7 +49,7 @@ def test_dump_xpu_outputs_writes_nested_successful_outputs(tmp_path):
         }
     }
 
-    client._dump_xpu_outputs(results, "case_1", _switches(tmp_path))
+    client.dump_xpu_outputs(results, "case_1", _switches(tmp_path))
 
     np.testing.assert_array_equal(np.fromfile(tmp_path / "case_1_xpu_golden_0.bin", dtype=np.float32), outputs[0])
     np.testing.assert_array_equal(np.fromfile(tmp_path / "case_1_xpu_golden_1.bin", dtype=np.int32), outputs[1][0])
@@ -63,7 +63,7 @@ def test_dump_xpu_outputs_splits_providers_into_subdirectories(tmp_path):
         "tf": {"status": "PASS", "outputs": [second]},
     }
 
-    client._dump_xpu_outputs(results, "case_1", _switches(tmp_path))
+    client.dump_xpu_outputs(results, "case_1", _switches(tmp_path))
 
     np.testing.assert_array_equal(np.fromfile(tmp_path / "torch" / "case_1_xpu_golden_0.bin", dtype=np.float32), first)
     np.testing.assert_array_equal(np.fromfile(tmp_path / "tf" / "case_1_xpu_golden_0.bin", dtype=np.float32), second)
@@ -80,7 +80,7 @@ def test_dump_xpu_outputs_uses_environment_path_and_skips_failures(tmp_path, mon
     monkeypatch.setenv("NPU_DUMP_PATH", str(dump_path))
     results = {"torch": {"status": "FAIL", "error": "failed"}}
 
-    client._dump_xpu_outputs(results, "case_1", _switches(tmp_path))
+    client.dump_xpu_outputs(results, "case_1", _switches(tmp_path))
 
     assert not dump_path.exists()
 

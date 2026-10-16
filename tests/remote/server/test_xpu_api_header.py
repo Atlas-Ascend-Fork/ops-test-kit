@@ -19,6 +19,8 @@ api it was asked to run — it just reads the X-API header. Covers:
 
 from unittest.mock import MagicMock
 
+from ttk.remote import DATA, PERF
+from ttk.remote.server import xpu_server
 from ttk.remote.server.xpu_server import XpuRequestHandler
 
 
@@ -39,3 +41,15 @@ def test_send_run_ok_x_api_header():
     handler._send_run_ok(env)
     calls = {c.args[0]: c.args[1] for c in handler.send_header.call_args_list}
     assert calls.get("X-API") == "torch.add"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# X-Mode 解析：data/data_perf/perf 全档（客户端侧见 test_dispatcher.py）
+# ══════════════════════════════════════════════════════════════════════════
+class TestServerModeParsing:
+    """服务端 X-Mode 解析：data/data_perf/perf 全档（客户端侧见 test_dispatcher.py）。"""
+
+    def test_mode_mapping(self):
+        assert xpu_server._parse_mode("data_perf") == DATA | PERF
+        assert xpu_server._parse_mode("3") == 3  # int 直传
+        assert xpu_server._parse_mode("garbage") == DATA

@@ -297,6 +297,40 @@ class TestViaSubprocess:
         assert env["output_count"] == 1
         np.testing.assert_array_equal(np.load(env["output_path"])["a0"], np.array([4.0, 6.0]))
 
+    def test_deadline_is_relative_seconds_not_absolute(self, tmp_path):
+        """_run_in_subprocess 的 deadline 为相对秒数：超时子进程被 kill 并回 500。"""
+        from ttk.remote import DATA
+        from ttk.remote.server.xpu_server import _run_in_subprocess
+
+        (tmp_path / "slowfix.py").write_text(
+            "import time\n"
+            "class SlowImpl:\n"
+            "    def __call__(self, x1): time.sleep(60)\n"
+            "class SlowTestSpec:\n"
+            "    third_party = {'numpy': SlowImpl}\n"
+        )
+        start = time.monotonic()
+        env = _run_in_subprocess(
+            _kw(
+                exec_type="spec",
+                spec_module="slowfix",
+                spec_class="SlowTestSpec",
+                mode=DATA,
+                provider="numpy",
+                input_schema=[{"name": "x1", "index": 0}],
+                tmp_in_path=_npz(tmp_path / "in.npz", x1=np.array([1.0])),
+                input_count=1,
+                tenant_sync_dir=str(tmp_path),
+                output_dir=str(tmp_path),
+            ),
+            deadline=2,
+        )
+        elapsed = time.monotonic() - start
+
+        assert env["ok"] is False  # 超时 500，而非等到 60s 或恒 1s
+        assert "timed out after 2s" in env.get("error", "")
+        assert elapsed < 30  # 相对秒生效（60s 任务 2s 被 kill）
+
     def test_child_crash_returns_500(self, tmp_path):
         """子进程 ``os._exit(139)`` -> 500，错误信息含退出码 139。"""
         from ttk.remote import DATA

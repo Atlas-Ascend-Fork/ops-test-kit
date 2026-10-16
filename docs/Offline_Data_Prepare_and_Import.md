@@ -202,6 +202,26 @@ TTK 按参数顺序为每个 case 查找目录。第一个同名目录一旦命�
 Golden。新数据在隐藏临时目录中写入并回读校验，
 全部成功后才发布；失败不会留下可 load 的半成品。
 
+### 3.4 从调试 dump 目录读回
+
+`--manual-data-dirs` 可以直接指向调试 dump 目录（`{root}/dump/`，即 `--dump`
+/ `--dump-on-fail` 的产物）。扫描规则：
+
+| 调试产物 | 读回处理 |
+| --- | --- |
+| `golden_{idx}_{dtype}`、`xpu_{provider}_{idx}_{dtype}` | 直接读（与协议同名） |
+| `input_dyn_{idx}_{dtype}`（kernel）、`input_{const,dynamic}_{idx}_{dtype}`（geir） | 去掉模式段映射到 input 槽；同槽多份要求字节一致 |
+| `output[_{segment}]_{idx}_{dtype}`、`tiling_data[_{segment}]` | 忽略（读回会重新执行/编译产出） |
+| `input_{eager,graph_*}_{idx}_{dtype}`（e2e dump-on-fail 执行后补漏） | 拒绝（in-place API 可能已改写输入） |
+
+已知边界：
+
+- 调试 dump 对 None 槽不落 `*_none.bin` 标记，含 None 槽的用例会报槽位索引
+  不连续；kernel/aclnn 的 `dump_file_prefix` 与 `testcase_name` 不同时目录名
+  对不上；
+- 调试目录不整目录替换，CSV 改 shape/dtype 后的陈旧文件由既有的
+  槽位/dtype/字节校验拦截。
+
 ## 4. 文件协议
 
 完整 case 可以包含以下文件；input-only case 不含任何 `golden_*` 文件：
@@ -357,4 +377,4 @@ compare 结果。
 | `filename dtype ... != CSV storage dtype` | dump/load 的 tensor/scalar dtype |
 | `saved shape ... != device output shape` | 设备输出 shape 是否回归，是否使用旧 CSV/assets |
 | `byte size ... != expected` | 文件是否截断，dtype/shape 是否变化 |
-| `unexpected file in manual-data case` | 删除日志、JSON、子目录或其他 sidecar |
+| `unexpected file in manual-data case` | 目录里的确无关文件（日志、JSON、子目录）；调试 dump 的 output/tiling 已按 §3.4 忽略，仍报错即为未知命名 |

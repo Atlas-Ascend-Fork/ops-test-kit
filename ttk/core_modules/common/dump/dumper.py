@@ -31,6 +31,7 @@ __all__ = ["DataDumper"]
 # Standard Packages
 import logging
 import os
+import re
 from typing import Optional, Sequence, Union
 
 from ....utilities.dtypes import dtype_to_name
@@ -39,6 +40,20 @@ from .formatter import get_formatter
 from .manual_data import case_directory_name
 
 _NONE_DTYPE = "none"
+
+# xpu 槽位文件名回放口径：provider 含 _<纯数字> 段（如 a_12_b / cuda_0）时，
+# 读侧 _XPU_FILE_NAME 的非贪婪切分会把数字段解析为 idx、真 idx+dtype 拼入
+# dtype 位。落盘前校验拒绝此类 provider 名。
+_AMBIGUOUS_XPU_PROVIDER = re.compile(r"_\d+(?:_|$)")
+
+
+def _validate_xpu_provider(provider) -> None:
+    name = str(provider)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or _AMBIGUOUS_XPU_PROVIDER.search(name):
+        raise ValueError(
+            f"XPU provider name {name!r} cannot be encoded in dump slot filenames; "
+            "rename the provider (alphanumerics with no digit-only underscore segments)"
+        )
 
 
 def _dtype_name(dtype) -> str:
@@ -132,6 +147,7 @@ class DataDumper:
             return
         logging.info("Dump XPU third-party data....")
         for provider, outputs in (third_parties or {}).items():
+            _validate_xpu_provider(provider)
             for idx, data in enumerate(outputs):
                 if data is None or isinstance(data, str):
                     continue

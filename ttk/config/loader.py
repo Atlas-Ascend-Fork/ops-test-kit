@@ -62,6 +62,8 @@ class RemoteConfig:
     max_503_retries: int = 10
     max_conn_retries: int = 5
     dispatch_deadline_s: int = 300
+    # XPU/NPU 执行重叠总闸（false = 回串行时序；XPU 服务端负载紧张时关闭）
+    xpu_overlap: bool = True
     tls_ca: str = ""
     tls_cert: str = ""
     tls_key: str = ""

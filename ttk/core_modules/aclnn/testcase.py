@@ -150,6 +150,8 @@ class TestcaseAclnn(ApiTestcaseBase):
         "dump_file_prefix": (FIELD_TYPES.STRING, None, None),
         "manual_tensor_binaries": (FIELD_TYPES.FREE_EVAL, None, ()),
         "manual_golden_binaries": (FIELD_TYPES.STRING_CONTAINER, None, ()),
+        # XPU 三方输出本地装载（--dump xpu 回放契约；FREE_EVAL 支持嵌套 TensorList 声明）
+        "manual_xpu_binaries": (FIELD_TYPES.FREE_EVAL, None, ()),
     }
     batch_consistency_headers: Dict[str, tuple] = {}
     complete_headers: Dict[str, tuple] = {
@@ -479,6 +481,7 @@ class TestcaseAclnn(ApiTestcaseBase):
         self._parse_scalar_dtypes()
         self._check_params_count()
         self._stc_shape_size_check()
+        self._check_manual_xpu_binaries()
         self._generate_batch_consistency_id()
 
     def _stc_shape_size_check(self):

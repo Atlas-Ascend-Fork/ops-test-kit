@@ -81,7 +81,7 @@ def _parse_client_mode(raw) -> int:
     if isinstance(raw, int):
         return raw
     if isinstance(raw, str):
-        return {"data": DATA, "perf": PERF}.get(raw.strip().lower(), DATA)
+        return {"data": DATA, "perf": PERF, "data_perf": DATA | PERF}.get(raw.strip().lower(), DATA)
     return DATA
 
 
@@ -367,12 +367,19 @@ def _sync_missing_dependency(
     The first worker to acquire the per-(endpoint, module) lock performs the
     upload; concurrent workers poll ``get_semaphore`` and reuse its result,
     avoiding duplicate uploads and concurrent-write races on xpu_server.
+
+    信号量 RPC 占用 worker 命令管道，仅限主线程调用；XPU 重叠的后台线程
+    直接上传（服务端 /v1/sync 原子写，并发重复无害）。
     """
+    import threading
+
     from ttk.core_modules.common.process import process_context
 
     ctx = process_context()
     if ctx is None:
         # Single-process mode (no pool): sync directly — no concurrent dedup needed.
+        return _do_http_sync(missing, search_roots, endpoint_host, endpoint_port, tenant_id, timeout)
+    if threading.current_thread() is not threading.main_thread():
         return _do_http_sync(missing, search_roots, endpoint_host, endpoint_port, tenant_id, timeout)
     sync_id = f"xpu_sync_{endpoint_host}:{endpoint_port}:{missing}"
 
@@ -442,6 +449,10 @@ def _acquire_connection(host, port, timeout):
         )
         if fresh:
             entry["uses"] += 1
+            # 复用连接的 socket timeout 对齐本次请求，入池时的值不泄漏到后续请求
+            if getattr(entry["conn"], "sock", None) is not None:
+                with contextlib.suppress(OSError):
+                    entry["conn"].sock.settimeout(timeout)
             _CONN_POOL[key] = entry
             return entry["conn"], True
         with contextlib.suppress(OSError):
@@ -754,6 +765,7 @@ def dispatch_to_remote(
     tmp_root: Optional[str] = None,
     runtime: int = 3,
     param_order: Optional[list] = None,
+    deadline_s: Optional[float] = None,
 ):
     """Send inputs to remote xpu_server, return numpy outputs.
 
@@ -786,7 +798,11 @@ def dispatch_to_remote(
     )
     headers = _build_headers(meta, schema, _schema_leaf_count(schema))
 
-    deadline_s = _cfg("dispatch_deadline_s", 300.0, int)
+    if deadline_s is None:
+        deadline_s = _cfg("dispatch_deadline_s", 300.0, int)
+    else:
+        # 重叠形态：请求横跨 NPU 执行期，socket 读超时同样须覆盖（至少 = deadline）
+        timeout = max(timeout, int(deadline_s))
     plan = _DispatchPlan(
         headers=headers,
         mode_int=meta.mode_int,

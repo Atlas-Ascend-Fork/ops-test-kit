@@ -225,6 +225,38 @@ class TestSyncSemaphore:
         assert do_sync.called
         assert fake.set_calls == [("xpu_sync_127.0.0.1:19090:m", "ok")]
 
+    def test_off_main_thread_syncs_directly_without_semaphore(self, tmp_path):
+        """XPU 重叠的后台线程不做信号量 RPC（命令管道双读者互吞消息）——直接上传。"""
+        import threading
+
+        from ttk.remote import dispatcher
+
+        class FakeCtx:
+            def acquire_semaphore(self, name):
+                raise AssertionError("background thread must not use semaphore RPC")
+
+            def set_semaphore(self, name, value):
+                raise AssertionError("background thread must not use semaphore RPC")
+
+            def get_semaphore(self, name):
+                raise AssertionError("background thread must not use semaphore RPC")
+
+        result = {}
+        with patch("ttk.remote.dispatcher._do_http_sync", return_value=True) as do_sync, patch(
+            "ttk.core_modules.common.process.process_context", return_value=FakeCtx()
+        ):
+            worker = threading.Thread(
+                target=lambda: result.setdefault(
+                    "ok", dispatcher._sync_missing_dependency("m", [str(tmp_path)], "127.0.0.1", 19090, "t1", 5)
+                )
+            )
+            worker.start()
+            worker.join(10)
+
+        assert not worker.is_alive()
+        assert result["ok"] is True
+        assert do_sync.called
+
 
 class TestClientHelpers:
     def test_backoff_delay_caps_and_jitters(self):
@@ -351,3 +383,82 @@ class TestRoundTrip:
             import os
 
             os.unlink(npz_path)
+
+
+class TestParseClientMode:
+    """X-Mode 客户端解析：data/data_perf/perf 全档映射，未知回 DATA。"""
+
+    def test_mode_mapping(self):
+        from ttk.remote import DATA, PERF
+        from ttk.remote.dispatcher import _parse_client_mode
+
+        assert _parse_client_mode("data") == DATA
+        assert _parse_client_mode("data_perf") == DATA | PERF
+        assert _parse_client_mode("perf") == PERF
+        assert _parse_client_mode(None) == DATA
+        assert _parse_client_mode(3) == 3  # int 直传
+
+
+class TestPoolReuseTimeout:
+    """连接池复用：复用连接的 socket timeout 对齐本次请求。"""
+
+    def test_reused_connection_timeout_refreshed(self, monkeypatch):
+        import ttk.remote.dispatcher as dispatcher_mod
+
+        class _FakeSock:
+            def __init__(self):
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+        class _FakeConn:
+            def __init__(self):
+                self.sock = _FakeSock()
+
+            def close(self):
+                pass
+
+        pool_conn = _FakeConn()
+        monkeypatch.setattr(dispatcher_mod, "_CONN_POOL", {})
+        monkeypatch.setattr(dispatcher_mod, "_create_connection", lambda h, p, timeout: pool_conn)
+
+        conn1, reused1 = dispatcher_mod._acquire_connection("h", 1, timeout=300)
+        assert reused1 is False
+
+        dispatcher_mod._settle_connection("h", 1, conn1, reusable=True)
+        conn2, reused2 = dispatcher_mod._acquire_connection("h", 1, timeout=10)
+        assert reused2 is True
+        assert pool_conn.sock.timeouts[-1] == 10  # 复用时被刷新为本请求 timeout
+
+
+class TestProbeUsesTlsConfig:
+    """恢复探活经 _create_connection（与 dispatch 同一 TLS 配置链路）。"""
+
+    def test_probe_goes_through_tls_factory(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from ttk.remote import client as client_mod
+        from ttk.remote import dispatcher as dispatcher_mod
+
+        created = []
+
+        class _FakeResp:
+            status = 200
+
+        class _FakeConn:
+            def request(self, method, path):
+                created.append((method, path))
+
+            def getresponse(self):
+                return _FakeResp()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(dispatcher_mod, "_create_connection", lambda h, p, timeout: _FakeConn())
+        ep = SimpleNamespace(host="h", port=1)
+        ev = SimpleNamespace(_endpoints=[ep])
+
+        assert client_mod._probe_endpoints_alive(ev) is True
+        assert created == [("GET", "/v1/heartbeat")]

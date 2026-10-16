@@ -234,6 +234,8 @@ def test_profile_process_gate_open_and_shut(monkeypatch):
 
     # 隔离 gate 上游：所有 parse/gen 步骤为 no-op
     monkeypatch.setattr(prof, "get_global_storage", lambda: sw)
+    # 本用例钉 XPU gate 语义（与重叠正交）：关总闸走同步路径，_do_xpu_profiling 直调
+    monkeypatch.setattr("ttk.core_modules.common.xpu.xpu_overlap_enabled", lambda: False)
     monkeypatch.setattr(
         prof,
         "process_context",
@@ -260,7 +262,7 @@ def test_profile_process_gate_open_and_shut(monkeypatch):
     # 记录 _do_xpu_profiling 调用；OPEN 时抛异常短路
     xpu_calls = []
 
-    def _fake_do_xpu(_ctx, _mode):
+    def _fake_do_xpu(_ctx, _mode, **_kwargs):
         xpu_calls.append((_ctx, _mode))
         raise _XpuCalled()
 
