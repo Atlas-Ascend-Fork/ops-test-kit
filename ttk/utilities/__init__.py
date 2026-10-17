@@ -61,6 +61,7 @@ _EXPORTS = {
     "from_fractal_z_3d": ".format",
     "transpose_axes": ".format",
     "get": ".container",
+    "get_dtype_overflow_boundary": ".dtypes",
     "get_dtype_range": ".dtypes",
     "get_dtype_width": ".dtypes",
     "file_md5": ".file_utils",

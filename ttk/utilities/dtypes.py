@@ -14,7 +14,7 @@ dtype utils
 import importlib
 import logging
 import re
-from typing import Dict, Union
+from typing import Dict, Tuple, Union
 
 import numpy
 
@@ -321,6 +321,60 @@ def get_dtype_range(dt):
     numpy_dtype = numpy.dtype(dt)
     numpy_info = numpy.iinfo(numpy_dtype) if numpy_dtype.kind in "iu" else numpy.finfo(numpy_dtype)
     return numpy_info.min, numpy_info.max
+
+
+# 特殊格式顶 binade 虚拟步长：RNE 溢出边界 = max_finite + 步长/2。
+# IEEE 满尾数格式由 frexp 公式 (max + 2^(emax+1))/2 覆盖（两式相等）；下列格式
+# 顶 binade 结构特殊，frexp 不适用，逐格式登记（Ascend950 实测）：
+#   float8_e4m3fn: 顶 binade [2^8,2^9) 尾数槽被 NaN 编码占用（无 inf），
+#                  上一格是 480=NaN 槽而非 2^9 → 步长 2^8/8=32，边界 464，
+#                  tie 舍到偶尾数 110 → 448（有限值，与 IEEE tie→inf 相反）
+#   hifloat8:      顶 binade [2^15,2^16) 尾数 1 位，inf 槽位于 1.5×2^15 虚位
+#                  （0x6F）→ 步长 2^15/2=16384，边界 40960，tie 归 inf
+_SPECIAL_TOP_BINADE_STEP = {"float8_e4m3fn": 32.0, "hifloat8": 16384.0}
+
+
+def get_dtype_overflow_boundary(dt, rounding: str = "rne") -> Tuple[float, float]:
+    """按 IEEE 754 舍入模式返回浮点 dtype 的溢出截断点 (lo, hi)。
+
+    约定：value <= lo → -inf；value >= hi → +inf（端点含）；
+    某侧返回 ±inf 表示该模式下永不向该侧溢出（超界值饱和到该侧 max_finite）。
+    例外：float8_e4m3fn 无 inf 编码且 tie 归有限值——消费方须用严格比较
+    （> hi / < lo）并把带外值替换为 NaN 而非 inf。
+
+    舍入模式（rounding 参数，大小写不敏感）：
+        rne  roundToNearestTiesToEven   就近舍入·偶数优先（IEEE 二进制默认）
+        rna  roundToNearestTiesToAway   就近舍入·远离零
+        rtp  roundTowardPositive        向 +∞
+        rtn  roundTowardNegative        向 -∞
+        rtz  roundTowardZero            向零截断
+
+    各模式截断点：
+        rne/rna: ±(max_finite + 2^(emax+1)) / 2   —— tie 归入 inf 侧
+                 （等价 max_finite + 顶 binade 步长/2，顶 binade 尾数全满时两式
+                 相等；e4m3fn/hifloat8 顶 binade 结构特殊，按
+                 _SPECIAL_TOP_BINADE_STEP 登记步长）
+        rtp:     (-inf, nextafter(max_finite, +inf)) —— 正侧超 max 即 +inf，负侧饱和
+        rtn:     (nextafter(-max_finite, -inf), +inf)
+        rtz:     (-inf, +inf)                      —— 永不溢出（双向饱和）
+
+    适用于含 inf 编码的格式（float16/bfloat16/float32/float64/float8_e5m2/
+    float8_e4m3fn/hifloat8）。float8_e8m0 无 inf 且双侧饱和，无溢出边界概念，
+    不适用——消费方直接用 get_dtype_range 做饱和。
+    """
+    mode = str(rounding).lower()
+    if mode not in ("rne", "rna", "rtp", "rtn", "rtz"):
+        raise ValueError(f"unsupported rounding mode: {rounding!r}; expected rne/rna/rtp/rtn/rtz")
+    lo, hi = get_dtype_range(dt)
+    if mode in ("rne", "rna"):
+        step = next((v for k, v in _SPECIAL_TOP_BINADE_STEP.items() if k in str(dt)), None)
+        boundary = hi + step / 2.0 if step is not None else (hi + 2.0 ** numpy.frexp(hi)[1]) / 2.0
+        return -boundary, boundary
+    if mode == "rtp":
+        return float("-inf"), float(numpy.nextafter(hi, numpy.inf))
+    if mode == "rtn":
+        return float(numpy.nextafter(lo, -numpy.inf)), float("inf")
+    return float("-inf"), float("inf")
 
 
 def is_4bit_dtype(dtype) -> bool:

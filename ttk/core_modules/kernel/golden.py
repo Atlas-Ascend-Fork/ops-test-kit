@@ -28,6 +28,7 @@ from ...utilities import (
     ceil_div,
     deep_flatten,
     get,
+    get_dtype_overflow_boundary,
     get_dtype_range,
     load_array,
     nest_by_distribution,
@@ -368,6 +369,37 @@ def __alloc_output_buffers(context: TestcaseKernel, golden_arrays: list, output_
     return output_arrays
 
 
+def _apply_overflow_semantics(golden: numpy.ndarray, npu_dtype: str, dr: tuple):
+    """溢出归一化：按 dtype 顶 binade 结构分类（语义经昇腾硬件实测标定）。
+
+    - fp16/bf16/fp32/e5m2/hifloat8：RNE 溢出边界，带外 → ±inf（tie 含，归 inf）
+    - e4m3fn：顶格 NaN 无 inf，边界 464，tie 归有限值，带外及 inf 源 → NaN
+    - e8m0：无 inf/无符号/无零，双侧饱和，负值 → NaN
+    """
+    if get_global_storage().overflow_mode == 0:
+        numpy.clip(golden, a_min=dr[0], a_max=dr[1], out=golden)
+    elif npu_dtype == "float8_e4m3fn":
+        # 边界 464 处 tie 舍到偶尾数 110 → 448（有限值，与 IEEE tie→inf 相反），故用
+        # 严格比较；带外值及 inf 源 → NaN（OCP 语义：该格式无 inf，Ascend950 实测）。
+        golden[numpy.isinf(golden)] = numpy.nan
+        lo, hi = get_dtype_overflow_boundary(npu_dtype)
+        golden[golden > hi] = numpy.nan
+        golden[golden < lo] = numpy.nan
+    elif npu_dtype == "float8_e8m0":
+        # 双侧饱和（Ascend950 MX 量化通路实测：零块/下溢 → 饱和 min；上界经 amax/4
+        # 除数余量不可达，取值域饱和）。负值为格式性非法（无符号），置 NaN 显式暴露。
+        golden[golden < 0] = numpy.nan
+        golden[golden == 0] = dr[0]
+        golden[(golden > 0) & (golden < dr[0])] = dr[0]
+        golden[golden > dr[1]] = dr[1]
+    else:
+        # 含 inf 格式（fp16/bf16/fp32/e5m2/hifloat8）：RNE 溢出边界，tie 归 inf。
+        # 边界带 (max, boundary) 内的真值按 RNE 舍到 max_finite，保持原值由容差吸收。
+        lo, hi = get_dtype_overflow_boundary(npu_dtype)
+        golden[golden <= lo] = -numpy.inf
+        golden[golden >= hi] = numpy.inf
+
+
 def __normalize_goldens(golden_arrays: List[Union[str, numpy.ndarray]], output_dtypes: list):
     # golden is rebound after view/concat conversions and written back to
     # golden_arrays — iterate by index so the rebinding stays explicit.
@@ -396,11 +428,7 @@ def __normalize_goldens(golden_arrays: List[Union[str, numpy.ndarray]], output_d
             golden = numpy.concatenate((real, imag), axis=-1)
             golden_arrays[idx] = golden
         dr = get_dtype_range(npu_dtype)
-        if get_global_storage().overflow_mode == 0:
-            numpy.clip(golden, a_min=dr[0], a_max=dr[1], out=golden)
-        else:
-            golden[golden < dr[0]] = -numpy.inf
-            golden[golden > dr[1]] = numpy.inf
+        _apply_overflow_semantics(golden, npu_dtype, dr)
 
 
 # 饱和白名单（仅 overflow_mode=0 休眠通路消费；生产 overflow_mode 恒 1，见
