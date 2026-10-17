@@ -163,6 +163,13 @@ def _add_run_args(parser):
     )
     group.add_argument("--rerun", metavar="COLUMNS", help="Rerun failed cases, e.g. --rerun=precision_status")
     group.add_argument(
+        "--print",
+        dest="summary_print",
+        default=True,
+        type=parse_cli_bool,
+        help="Print summary info periodically (default: true)",
+    )
+    group.add_argument(
         "--task-prof",
         dest="task_prof",
         default=True,

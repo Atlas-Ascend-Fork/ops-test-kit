@@ -60,11 +60,18 @@ class TestLegacyCliSurface:
     """参数变更落地后的翻转断言（原 pins 按设计更新）。"""
 
     def test_removed_flags_rejected(self):
-        # 历史翻转：--single-log（已默认化）/--print（无条件）/
+        # 历史翻转：--single-log（已默认化）/
         # --title/--csv-preserve（低频删除）——--no-memory-check 已恢复（宽松闸门）
-        for flag in ("--single-log", "--print", "--title", "--csv-preserve"):
+        for flag in ("--single-log", "--title", "--csv-preserve"):
             with pytest.raises(SystemExit):
                 _parse(["kernel", "-i", "cases.csv", flag])
+
+    def test_summary_print_restored(self):
+        # --print 恢复：默认 true，--print false 关闭周期性摘要（重构期一度无条件打印）
+        sw = _switches(["kernel", "-i", "cases.csv"])
+        assert sw.summary_print is True
+        sw = _switches(["kernel", "-i", "cases.csv", "--print", "false"])
+        assert sw.summary_print is False
 
     def test_no_memory_check_restored(self):
         # --no-memory-check 恢复（实施修正：多进程拉起防 OOM 直杀；闸门宽松化）

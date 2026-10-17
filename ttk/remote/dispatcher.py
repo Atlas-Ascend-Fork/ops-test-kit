@@ -137,15 +137,29 @@ def _cfg(field: str, default, cast=float):
 RESP_MEM_THRESHOLD = 64 << 20
 
 
+# float8 家族按原始字节传输：dtype 元数据由 X-Input-Schema 声明。
+# 与 executor._FLOAT8_WIRE_DTYPES 同口径。
+_FLOAT8_WIRE_DTYPES = ("float8_e4m3fn", "float8_e5m2", "float8_e8m0", "hifloat8")
+
+
+def _wire_leaf(arr):
+    """float8 家族按原始字节（uint8 位）传输；其余原样直通。"""
+    name = getattr(getattr(arr, "dtype", None), "name", "")
+    if name in _FLOAT8_WIRE_DTYPES:
+        return np.ascontiguousarray(arr).view(np.uint8)
+    return arr
+
+
 def _serialize_to_file(inputs: list, dir=None) -> str:
     """Serialize numpy inputs to a temporary .npz file.
 
-    deep_flatten 展开嵌套（每叶子一个 a{i}），过滤 None。dir: 临时文件目录
-    （默认系统 tempdir）。返回路径，caller 清理。
+    deep_flatten 展开嵌套（每叶子一个 a{i}），过滤 None。float8 家族只传
+    uint8 原始位（npz 无法以原生 dtype 落盘回读），元数据由 schema 声明。
+    dir: 临时文件目录（默认系统 tempdir）。返回路径，caller 清理。
     """
     leaves = [a for a in deep_flatten(inputs) if a is not None]
     with tempfile.NamedTemporaryFile(suffix=".npz", delete=False, dir=dir) as tmp:
-        np.savez(tmp, **{f"a{i}": a for i, a in enumerate(leaves)})
+        np.savez(tmp, **{f"a{i}": _wire_leaf(a) for i, a in enumerate(leaves)})
     return tmp.name
 
 

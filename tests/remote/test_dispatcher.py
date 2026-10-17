@@ -71,19 +71,31 @@ class TestDispatchApiMode:
 
 class TestSerializationRoundtrip:
     def test_numpy_roundtrip(self):
+        import ml_dtypes
+
         from ttk.remote.dispatcher import _load_npz_outputs, _serialize_to_file
 
+        # float8 家族 npz 存不回原 dtype：wire 只传原始字节，schema 声明元数据
+        fp8 = np.array([1.0, -2.0, 0.5, 3.0], dtype=ml_dtypes.float8_e5m2)
         original = [
             np.random.randn(4, 8).astype(np.float32),
             np.random.randn(3, 5).astype(np.int64),
+            fp8,
         ]
         tmp = _serialize_to_file(original)
         try:
-            schema = [{"index": 0, "dtype": "float32"}, {"index": 1, "dtype": "int64"}]
+            schema = [
+                {"index": 0, "dtype": "float32"},
+                {"index": 1, "dtype": "int64"},
+                {"index": 2, "dtype": "float8_e5m2"},
+            ]
+            npz = np.load(tmp)
+            assert npz["a2"].dtype == np.uint8  # float8 以原始位传输
             outputs = _load_npz_outputs(tmp, schema)
-            assert len(outputs) == 2
+            assert len(outputs) == 3
             np.testing.assert_array_equal(outputs[0], original[0])
             np.testing.assert_array_equal(outputs[1], original[1])
+            np.testing.assert_array_equal(np.ascontiguousarray(outputs[2]).view(np.uint8), fp8.view(np.uint8))
         finally:
             import os
 

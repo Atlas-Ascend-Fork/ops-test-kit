@@ -95,11 +95,42 @@ def _complex32_storage():
     return arr
 
 
-def test_complex32_input_direction(tmp_path):
-    """complex32 输入方向：schema logical_dtype → server 还原 torch.complex32 逻辑张量。"""
+def _custom_wire_samples():
+    """npz 存不回的 dtype 样例：(dtype_name, arr)。e4m3fn/e5m2/int4 来自
+    ml_dtypes，e8m0/hifloat8 来自 en_dtypes（未安装则跳过）。"""
+    import ml_dtypes
+
+    samples = [
+        ("float8_e4m3fn", np.array([1.0, -2.0, 0.5, 3.0], dtype=ml_dtypes.float8_e4m3fn)),
+        ("float8_e5m2", np.array([1.0, -2.0, 0.5, 3.0], dtype=ml_dtypes.float8_e5m2)),
+        ("int4", np.array([-8, -1, 0, 7], dtype=ml_dtypes.int4)),
+    ]
+    try:
+        import en_dtypes
+
+        samples.extend(
+            [
+                ("float8_e8m0", np.array([1.0, 2.0, 4.0], dtype=en_dtypes.float8_e8m0)),
+                ("hifloat8", np.array([0.5, -1.0, 2.0], dtype=en_dtypes.hifloat8)),
+            ]
+        )
+    except ImportError:
+        pass
+    return samples
+
+
+def test_custom_wire_dtype_input_direction(tmp_path):
+    """自定义 wire dtype 输入方向：schema 声明元数据 → server 还原逻辑 dtype。
+
+    complex32 以 fp16 交错位传输、还原 torch.complex32 逻辑张量；float8 家族
+    wire 只传原始字节（npz 存不下其 dtype），server 按声明重铸——torch 有原生
+    存储的 e4m3fn/e5m2 转 torch 张量，e8m0/hifloat8 与 int4 numpy 直通。
+    所有路径均须与 wire 字节逐位一致。
+    """
     torch = pytest.importorskip("torch")
     from ttk.remote.server.executor import _to_vendor_tensor, match_params_v1
 
+    # complex32
     storage = _complex32_storage()
     schema = _build_input_schema(inputs=[storage], input_names=["x"], input_dtypes=["complex32"])
     assert schema[0]["dtype"] == "float16"  # 物理 dtype
@@ -117,6 +148,24 @@ def test_complex32_input_direction(tmp_path):
     t_plain = _to_vendor_tensor(named["x"], "torch", "cpu", schema[0]["dtype"], None)
     assert t_plain.dtype == torch.float16
     assert tuple(t_plain.shape) == (2, 3, 2)
+
+    # float8 家族 / int4：wire 原始字节 + schema dtype → server 重铸
+    for name, arr in _custom_wire_samples():
+        schema = _build_input_schema(inputs=[arr], input_names=["x"])
+        assert schema[0]["dtype"] == name  # 元数据走 schema，不随数据
+        path = _serialize_to_file([arr], dir=str(tmp_path))
+        wire = np.load(path)["a0"]
+        named = match_params_v1(schema, [wire])
+        out = _to_vendor_tensor(named["x"], "torch", "cpu", schema[0]["dtype"], None)
+        if name in ("float8_e4m3fn", "float8_e5m2"):
+            assert isinstance(out, torch.Tensor)
+            assert out.dtype == getattr(torch, name)
+            got = out.view(torch.uint8).cpu().numpy()
+        else:
+            assert isinstance(out, np.ndarray)
+            assert out.dtype.name == name
+            got = np.ascontiguousarray(out).view(np.uint8)
+        np.testing.assert_array_equal(got, wire.view(np.uint8))
 
 
 def test_complex32_output_direction():

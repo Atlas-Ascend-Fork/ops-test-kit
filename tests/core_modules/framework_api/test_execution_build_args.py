@@ -119,6 +119,24 @@ class TestMatchOverload:
         params_flat, oidx_flat = _match_overload("torch.t5", 2, tensor_distribution=[False, False])
         assert oidx_flat == 1
 
+        # AccumulateNV2 形态：N*T 列表输入 + shape 属性（raw_ops 惯例归 Tensor 位，
+        # 由属性值常量折叠覆盖）——列表分布声明 [True] 须命中，单张量误声明须落空
+        _register(
+            "tf.raw_ops.AccumulateNV2",
+            [
+                ParamInfo(name="inputs", type="list of Tensors", is_keyword_only=True),
+                ParamInfo(name="shape", type="Tensor", is_keyword_only=True),
+                ParamInfo(name="name", type="Number", default=None, is_optional=True, is_keyword_only=True),
+            ],
+        )
+        attrs = {"N": 1, "shape": [7302]}
+        params, oidx = _match_overload("tf.raw_ops.AccumulateNV2", 1, attrs, tensor_distribution=[True])
+        assert params is not None
+        assert oidx == 0
+        params_flat, oidx_flat = _match_overload("tf.raw_ops.AccumulateNV2", 1, attrs, tensor_distribution=[False])
+        assert params_flat is None
+        assert oidx_flat == -1
+
     def test_unknown_api_returns_none(self):
         params, oidx = _match_overload("nonexistent.api", 1)
         assert params is None

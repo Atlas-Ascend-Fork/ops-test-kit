@@ -105,6 +105,7 @@ class SWITCHES:
         "random_seed",
         # 设备与执行：设备选择/进程模型/Kernel 编译执行主链
         "device_count",
+        "device_count_is_limit",
         "device_blacklist",
         "process_per_device",
         "run_timeout",
@@ -131,6 +132,7 @@ class SWITCHES:
         "reserve_hbm",
         "hbm_size_limit",
         "task_profiling",
+        "summary_print",
         "progress_output",
         "validate_only",
         "deterministic_level",
@@ -256,6 +258,8 @@ class SWITCHES:
     def _init_execution(self):
         """设备与执行：设备/进程模型、Kernel 三模式编译执行、设备状态强制项。"""
         self.device_count = -1
+        # --dev 是数量上限：物理卡不足时压缩而非报错；--devices 点名越界仍报错
+        self.device_count_is_limit = False
         self.device_blacklist: tuple = ()
         self.process_per_device: Optional[int] = None
         self.run_timeout = 0
@@ -283,6 +287,7 @@ class SWITCHES:
         self.reserve_hbm: int = 0
         self.hbm_size_limit = 30  # GB，输入张量总量守门上限
         self.task_profiling = True
+        self.summary_print = True
         self.progress_output = None
         self.validate_only: bool = False  # --validate 仅解析校验用例，不执行
         self.deterministic_level: int = 0  # 确定性等级，kernel/aclnn/geir/e2e 全链消费

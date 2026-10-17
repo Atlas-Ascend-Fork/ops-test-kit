@@ -254,7 +254,7 @@ class TestRunWithSwitchesDispatch:
 
 
 def test_cli_top_level_error_is_single_line(capsys, monkeypatch, tmp_path):
-    """bridge/handler 的校验 ValueError → 单行 ttk: error（非 traceback）；TTK_DEBUG=1 保留全栈。"""
+    """bridge/handler 的校验 ValueError → 单行 ttk: ERROR（非 traceback）；TTK_DEBUG=1 保留全栈。"""
     import sys
 
     monkeypatch.chdir(tmp_path)  # 隔离用户级 ttk.conf.yaml
@@ -265,16 +265,16 @@ def test_cli_top_level_error_is_single_line(capsys, monkeypatch, tmp_path):
         main()
     assert exit_info.value.code == 2
     err = capsys.readouterr().err
-    assert err.startswith("ttk: error:")
+    assert err.startswith("ttk: ERROR:")
     assert "unknown token" in err
     assert "Traceback" not in err
 
-    # argparse 报错同口径：经 _ErrorAwareArgumentParser.error → "ttk: error: invalid choice"
+    # argparse 报错同口径：经 _ErrorAwareArgumentParser.error → "ttk: ERROR: invalid choice"
     monkeypatch.setattr(sys, "argv", ["ttk", "bogus"])
     with pytest.raises(SystemExit) as exit_info:
         main()
     assert exit_info.value.code == 2
-    assert "ttk: error: argument command: invalid choice: 'bogus'" in capsys.readouterr().err
+    assert "ttk: ERROR: argument command: invalid choice: 'bogus'" in capsys.readouterr().err
 
     monkeypatch.setattr(sys, "argv", ["ttk", "kernel", "-i", "x.csv", "--dump", "in,foo"])
     monkeypatch.setenv("TTK_DEBUG", "1")

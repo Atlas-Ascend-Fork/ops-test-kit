@@ -666,7 +666,7 @@ class InstanceBase(metaclass=ABCMeta):
         if now - self.last_print_timestamp > print_cycle:
             self.last_print_timestamp = now
             self._output_progress()
-            if True:  # summary 无条件打印
+            if self.switches.summary_print:
                 self._get_head_commit_id()
                 try:
                     percentage = int(self.completed_case_count / self.total_case_count * 100)
@@ -809,10 +809,12 @@ class InstanceBase(metaclass=ABCMeta):
             )
 
     def _validate_device_count_against_hardware(self):
-        """--devices 显式指定的设备数超出本机物理卡数时启动即报错。
+        """请求的设备数量与本机物理卡数对账。
 
+        语义分开：`--dev N` 是数量上限，物理卡不足时压缩到实际卡数（告警留痕）；
+        `--devices` 的点名/正选 ID 是显式请求，越界物理卡数按配置错误启动即报错。
         容错边界：模型/仿真/编译态不依赖真卡；DSMI 探测失败或探得 0 卡
-        （无驱动容器、远端执行）时跳过——只在"本机确有卡且确实不够"时报错。
+        （无驱动容器、远端执行）时跳过——只在"本机确有卡且确实不够"时处理。
         """
         if not self.switches.mode.is_online_board():
             return
@@ -824,11 +826,19 @@ class InstanceBase(metaclass=ABCMeta):
             physical = DSMIInterface().get_device_count()
         except Exception:
             return
-        if 0 < physical < self.switches.device_count:
-            raise RuntimeError(
-                f"--dev/--devices resolve to device IDs 0-{self.switches.device_count - 1}, but only {physical} "
-                f"Ascend device(s) are present on this machine (valid device IDs: 0-{physical - 1})"
+        if not 0 < physical < self.switches.device_count:
+            return
+        if getattr(self.switches, "device_count_is_limit", False):
+            logging.warning(
+                f"--dev {self.switches.device_count} exceeds {physical} physical Ascend device(s); "
+                f"scheduling on {physical} device(s) instead"
             )
+            self.switches.device_count = physical
+            return
+        raise RuntimeError(
+            f"--dev/--devices resolve to device IDs 0-{self.switches.device_count - 1}, but only {physical} "
+            f"Ascend device(s) are present on this machine (valid device IDs: 0-{physical - 1})"
+        )
 
     def _initialize_device_lock(self) -> tuple:
         self.mp_manager = self.mp_context.Manager()

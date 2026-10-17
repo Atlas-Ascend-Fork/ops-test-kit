@@ -91,6 +91,8 @@ def _apply_devices(sw, spec, dev_count=None):
     count = dev_count if dev_count is not None else max(picks) + 1
     # available 集 → 数量 + 黑名单（全量 - available；_initialize_device_lock 唯一消费面）
     sw.device_count = count
+    # 正选点名语义：越界物理卡数按配置错误报错，不做压缩
+    sw.device_count_is_limit = False
     sw.device_blacklist = tuple(i for i in range(count) if i not in picks)
 
 
@@ -137,6 +139,8 @@ def _apply_output_log_args(sw, args):
         sw.proc_no_reuse = True
     if hasattr(args, "task_prof") and not args.task_prof:
         sw.task_profiling = False
+    if hasattr(args, "summary_print") and not args.summary_print:
+        sw.summary_print = False
     if hasattr(args, "progress_output") and args.progress_output:
         sw.progress_output = args.progress_output
 
@@ -145,6 +149,7 @@ def _apply_device_args(sw, args):
     dev_count = getattr(args, "device", None)
     if dev_count is not None:
         sw.device_count = dev_count
+        sw.device_count_is_limit = True  # --dev 是数量上限：物理卡不足时压缩而非报错
     if hasattr(args, "devices") and getattr(args, "devices", None) is not None:
         _apply_devices(sw, args.devices, dev_count)
     if hasattr(args, "process_count") and args.process_count is not None:

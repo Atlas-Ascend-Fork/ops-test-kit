@@ -60,7 +60,7 @@ class _ErrorAwareArgumentParser(argparse.ArgumentParser):
         from ttk.core_modules.common.logging import print_error
 
         self.print_usage(sys.stderr)
-        print_error(f"{self.prog}: error: {message}")
+        print_error(f"{self.prog}: ERROR: {message}")
         self.exit(2)
 
 
@@ -142,5 +142,5 @@ def _cli_main():
             raise
         from ttk.core_modules.common.logging import print_error
 
-        print_error(f"ttk: error: {exc}")
+        print_error(f"ttk: ERROR: {exc}")
         raise SystemExit(2) from None

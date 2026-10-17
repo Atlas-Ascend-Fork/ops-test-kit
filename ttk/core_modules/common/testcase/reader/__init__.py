@@ -16,10 +16,11 @@ parse_cases 管编排（files → iter_tables → 逐表 Factory → 聚合去�
 
 __all__ = ["Table", "iter_tables", "read_table", "read_csv_rows", "resolved_sheet"]
 
+import io
 import os
 from typing import Iterator, NamedTuple, Optional
 
-from .csv_reader import read_csv_rows
+from .csv_reader import decode_csv_bytes, read_csv_rows
 from .xlsx_reader import read_xlsx_rows, resolved_sheet
 from .zip_reader import iter_csv_members
 
@@ -44,9 +45,9 @@ def iter_tables(path: str, sheet: Optional[str] = None) -> Iterator[Table]:
             header, rows = read_csv_rows(fileobj)
             yield Table(name=member_name, header=header, rows=rows)
     else:
-        # utf-8-sig 兼容带 BOM 的 CSV（Excel 导出），无 BOM 时行为不变
-        with open(path, encoding="utf-8-sig", newline="") as f:
-            header, rows = read_csv_rows(f)
+        # utf-8-sig 兼容带 BOM 的 CSV；非 UTF-8 回退 GB18030，免手动转码
+        with open(path, "rb") as f:
+            header, rows = read_csv_rows(io.StringIO(decode_csv_bytes(f.read())))
         yield Table(name=path, header=header, rows=rows)
 
 

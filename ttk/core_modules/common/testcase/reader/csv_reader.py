@@ -9,9 +9,27 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """csv 文本表格解析。"""
 
-__all__ = ["read_csv_rows"]
+__all__ = ["read_csv_rows", "decode_csv_bytes"]
 
 import csv
+import logging
+
+
+def decode_csv_bytes(data: bytes) -> str:
+    """用例文本解码：utf-8-sig 优先（兼容 Excel BOM），非 UTF-8 回退 GB18030。
+
+    GBK/GB2312 是 GB18030 子集——中文表头/备注的常见编码经此路径免转换直读，
+    warning 留痕提示基线转存 UTF-8。两种编码都失败时抛 UnicodeDecodeError。
+    """
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    logging.warning(
+        "case file contains Chinese text but is not UTF-8 encoded (GBK/GB2312); "
+        "decoded as GB18030. Convert case files to UTF-8 to avoid this."
+    )
+    return data.decode("gb18030")
 
 
 def read_csv_rows(fileobj) -> tuple:

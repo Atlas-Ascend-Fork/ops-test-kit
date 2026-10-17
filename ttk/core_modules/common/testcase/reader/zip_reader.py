@@ -15,11 +15,13 @@ import io
 import logging
 import zipfile
 
+from .csv_reader import decode_csv_bytes
+
 
 def iter_csv_members(path: str):
     """zip 路径 → 迭代器 [(member_name, text_fileobj)]。
     testzip 校验损坏（corrupted → RuntimeError）；非 .csv 成员 warning 跳过；
-    成员流经 TextIOWrapper 包 UTF-8（utf-8-sig 兼容带 BOM 的成员）。"""
+    成员字节经 decode_csv_bytes 解码（utf-8-sig / GB18030 回退）。"""
     with zipfile.ZipFile(path) as zipped_file:
         corrupted = zipped_file.testzip()
         if corrupted:
@@ -30,4 +32,5 @@ def iter_csv_members(path: str):
                 continue
             logging.info(f"Reading zipped testcase file {file.filename} ...")
             with zipped_file.open(file) as real_file:
-                yield file.filename, io.TextIOWrapper(real_file, encoding="utf-8-sig", newline="")
+                data = real_file.read()
+            yield file.filename, io.StringIO(decode_csv_bytes(data))

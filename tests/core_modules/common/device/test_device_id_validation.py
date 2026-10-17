@@ -259,11 +259,16 @@ class TestValidateDeviceCountAgainstHardware:
         monkeypatch.setattr("ttk.core_modules.common.instance.DSMIInterface", _FakeDSMI)
         _FakeDSMI.physical = 0
 
-    def test_count_exceeds_physical_raises(self):
+    def test_count_exceeds_physical(self):
+        """请求数超过物理卡数：点名语义（--devices）报错，上限语义（--dev）压缩。"""
         _FakeDSMI.physical = 2
         with pytest.raises(RuntimeError) as exc:
             InstanceBase._validate_device_count_against_hardware(_hw_inst(device_count=5))
         assert "valid device IDs: 0-1" in str(exc.value)
+
+        inst = _hw_inst(device_count=5, device_count_is_limit=True)
+        InstanceBase._validate_device_count_against_hardware(inst)
+        assert inst.switches.device_count == 2
 
     def test_count_within_physical_passes(self):
         _FakeDSMI.physical = 8

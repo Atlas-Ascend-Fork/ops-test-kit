@@ -162,15 +162,8 @@ def extract_tf_params(api_name: str) -> Optional[APIParamInfo]:
         )
         params.append(pi)
 
-    # 参数级可变性落位（OpDef 按名匹配；python 形参名与 input_arg 名一致时生效，
-    # 改名/未收录算子保守跳过——与旧 OpDef 下标通道在真实 mutable API 上等价）
-    mutable_names, resource_names = mutable_input_flags(api_name)
-    if mutable_names or resource_names:
-        for pi in params:
-            if pi.name in mutable_names or pi.name in resource_names:
-                pi.is_mutable = True
-            if pi.name in resource_names:
-                pi.is_resource = True
+    # 参数级可变性 / resource / 列表输入落位（OpDef 按名匹配，见 _fill_opdef_flags）
+    _fill_opdef_flags(api_name, params)
 
     overload = OverloadInfo(params=params)
     info = APIParamInfo(
@@ -215,6 +208,40 @@ def _lookup_op_def(api_name):
 def _is_mutable_input_arg(arg):
     """is_ref(TF1 mutable-ref)或 DT_RESOURCE(Resource* raw op 的 handle 位)。"""
     return arg.is_ref or arg.type == _DT_RESOURCE
+
+
+def tensor_list_input_names(api_name):
+    """OpDef 列表输入参数名集（N*T / type-list 形 input_arg）。
+
+    tf_inspect 的 Python 签名无法表达列表输入（如 AccumulateNV2 的
+    inputs: N * T），靠 OpDef 的 number_attr / type_list_attr 元数据补齐。
+    无 OpDef / 解析失败返回空集（非 TF 前缀经 _lookup_op_def 短路）。
+    """
+    op_def = _lookup_op_def(api_name)
+    if op_def is None:
+        return frozenset()
+    return frozenset(a.name for a in op_def.input_arg if a.number_attr or a.type_list_attr)
+
+
+def _fill_opdef_flags(api_name, params):
+    """OpDef 元数据 → ParamInfo 落位（可变性 / resource / 列表输入，按名匹配）。
+
+    Python 签名看不到的静态事实由 OpDef 补齐：is_ref / DT_RESOURCE 记
+    mutable 与 resource（handle 转换驱动位）；number_attr / type_list_attr
+    记列表输入（tf_inspect 一律归单 Tensor，match_overload 的 TensorList
+    分布校验依赖该位）。无 OpDef / 改名算子保守跳过。
+    """
+    mutable_names, resource_names = mutable_input_flags(api_name)
+    list_names = tensor_list_input_names(api_name)
+    if not (mutable_names or resource_names or list_names):
+        return
+    for pi in params:
+        if pi.name in mutable_names or pi.name in resource_names:
+            pi.is_mutable = True
+        if pi.name in resource_names:
+            pi.is_resource = True
+        if pi.name in list_names:
+            pi.type = "list of Tensors"
 
 
 def mutable_input_flags(api_name):

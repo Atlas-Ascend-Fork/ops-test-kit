@@ -143,6 +143,10 @@ def test_tf_param_flags_filled_from_opdef():
             info = keeper.get(api)
             return None if info is None else [[p.name, p.is_mutable, p.is_resource] for p in info.params]
 
+        def types(api):
+            info = keeper.get(api)
+            return None if info is None else [[p.name, p.type, p.is_tensor_list] for p in info.params]
+
         adapter = get_adapter("tf")
         v = tf.Variable([1.0, 2.0])
         out = {
@@ -159,6 +163,8 @@ def test_tf_param_flags_filled_from_opdef():
                 [float(x) for x in row] for row in adapter.mutable_readback("tf.raw_ops.ResourceScatterAdd", [v], {})
             ],
             "readback_relu": adapter.mutable_readback("tf.nn.relu", [v], {}),
+            "acc_nv2_types": types("tf.raw_ops.AccumulateNV2"),
+            "relu_types": types("tf.nn.relu"),
         }
         print("RESULT:" + json.dumps(out))
         """
@@ -186,3 +192,11 @@ def test_tf_param_flags_filled_from_opdef():
     assert out["flat_relu"] == []
     assert out["readback_rsa"] == [[1.0, 2.0]]
     assert out["readback_relu"] == []
+    # OpDef N*T 列表输入（AccumulateNV2 inputs）：tf_inspect 补列表位（Python 签名表不出列表）
+    assert out["acc_nv2_types"] == [
+        ["inputs", "list of Tensors", True],
+        ["shape", "Tensor", False],  # shape 属性维持 raw_ops 惯例的 Tensor 归类（attr raw 透传）
+        ["name", "Number", False],
+    ]
+    # 控制组：无列表输入的普通 API 不误标
+    assert out["relu_types"] == [["features", "Tensor", False], ["name", "Number", False]]

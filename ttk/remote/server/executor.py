@@ -32,9 +32,16 @@ import numpy as np
 # bind_params/UnknownParamError 与 client 同源（ttk.core_modules.common.xpu 单份）；
 # has_data/has_perf/format_device/match_params_v1/resolve_callable 留驻本文件（server 专属语义）
 from ttk.core_modules.common.xpu import UnknownParamError, bind_params  # noqa: F401
+from ttk.utilities.dtypes import is_4bit_dtype, resolve_numpy_dtype
 
 _FRAMEWORK_RESERVED = {"device"}
 _PROVIDER_MODULE_ALIASES = {"tf": "tensorflow"}
+
+# npz 无法承载的自定义 dtype：wire 只传原始字节，元数据由 X-Input-Schema 声明。
+# 与 dispatcher._FLOAT8_WIRE_DTYPES 同口径。
+_FLOAT8_WIRE_DTYPES = ("float8_e4m3fn", "float8_e5m2", "float8_e8m0", "hifloat8")
+# float8 家族中 torch 有原生存储的类型（其余 numpy 直通）。
+_TORCH_FLOAT8_DTYPES = ("float8_e4m3fn", "float8_e5m2")
 
 DATA = 0b01  # return device outputs
 PERF = 0b10  # collect performance
@@ -700,6 +707,38 @@ def _outputs_to_numpy(outputs, provider):
     return schema, arrays
 
 
+def _restore_wire_dtype(value, dtype_name):
+    """按 schema 声明还原 npz 存不回的自定义 dtype（4bit / float8 家族）。
+
+    wire 上只有原始字节（dtype 元数据已退化），重铸后才能参与运算或
+    numpy 直通。非自定义 dtype 返回 None（走常规转换）；依赖包缺失时
+    原样返回（兜底直通）。
+    """
+    if not isinstance(value, np.ndarray) or not dtype_name:
+        return None
+    if not (is_4bit_dtype(dtype_name) or dtype_name in _FLOAT8_WIRE_DTYPES):
+        return None
+    try:
+        return value.view(resolve_numpy_dtype(dtype_name))
+    except (RuntimeError, ValueError, TypeError):
+        return value
+
+
+def _to_torch_float8(value, dtype_name, device_str):
+    """float8 numpy → torch 张量；失败返回 None（回落 numpy 直通）。"""
+    if dtype_name not in _TORCH_FLOAT8_DTYPES:
+        return None
+    try:
+        import torch
+    except ImportError:
+        return None
+    try:
+        torch_dtype = getattr(torch, dtype_name)
+        return torch.from_numpy(np.ascontiguousarray(value).view(np.uint8)).view(torch_dtype).to(device_str)
+    except Exception:
+        return None
+
+
 def _to_vendor_tensor(value, provider, device_str, dtype_name=None, logical_dtype=None):
     """Framework H2D: numpy input -> provider tensor on device.
 
@@ -717,6 +756,16 @@ def _to_vendor_tensor(value, provider, device_str, dtype_name=None, logical_dtyp
         return None
     if isinstance(value, (list, tuple)):
         return type(value)(_to_vendor_tensor(v, provider, device_str, dtype_name, logical_dtype) for v in value)
+    if isinstance(value, np.ndarray):
+        restored = _restore_wire_dtype(value, dtype_name)
+        if restored is not None:
+            # torch/tf 无 4bit 存储；torch 能表示的 float8 转张量，
+            # 其余以 numpy 直通，由三方 compose 自行消费。
+            if provider == "torch":
+                as_torch = _to_torch_float8(restored, dtype_name, device_str)
+                if as_torch is not None:
+                    return as_torch
+            return restored
     if provider == "torch":
         try:
             import torch
@@ -726,13 +775,10 @@ def _to_vendor_tensor(value, provider, device_str, dtype_name=None, logical_dtyp
             return value.to(device_str)
         if isinstance(value, np.ndarray):
             if dtype_name == "bfloat16":
-                # numpy has no native bfloat16 (wire form is raw int16 bits);
-                # reinterpret then view as bfloat16.
+                # numpy 无原生 bf16：wire 是原始 int16 位，重铸回 bf16。
                 return torch.from_numpy(value.view(np.int16)).view(torch.bfloat16).to(device_str)
             if logical_dtype == "complex32" and value.dtype == np.float16:
-                # wire form is interleaved fp16 with a trailing [2] dim;
-                # view halves the trailing 2 -> 1, squeeze(-1) drops the
-                # artifact dim, leaving the logical shape.
+                # complex32 以 fp16 交错位传输，还原逻辑张量。
                 if not hasattr(torch, "complex32"):
                     raise RuntimeError(
                         f"Current pytorch version [{torch.__version__}] is too old. Please update to at least v1.13.1"
@@ -745,12 +791,9 @@ def _to_vendor_tensor(value, provider, device_str, dtype_name=None, logical_dtyp
             import tensorflow as tf
 
             if dtype_name == "bfloat16" and isinstance(value, np.ndarray):
-                # wire form is raw int16 bits; tf ships a numpy bf16 dtype
-                # (tensorflow.bfloat16.as_numpy_dtype) we can view into.
+                # wire 是原始 int16 位，重铸 tf bf16。
                 value = value.view(tf.bfloat16.as_numpy_dtype)
-            # Pin to the assigned device — otherwise tf.convert_to_tensor lands on
-            # TF's default (device 0), wrong when multiple devices present. TF2 soft
-            # device placement makes tf.device a no-op when the device is absent.
+            # 钉在分配的设备上；TF2 软放置使设备缺失时 tf.device 不产生副作用。
             if device_str and device_str != "cpu":
                 with tf.device(device_str):
                     return tf.convert_to_tensor(value)
