@@ -209,7 +209,7 @@ class InstanceBase(metaclass=ABCMeta):
     @staticmethod
     def _read_existing_header(path: str):
         try:
-            with open(path, newline="", encoding="utf-8") as f:
+            with open(path, newline="", encoding="utf-8-sig") as f:
                 reader = csv.reader(f)
                 return next(reader, None)
         except (UnicodeDecodeError, csv.Error, OSError):
@@ -1165,7 +1165,7 @@ class InstanceBase(metaclass=ABCMeta):
         if status == "PASS":
             self.pass_count += 1
         elif status in {"FAIL", "FAILURE", "PROFILE_CRASH", "COMPILE_FAILURE", "TIMEOUT"} or status.startswith(
-            "CRASHED AT PROFILING STAGE:"
+            ("CRASHED AT PROFILING STAGE:", "ERROR:")
         ):
             self.fail_count += 1
         else:
@@ -1187,6 +1187,9 @@ class InstanceBase(metaclass=ABCMeta):
 
     def _output_progress(self):
         if self.switches.progress_output:
+            parent = os.path.dirname(self.switches.progress_output)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             now = time.time()
             with open(self.switches.progress_output, "w") as f:
                 f.write(

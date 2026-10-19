@@ -153,7 +153,11 @@ def _apply_device_args(sw, args):
     if hasattr(args, "devices") and getattr(args, "devices", None) is not None:
         _apply_devices(sw, args.devices, dev_count)
     if hasattr(args, "process_count") and args.process_count is not None:
-        sw.process_per_device = args.process_count
+        if args.process_count <= 0:
+            logging.warning(f"--process-count {args.process_count} is not positive, falling back to 1")
+            sw.process_per_device = 1
+        else:
+            sw.process_per_device = args.process_count
     if hasattr(args, "platform") and args.platform:
         sw.dev_plat = args.platform
     if hasattr(args, "proc_timeout") and args.proc_timeout:

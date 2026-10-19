@@ -246,6 +246,6 @@ def _det_status(md5_list, deterministic, case_name) -> Optional[str]:
 
 def _cleanup_bins(input_prefix):
     """清临时输入 bin（全部退出路径统一经 finally）。"""
-    for f in glob.glob(f"{input_prefix}_*.bin"):
+    for f in glob.glob(f"{glob.escape(input_prefix)}_*.bin"):
         with contextlib.suppress(OSError):
             os.remove(f)

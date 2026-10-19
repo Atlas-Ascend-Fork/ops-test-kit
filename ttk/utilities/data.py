@@ -29,6 +29,7 @@ __all__ = ["RandomData", "constant_array"]
 
 # Standard Packages
 import math
+import warnings
 from typing import Union
 
 import numpy
@@ -55,6 +56,8 @@ def constant_array(dtype, shape, init_value=1):
         real = numpy.full(c_shape, init_value, dtype=numpy.float16)
         imag = numpy.zeros(c_shape, dtype=numpy.float16)
         return numpy.concatenate((real, imag), axis=-1)
+    if str(dtype) == "uint1":
+        return numpy.packbits(numpy.full(shape, init_value != 0, dtype="bool"))
     return numpy.full(shape, init_value, dtype=dtype)
 
 
@@ -345,7 +348,13 @@ class RandomData:
         lo = max(int(math.ceil(low)), int(info.min))
         hi = min(int(math.floor(high)), int(info.max))
         if lo > hi:
-            raise ValueError(f"integer data_range [{low}, {high}] contains no representable {dtype} value")
+            # 区间内无可表示整数：不拒绝用例，告警后回退为钳位后的单点固定值
+            warnings.warn(
+                f"integer data_range [{low}, {high}] contains no representable {dtype} value; "
+                f"falling back to constant fill of {hi}",
+                stacklevel=2,
+            )
+            lo = hi
         # 种子取自**已播种的全局 legacy RNG**，而不是 default_rng() 的 OS 熵：
         # 后者让原生整型输入无视 np.random.seed，同一用例每次跑数据都不同
         # （batch_seed 的可复现承诺对整型形同虚设，免上传的配方也无从复算）。

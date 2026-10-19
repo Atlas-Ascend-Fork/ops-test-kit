@@ -676,6 +676,8 @@ def torch_to_numpy_tensor(torch_tensor) -> numpy.ndarray:
     if not isinstance(torch_tensor, torch.Tensor):
         raise RuntimeError(f"Only support torch.Tensor. But got {type(torch_tensor)}")
     dtype_str = str(torch_tensor.dtype)
+    if torch_tensor.is_conj():
+        torch_tensor = torch_tensor.resolve_conj()
     if torch_tensor.dtype == torch.bfloat16:
         return _torch_bfloat16_to_numpy(torch_tensor)
     if "complex32" in dtype_str:

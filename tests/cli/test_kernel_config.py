@@ -22,6 +22,7 @@ def _make_args(**kwargs):
     args.input = kwargs.get("input", "x.csv")
     args.output = kwargs.get("output")
     args.run = kwargs.get("run", 1)
+    args.process_count = kwargs.get("process_count")
     return args
 
 

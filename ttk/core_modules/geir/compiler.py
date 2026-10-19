@@ -225,6 +225,6 @@ class GeirCompiler:
             import contextlib
             import glob
 
-            for f in glob.glob(f"{input_prefix}_*.bin"):
+            for f in glob.glob(f"{glob.escape(input_prefix)}_*.bin"):
                 with contextlib.suppress(OSError):
                     os.remove(f)

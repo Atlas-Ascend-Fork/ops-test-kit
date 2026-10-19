@@ -68,7 +68,11 @@ def xpu_server():
             continue
     yield proc
     proc.terminate()
-    proc.wait(timeout=5)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
     shutil.rmtree(SYNC_TMP_DIR, ignore_errors=True)
 
 

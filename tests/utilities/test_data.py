@@ -316,7 +316,7 @@ def test_int64_high_range_is_not_grid_quantized(high):
         ("int32", (1, 2, 3.9), {1, 2, 3}),
         # 固定小数截断（(1.5, 1.5)→1）
         ("int32", (1.5, 1.5), {1}),
-        # 区间内无可表示整数时明确拒绝
+        # 区间内无可表示整数时告警并回退，不拒绝用例
         ("int32", (1.2, 1.8), "reject"),
     ],
     ids=[
@@ -331,16 +331,17 @@ def test_int64_high_range_is_not_grid_quantized(high):
         "int32-multi-int-subset",
         "extra-must-contain-truncation",
         "fixed-fraction-truncation",
-        "empty-int-subset-reject",
+        "empty-int-subset-warn",
     ],
 )
 def test_integer_range_contract(dtype, data_range, expected):
     """整数区间契约：2^53+ 端点不经 float64；非固定小数区间向内取整不越边界；
-    显式额外必现值 int(x) 截断；固定小数截断；空整数集合拒绝。"""
+    显式额外必现值 int(x) 截断；固定小数截断；空整数集合告警回退。"""
     low, high = data_range[:2]
     if expected == "reject":
-        with pytest.raises(ValueError, match="no representable"):
-            RandomData(dtype, (128,), data_range).generate()
+        with pytest.warns(UserWarning, match="no representable"):
+            arr = RandomData(dtype, (128,), data_range).generate()
+        assert set(arr.tolist()) <= {1, 2}
         return
     arr = RandomData(dtype, (8192,), data_range).generate()
     if expected is None:
