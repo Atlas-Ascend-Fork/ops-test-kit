@@ -118,7 +118,11 @@ class DumpFormatter(ABC):
         raise DumpLoadError(f"format {type(self).__name__} does not support load")
 
     def _abspath(self, file_path: str, file_name: str) -> str:
-        return os.path.abspath(os.path.join(file_path, f"{file_name}.{self.ext}"))
+        dump_root = os.path.realpath(file_path)
+        dump_path = os.path.realpath(os.path.join(dump_root, f"{file_name}.{self.ext}"))
+        if os.path.commonpath((dump_root, dump_path)) != dump_root:
+            raise ValueError(f"dump file path escapes dump directory: {file_name!r}")
+        return dump_path
 
 
 @register_format("bin")
@@ -213,7 +217,7 @@ class PtFormatter(DumpFormatter):
         if isinstance(result, tuple):
             torch.save(numpy_to_torch_tensor(result[0]), path)
         else:
-            numpy.save(os.path.abspath(os.path.join(file_path, f"{file_name}.npy")), result)
+            numpy.save(self._abspath(file_path, file_name).removesuffix(".pt") + ".npy", result)
 
     def load(self, path, dtype, shape=None) -> numpy.ndarray:
         payload = _load_pt_payload(path)
