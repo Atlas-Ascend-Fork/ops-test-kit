@@ -387,11 +387,6 @@ def _configure_manual_data_dump(sw, command, directories):
         raise ValueError("--compile-only cannot be combined with Kernel manual-data output")
     if command == "kernel" and directories and not kernel_pair:
         raise ValueError("Kernel manual-data output requires exactly --no-prof --dump in,golden")
-    if command == "geir" and sw.golden_mode == "XPU":
-        raise ValueError(
-            "--no-prof writes host-generated input/golden; "
-            "--golden-mode XPU (golden from third-party execution) has nothing to write"
-        )
     if not cfg.dump_input:
         if directories:
             raise ValueError("--no-prof manual-data output requires --dump in")

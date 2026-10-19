@@ -76,6 +76,18 @@ def _add_case_filter_args(parser):
 
 def _add_precision_args(parser):
     group = parser.add_argument_group("precision & data")
+    _GOLDEN_MODE_CHOICES = ("Enable", "Disable", "Promote", "XPU")
+    _GOLDEN_MODE_ALIASES = {mode.lower(): mode for mode in _GOLDEN_MODE_CHOICES}
+
+    def _golden_mode_arg(value: str) -> str:
+        """--golden-mode 大小写不敏感：归一到规范值，非法值报 argparse 风格错误。"""
+        mode = _GOLDEN_MODE_ALIASES.get(str(value).strip().lower())
+        if mode is None:
+            raise argparse.ArgumentTypeError(
+                f"invalid choice: {value!r} (choose from {', '.join(repr(m) for m in _GOLDEN_MODE_CHOICES)})"
+            )
+        return mode
+
     group.add_argument(
         "--compare",
         default=None,
@@ -104,7 +116,8 @@ def _add_precision_args(parser):
         "--golden-mode",
         dest="golden_mode",
         default="Enable",
-        choices=["Enable", "Disable", "Promote", "XPU"],
+        type=_golden_mode_arg,
+        choices=list(_GOLDEN_MODE_CHOICES),
         help="Golden mode: Enable/Disable (no comparison, verdict SKIP)/Promote (CPU high-precision)/XPU (GPU output as golden)",
     )
     group.add_argument(

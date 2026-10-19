@@ -31,6 +31,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from ttk.core_modules.common.dump import (
+    dump_manual_dataset,
+    load_replay_goldens,
     manual_data_dump_store,
     resolve_manual_case,
     snapshot_manual_values,
@@ -956,16 +958,18 @@ def _resolve_api(testcase, adapter, backend, switches):
     )
 
 
-def _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_inputs, dyn_indexes):
+def _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_inputs):
     """golden 生成 / 静态 replay 装载——先于 no-prof 收尾与设备执行。
 
     no-prof（dump 方向）与 full-flow 共用本步骤：落盘与比对消费同一份产物
     （判据要求时含 Promote，对齐 kernel 的 tolerance→golden→dump 时序）；
     dump_golden 关闭时跳过生成。延迟到执行后装载（deferred=True）的情形：
-    golden_mode=XPU（golden 由三方产出，两种模式皆延迟）；动态 shape 用例
-    （仅 full-flow——-1 输入槽执行返回 references 后装载）；静态 replay
-    装载失败（按执行返回 shape 重装载）。生成失败 → 占位（GOLDEN_FAILURE/
-    SUPPRESSED）落结果行，不拖累执行与 perf。
+    golden_mode=XPU（golden 由三方产出，两种模式皆延迟）；静态 replay
+    装载失败（按执行返回 shape 重装载）。动态 shape 用例不特判——动态仅
+    作用于输入槽（-1 输出槽被 DYN_SHAPE_ON_OUTPUT_SLOT 校验拒绝），输出
+    声明仍是静态 shape，replay golden 按文件名 shape 段自描述还原、与 CSV
+    声明核对；声明与实际不符的边缘场景由静态装载失败自动落入 deferred。
+    生成失败 → 占位（GOLDEN_FAILURE/SUPPRESSED）落结果行，不拖累执行与 perf。
 
     返回 SimpleNamespace(promote, nps, deferred)。
     """
@@ -974,12 +978,11 @@ def _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_i
         return SimpleNamespace(promote=promote, nps=None, deferred=True)
     if switches.no_prof and not switches.dump_config.dump_golden:
         return SimpleNamespace(promote=promote, nps=None, deferred=False)
-    if dyn_indexes and not switches.no_prof:
-        return SimpleNamespace(promote=promote, nps=None, deferred=True)
     if manual_case is not None and manual_case.has_goldens:
         try:
             process_ctx.notify_status("OnLoadManualGolden")
-            nps = manual_case.load_goldens(
+            nps = load_replay_goldens(
+                manual_case,
                 shapes=testcase.flat_output_view_shapes,
                 dtypes=testcase.flat_output_dtypes,
             )
@@ -1134,15 +1137,15 @@ def _execute_phases(
 def _load_deferred_golden(
     testcase, switches, process_ctx, manual_case, raw_inputs, backend, promote, ref_nps, return_struct
 ):
-    """延迟装载：动态 shape 用例输出 shape 运行前未知，等执行返回的 references 再
-    reshape 装载；XPU golden 待三方产出后回填；静态装载失败按执行返回 shape 重装载。
+    """延迟装载：静态 replay 装载失败（声明与执行返回 shape 偏离等）后按执行
+    返回的 device_outputs 重装载；XPU golden 待三方产出后回填。
 
     返回 (golden_nps, early)。
     """
     if manual_case is not None and manual_case.has_goldens:
         try:
             process_ctx.notify_status("OnLoadManualGolden")
-            golden_nps = manual_case.load_goldens(references=ref_nps)
+            golden_nps = load_replay_goldens(manual_case, device_outputs=ref_nps)
             dump_goldens(testcase, golden_nps, switches)
             return golden_nps, False
         except Exception as exc:
@@ -1167,21 +1170,9 @@ def _manual_data_dump(
     if not switches.no_prof and golden_nps is None:
         return False
     if dump_store is not None and manual_case is None and switches.golden_mode != "XPU":
-        write_goldens = (
-            bool(switches.dump_config.dump_golden)
-            and bool(golden_nps)
-            and not any(isinstance(g, str) for g in golden_nps)
-        )
         try:
             process_ctx.notify_status("OnWriteManualData")
-            case_dir = dump_store.write_case(
-                testcase,
-                "e2e",
-                prepared_inputs,
-                golden_nps if write_goldens else [],
-                file_format=switches.dump_config.file_format,
-                write_goldens=write_goldens,
-            )
+            case_dir = dump_manual_dataset(dump_store, testcase, "e2e", prepared_inputs, golden_nps or [], switches)
             logging.info(f"[{testcase.testcase_name}] manual data dumped: {case_dir}")
         except Exception as exc:
             logging.exception(f"[{testcase.testcase_name}] Manual data dump failure")
@@ -1332,9 +1323,9 @@ def _collect_xpu(
             dump_xpu_slot_files(testcase, switches, third_parties, xpu_provider)
         # manual 三方输出（CSV 显式路径 / manual-data case 目录槽位）：DATA 需求
         # 时本地装载短路，跳过远端 dispatch；PERF-only 不走 manual（性能指标
-        # 只能来自在线执行）。references 供 e2e 无声明输出槽时取 shape/dtype。
+        # 只能来自在线执行）。device_outputs 供 e2e 无声明输出槽时取 shape/dtype。
         elif need_3party or golden_is_xpu or getattr(getattr(switches, "dump_config", None), "dump_xpu", False):
-            manual = load_manual_third_parties(testcase, manual_case, references=ref_nps)
+            manual = load_manual_third_parties(testcase, manual_case, device_outputs=ref_nps)
             if manual is not None:
                 process_ctx.notify_status("OnLoadManualXpu")
                 dump_manual_xpu_archive(testcase, manual)
@@ -1479,7 +1470,7 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
         return
 
     # golden 先于落盘与设备执行（对齐 kernel：tolerance→golden→dump）
-    golden = _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_inputs, dyn_indexes)
+    golden = _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_inputs)
 
     if _manual_data_dump(
         testcase, switches, process_ctx, dump_store, manual_case, prepared_inputs, golden.nps, return_struct

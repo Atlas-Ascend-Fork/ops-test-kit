@@ -136,15 +136,20 @@ def test_geir_no_prof_dumps_and_skips_compile_execute(monkeypatch, tmp_path):
     )
 
 
-def test_geir_no_prof_rejects_xpu_golden_mode(monkeypatch, tmp_path):
-    """golden-mode XPU 与 --no-prof 互斥：golden 由三方执行产出，无可制备。"""
+def test_geir_no_prof_xpu_golden_writes_input_only(monkeypatch, tmp_path):
+    """golden-mode XPU + --no-prof 对齐 kernel：占位 golden 被过滤，仅落 input。"""
     case = _geir_case("geir_no_prof_xpu")
     switches = _switches(tmp_path, no_prof=True, manual_dirs=[tmp_path])
     switches.dump_config.dump_input = True
     switches.dump_config.dump_golden = True
     switches.golden_mode = "XPU"
+    original_input = np.array([1.0, 2.0], np.float32)
     _patch_common(monkeypatch, switches, tmp_path)
-    monkeypatch.setattr(geir_worker, "gen_input", lambda context, stored_inputs=None: None)
+
+    def generate_input(context, stored_inputs=None):
+        context.input_arrays = (original_input, None)
+
+    monkeypatch.setattr(geir_worker, "gen_input", generate_input)
     monkeypatch.setattr(
         geir_worker,
         "_resolve_stage",
@@ -153,8 +158,12 @@ def test_geir_no_prof_rejects_xpu_golden_mode(monkeypatch, tmp_path):
 
     result = geir_worker.run(case, {}, {}, 0)
 
-    assert result.passed is False
-    assert result.precision_status.startswith("MANUAL_DATA_PREPARE_FAILURE")
+    assert result.passed is True
+    assert result.precision_status == "MANUAL_DATA_PREPARED"
+    loaded = ManualDataStore(tmp_path).load_case(case, "geir", require_goldens=False)
+    np.testing.assert_array_equal(loaded.inputs[0], original_input)
+    assert loaded.inputs[1] is None
+    assert not loaded.has_goldens
 
 
 def test_geir_replay_restores_stored_inputs_and_golden(monkeypatch, tmp_path):

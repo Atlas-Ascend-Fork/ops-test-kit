@@ -98,13 +98,22 @@ def resolve_callable_str(s: str):
     return obj
 
 
+_GOLDEN_MODE_ALIASES = {"enable": "Enable", "disable": "Disable", "promote": "Promote", "xpu": "XPU"}
+
+
 def golden_mode(testcase, switches) -> str:
     """golden 模式解析（单份）：用例级 golden_mode_override 优先于全局 --golden-mode。
 
-    缺省回 "Enable"；switches 为 None / 缺字段的鸭子类型（测试 SimpleNamespace）
+    大小写不敏感（enable/xpu 等归一到规范值），未知值告警并按 Enable 兜底；
+    缺省回 "Enable"。switches 为 None / 缺字段的鸭子类型（测试 SimpleNamespace）
     同样安全。仅 Promote/Disable/XPU 比较消费此值。
     """
-    return getattr(testcase, "golden_mode_override", None) or getattr(switches, "golden_mode", None) or "Enable"
+    mode = getattr(testcase, "golden_mode_override", None) or getattr(switches, "golden_mode", None) or "Enable"
+    resolved = _GOLDEN_MODE_ALIASES.get(str(mode).strip().lower())
+    if resolved is None:
+        logging.warning("unknown golden-mode %r falls back to Enable", mode)
+        return "Enable"
+    return resolved
 
 
 _FRAMEWORK_ROOTS = {"numpy": "numpy", "torch": "torch", "tf": "tf", "tensorflow": "tf"}

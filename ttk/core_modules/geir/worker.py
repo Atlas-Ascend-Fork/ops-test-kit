@@ -30,7 +30,13 @@ from ttk.utilities import is_4bit_dtype, render_table
 
 from ..common.comparison.batch_consistency import assemble_batch_summary
 from ..common.comparison.resolve import needs_promote_golden, resolve_tolerance
-from ..common.dump import manual_data_dump_store, resolve_manual_case, snapshot_manual_values
+from ..common.dump import (
+    dump_manual_dataset,
+    load_replay_goldens,
+    manual_data_dump_store,
+    resolve_manual_case,
+    snapshot_manual_values,
+)
 from ..common.logging import build_single_log_dir, default_logging_config
 from ..common.plugin import SpecResolver
 from ..common.process import DeviceLock, gate_host_memory, process_context
@@ -119,10 +125,17 @@ def run(
                     dump_store = None  # 首跑数据集由首个模式写一次，后续模式不再落
     except Exception as e:
         logging.exception("GEIR profiling exception")
-        result = GeirReturnStructure()
-        result.precision_status = f"ERROR: {str(e)[:200]}"
-        result.precision = "EXEC_FAILURE"
-        result.passed = False
+        message = str(e)
+        if message.startswith(("MANUAL_DATA_PREPARE_FAILURE:", "MANUAL_DATA_READ_FAILURE:")):
+            # manual 阶段失败经 raise 通道上抛：对齐 kernel early_end 的失败行
+            # （precision 承载完整 "STATUS: exc"，不再落 EXEC_FAILURE/ERROR）
+            status = message.split(":", 1)[0]
+            result = _manual_data_failure(status, RuntimeError(message.split(":", 1)[1]))
+        else:
+            result = GeirReturnStructure()
+            result.precision_status = f"ERROR: {str(e)[:200]}"
+            result.precision = "EXEC_FAILURE"
+            result.passed = False
 
     process_ctx.notify_status("OnReturning")
     _mark_off_modes(result, switches)
@@ -220,10 +233,14 @@ def _geir_param_order(testcase) -> list:
 
 
 def _manual_data_failure(status: str, exc: Exception) -> GeirReturnStructure:
-    """manual-data 阶段失败结果（开仓/装载/落盘异常，整例 FAIL）。"""
+    """manual-data 阶段失败结果（开仓/装载/落盘异常，整例 FAIL）。
+
+    对齐 kernel early_end：precision 直接承载 "STATUS: exc" 全串（屏显/CSV
+    直读失败原因），STATUS 列记 FAIL。
+    """
     result = GeirReturnStructure()
-    result.precision = status
-    result.precision_status = f"{status}: {str(exc)[:150]}"
+    result.precision = f"{status}: {str(exc)[:150]}"
+    result.precision_status = "FAIL"
     result.passed = False
     return result
 
@@ -271,7 +288,8 @@ def _manual_data_stage(testcase, switches, process_ctx):
             process_ctx.notify_status("OnLoadManualGolden")
             # 槽位声明经 testcase 协议（manual_data_golden_shapes/dtypes——
             # 含 shape-unknown 元数据槽，GeirTestcase 继承 TestcaseKernel）
-            stored_goldens = manual_case.load_goldens(
+            stored_goldens = load_replay_goldens(
+                manual_case,
                 shapes=testcase.manual_data_golden_shapes,
                 dtypes=testcase.manual_data_golden_dtypes,
             )
@@ -293,22 +311,24 @@ def _no_prof_dump(testcase, switches, process_ctx, dump_store) -> GeirReturnStru
         _reconcile_inputs(testcase)
         input_snapshot = snapshot_manual_values(list(_iter_flat_values(testcase.input_arrays or ())), "input")
         _, _, golden_is_xpu, _ = _resolve_stage(testcase, switches)
-        if golden_is_xpu:
-            raise ValueError("--golden-mode XPU: golden comes from third-party execution; nothing to write")
         write_goldens = switches.dump_config.dump_golden
-        if write_goldens:
+        if golden_is_xpu:
+            # 对齐 kernel：三方 golden 无可落盘——占位后由 dump_manual_dataset
+            # 的占位串过滤仅落 input（no-prof + XPU 合法组合）
+            testcase.golden_arrays = ["GOLDEN_FAILURE"]
+        elif write_goldens:
             process_ctx.notify_status("OnGenerateGolden")
             _golden_stage(testcase, golden_is_xpu)
         if dump_store is None:
             raise ValueError("no manual-data output directory configured")
         process_ctx.notify_status("OnWriteManualData")
-        case_dir = dump_store.write_case(
+        case_dir = dump_manual_dataset(
+            dump_store,
             testcase,
             "geir",
             input_snapshot,
             testcase.golden_arrays if write_goldens else (),
-            file_format=switches.dump_config.file_format,
-            write_goldens=write_goldens,
+            switches,
         )
     except Exception as exc:
         logging.exception("GEIR manual-data dump failure")
@@ -325,15 +345,7 @@ def _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_sna
     """load 方向首跑落盘：首模式输入与 golden 生成后写入数据集（输入快照 + golden）。"""
     try:
         process_ctx.notify_status("OnWriteManualData")
-        write_goldens = switches.dump_config.dump_golden
-        case_dir = dump_store.write_case(
-            testcase,
-            "geir",
-            input_snapshot,
-            testcase.golden_arrays if write_goldens else (),
-            file_format=switches.dump_config.file_format,
-            write_goldens=write_goldens,
-        )
+        case_dir = dump_manual_dataset(dump_store, testcase, "geir", input_snapshot, testcase.golden_arrays, switches)
     except Exception as exc:
         raise RuntimeError(f"MANUAL_DATA_PREPARE_FAILURE: {exc}") from exc
     logging.info("[%s] manual GEIR data dumped (first run): %s", testcase.testcase_name, case_dir)
@@ -368,7 +380,14 @@ def _geir_run(
     _golden_stage(testcase, golden_is_xpu, stored_goldens)  # golden 生成
 
     if dump_store is not None:
-        _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_snapshot)
+        if golden_is_xpu:
+            # 对齐 kernel full-flow + XPU：三方 golden 无可落盘，warning 跳过
+            logging.warning(
+                "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
+                testcase.testcase_name,
+            )
+        else:
+            _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_snapshot)
 
     xpu = _dispatch_xpu(testcase, switches, process_ctx, manual_case, need_3party)  # 三方 dispatch
     if golden_is_xpu:

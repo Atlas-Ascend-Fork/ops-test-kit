@@ -185,7 +185,7 @@ class _ManualCaseStub:
     def has_goldens(self):
         return True
 
-    def load_goldens(self, references=None, shapes=None, dtypes=None):
+    def load_goldens(self, device_outputs=None, shapes=None, dtypes=None):
         self.load_calls.append(("static" if shapes is not None else "references", tuple(shapes or ())))
         return list(self._goldens)
 
@@ -226,8 +226,12 @@ def test_static_replay_golden_loaded_once_before_execution(monkeypatch):
     assert order == ["execute"]
 
 
-def test_dynamic_case_defers_replay_load_until_after_execution(monkeypatch):
-    """动态 shape 用例（-1 槽）→ 执行后按 references 装载 replay golden。"""
+def test_dynamic_case_loads_replay_golden_statically(monkeypatch):
+    """动态 shape 用例（-1 槽）→ replay golden 与静态用例一致，执行前按 CSV 声明装载。
+
+    动态只作用于输入槽（-1 输出被 DYN_SHAPE_ON_OUTPUT_SLOT 校验拒绝），输出 shape
+    CSV 静态声明；装载不依赖执行。声明与实际偏离的边缘场景由静态失败落回 deferred。
+    """
     switches = _switches()
     switches.manual_data_dirs = ("replay",)
     inputs = [np.ones(2, np.float32), np.zeros(2, np.float32)]
@@ -257,7 +261,7 @@ def test_dynamic_case_defers_replay_load_until_after_execution(monkeypatch):
     e2e_worker._run_profile(case, _backend(is_npu=True), {}, {}, 0, switches, return_struct)
 
     assert len(manual_case.load_calls) == 1
-    assert manual_case.load_calls[0][0] == "references"  # 延迟路径：按执行返回 references 装载
+    assert manual_case.load_calls[0][0] == "static"  # 执行前按 CSV 声明装载，与静态用例同径
     assert order == ["execute"]
     np.testing.assert_array_equal(compared["golden"][0], golden[0])
 
@@ -274,7 +278,7 @@ def test_static_load_failure_falls_back_to_execution_references(monkeypatch):
     manual_case = _ManualCaseStub(golden)
     _stub_manual_case(monkeypatch, manual_case)
 
-    def load_goldens(references=None, shapes=None, dtypes=None):
+    def load_goldens(device_outputs=None, shapes=None, dtypes=None):
         if shapes is not None:
             manual_case.load_calls.append(("static", tuple(shapes)))
             raise RuntimeError("saved shape mismatch")

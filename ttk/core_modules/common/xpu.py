@@ -58,6 +58,7 @@ from typing import Callable, Optional
 from ...remote import DATA as XPU_DATA  # noqa: F401
 from ...remote import PERF as XPU_PERF
 from ...remote import xpu_mode
+from ...utilities import load_array, resolve_numpy_dtypes
 
 # manual 装载在三方结果中的伪 provider 名（对齐远端产出的 dict 形态，屏显/报告零改动）
 MANUAL_XPU_PROVIDER = "manual_binary"
@@ -421,61 +422,87 @@ def has_manual_xpu_source(testcase, manual_case=None) -> bool:
     return manual_case is not None and bool(getattr(manual_case, "has_third_parties", False))
 
 
-def load_manual_third_parties(testcase, manual_case=None, references=None) -> Optional[list]:
+def load_manual_third_parties(testcase, manual_case=None, device_outputs=None) -> Optional[list]:
     """manual 三方输出本地装载（--dump xpu 回放契约的对侧），双来源：
 
     ① CSV ``manual_xpu_binaries`` 显式路径（NPU_DUMP_PATH 归档回放形态）；
     ② manual-data case 目录槽位（``--manual-data-dirs`` 回放形态）——
-       ``xpu_{provider}_{idx}_{dtype}.{ext}`` 按 idx 对位（文件名一致即可读取，
-       多 provider 同 idx 取字典序首个）。
+       ``xpu_{provider}_{idx}_{dtype}[_shape_{dims}].{ext}`` 按 idx 对位
+       （文件名一致即可读取，多 provider 同 idx 取字典序首个）。
 
     两来源均未声明返回 None（调用方走远端采集）；已声明按 flat 输出槽位对齐
     装载：路径数不足的槽位 / 动态 shape 槽（None）补 None（该输出无三方数据，
     cross_check 判据按既有占位语义处理）。shape/dtype 槽取声明槽
     （``flat_output_shapes``/``flat_output_dtypes``，kernel/aclnn）；e2e 输出
-    为执行派生（无声明槽），经 ``references``（设备输出）取 shape 与 dtype，
-    口径同 golden 的 references 装载。
+    为执行派生（无声明槽），经 ``device_outputs``（设备输出）取 shape 与 dtype，
+    口径同 golden 的 device_outputs 装载。声明/device_outputs 缺席时按文件名 shape
+    段（bin 自描述）+ 文件名 dtype 装载——manual xpu 回放不依赖当次执行输出。
     """
-    from ...utilities import get, load_array, resolve_numpy_dtypes
-    from .dump.manual_data import physical_array_spec
-
     paths = getattr(testcase, "flat_manual_xpu_binaries", None)
+    saved_shapes = ()
+    filename_dtypes = ()
     if not paths and manual_case is not None and getattr(manual_case, "has_third_parties", False):
         paths = manual_case.third_party_paths()
+        saved_shapes = getattr(manual_case, "third_party_saved_shapes", lambda: ())()
+        filename_dtypes = getattr(manual_case, "third_party_dtypes", lambda: ())()
     if not paths:
         return None
     shapes = getattr(testcase, "flat_output_shapes", None)
     if shapes is None:
         shapes = getattr(testcase, "flat_output_view_shapes", None)
-    if not shapes and references:
+    if not shapes and device_outputs:
         # e2e：输出无声明槽，shape/dtype 取设备输出（值不参与，仅槽位元数据）
-        shapes = tuple(tuple(r.shape) if r is not None and hasattr(r, "shape") else None for r in references)
+        shapes = tuple(tuple(r.shape) if r is not None and hasattr(r, "shape") else None for r in device_outputs)
     shapes = shapes or ()
     dtypes = resolve_numpy_dtypes(getattr(testcase, "flat_output_dtypes", ()) or ())
-    if not dtypes and references:
-        dtypes = tuple(getattr(r, "dtype", None) if r is not None and hasattr(r, "dtype") else None for r in references)
+    if not dtypes and device_outputs:
+        dtypes = tuple(
+            getattr(r, "dtype", None) if r is not None and hasattr(r, "dtype") else None for r in device_outputs
+        )
     name = getattr(testcase, "testcase_name", None) or getattr(testcase, "op_name", None)
     arrays = []
-    for index, shape in enumerate(shapes):
+    for index in range(max(len(paths), len(shapes))):
         path = paths[index] if index < len(paths) else None
-        if path is None or shape is None:
+        declared_shape = shapes[index] if index < len(shapes) else None
+        saved_shape = saved_shapes[index] if index < len(saved_shapes) else None
+        if path is None or (declared_shape is None and saved_shape is None):
             arrays.append(None)
             continue
         logging.info("Reading manual XPU file: %s ...", path)
-        dtype = get(dtypes, index)
-        array = load_array(path, dtype, shape)
-        # load_array 返回 dtype 物理存储形态（complex32 尾维 [2] fp16 实/虚、
-        # int1 位打包、4bit 解包）——校验须按物理形态比，口径同 manual-data
-        # 的 physical_array_spec；错文件（元素数不符）经 _reshape_storage 宽容
-        # 回退后由本检查拦截。
-        _, storage_shape = physical_array_spec(dtype, shape)
-        if tuple(array.shape) != storage_shape:
-            raise ManualXpuLoadError(
-                f"[{name}] manual XPU output[{index}] shape {tuple(array.shape)} does not match "
-                f"declared {tuple(shape)} (storage {storage_shape})"
-            )
-        arrays.append(array)
+        dtype = dtypes[index] if index < len(dtypes) else None
+        filename_dtype = filename_dtypes[index] if index < len(filename_dtypes) else None
+        arrays.append(_load_manual_xpu_slot(index, (path, declared_shape, saved_shape), dtype, filename_dtype, name))
     return arrays
+
+
+def _load_manual_xpu_slot(index, slot, dtype, filename_dtype, name):
+    """单槽 xpu 装载：声明/文件名 shape 决议 → load_array → 物理形态核对。
+
+    slot = (path, declared_shape, saved_shape)。load_array 返回 dtype 物理
+    存储形态（complex32 尾维 [2] fp16 实/虚、int1 位打包、4bit 解包）——校验
+    须按物理形态比，口径同 manual-data 的 physical_array_spec；错文件（元素数
+    不符）经 _reshape_storage 宽容回退后由本检查拦截。文件名 shape 段自描述
+    路径（无声明槽）按段本身（物理存储 shape）比对。
+    """
+    from .dump.manual_data import physical_array_spec
+
+    path, declared_shape, saved_shape = slot
+    resolved_shape = declared_shape if declared_shape is not None else (saved_shape or (1,))
+    if dtype is None and declared_shape is None:
+        dtype = filename_dtype
+    array = load_array(path, dtype, resolved_shape)
+    if declared_shape is not None:
+        _, storage_shape = physical_array_spec(dtype, declared_shape)
+        expected_storage = storage_shape
+    else:
+        expected_storage = resolved_shape
+    if tuple(array.shape) != expected_storage:
+        raise ManualXpuLoadError(
+            f"[{name}] manual XPU output[{index}] shape {tuple(array.shape)} does not match "
+            f"declared {tuple(declared_shape if declared_shape is not None else resolved_shape)} "
+            f"(storage {expected_storage})"
+        )
+    return array
 
 
 def dump_manual_xpu_archive(testcase, arrays) -> None:

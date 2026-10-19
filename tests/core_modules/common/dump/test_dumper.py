@@ -218,13 +218,14 @@ class TestDataDumper:
             "output_1_float32.bin",
         ]
 
-    def test_dump_xpu_naming_embeds_dtype(self, tmp_path):
-        # dtype 从数据自推进文件名（xpu_torch_0_float16.bin 契约）
+    def test_dump_xpu_naming_embeds_dtype_and_shape(self, tmp_path):
+        # dtype 从数据自推进文件名，bin 追加 shape 段（xpu_torch_0_float16_shape_2.bin 契约）；
+        # bytes 无自描述（dtype=none 且无 shape 段）
         dumper = DataDumper(_Sw(tmp_path, DumpConfig(dump_xpu=True)), "case")
         arr = numpy.ones((2,), dtype=numpy.float16)
         dumper.dump_xpu({"torch": [arr, None, b"\x01"]})
         names = sorted(p.name for p in (tmp_path / "dump" / "case").iterdir())
-        assert names == ["xpu_torch_0_float16.bin", "xpu_torch_2_none.bin"]
+        assert names == ["xpu_torch_0_float16_shape_2.bin", "xpu_torch_2_none.bin"]
 
     def test_dump_on_fail_segment_applies_to_input_and_output(self, tmp_path):
         # list 形态 outputs：segment 双作用于 input/output（GEIR 调用方式）

@@ -241,13 +241,15 @@ def test_e2e_replay_rejects_cpu_backend(tmp_path):
         configure_manual_data(switches, _args(manual_data_dirs=[str(tmp_path)]), "e2e")
 
 
-def test_geir_no_prof_rejects_xpu_golden_mode():
-    """geir --no-prof 落盘的是 host 侧生成的 golden；golden-mode XPU（三方产出）无可落盘。"""
+def test_geir_no_prof_accepts_xpu_golden_mode():
+    """geir --no-prof + golden-mode XPU 对齐 kernel：合法组合，占位 golden 过滤后仅落 input。"""
     switches = _prepare_switches()
     switches.golden_mode = "XPU"
 
-    with pytest.raises(ValueError, match="nothing to write"):
-        configure_manual_data(switches, _args(no_prof=True), "geir")
+    configure_manual_data(switches, _args(no_prof=True), "geir")
+
+    assert switches.no_prof is True
+    assert switches.manual_data_dirs  # 默认目录已设置
 
 
 def test_geir_no_prof_accepts_input_only_dump():

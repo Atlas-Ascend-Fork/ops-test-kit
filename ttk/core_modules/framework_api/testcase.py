@@ -378,8 +378,10 @@ class TestcaseE2e(ApiTestcaseBase):
         """Flat 输出 view shape——逐输出张量一项，TensorList 槽展开。
 
         口径对齐 flat_output_dtypes（按 output_tensor_indexes 声明序），
-        供 golden 静态 replay 装载（shape 取 CSV 声明）；声明 -1/None 的
-        动态槽输出 shape 运行前未知，由调用方延迟到执行后装载。
+        供 golden 静态 replay 装载（shape 取 CSV 声明）；输出槽不可能是
+        动态槽（-1 输出被 DYN_SHAPE_ON_OUTPUT_SLOT 校验拒绝），仅 optional
+        输出声明 None（对应 `*_none` 槽位）。装载失败仍由调用方延迟到执行
+        后按实际返回 shape 重装载。
         """
         flat_shapes = self.flat_tensor_view_shapes
         if not flat_shapes or not self.output_tensor_indexes:

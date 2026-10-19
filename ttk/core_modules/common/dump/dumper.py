@@ -37,7 +37,7 @@ from typing import Optional, Sequence, Union
 from ....utilities.dtypes import dtype_to_name
 from .config import DumpConfig
 from .formatter import get_formatter
-from .manual_data import case_directory_name
+from .manual_data import _encode_shape, case_directory_name
 
 _NONE_DTYPE = "none"
 
@@ -69,6 +69,17 @@ def _slot_dtype(dtypes, idx, data):
     return getattr(data, "dtype", None)
 
 
+def _shape_token(data) -> Optional[str]:
+    """数据物理 shape → 文件名 shape 段 token（无 shape 自描述则 None）。
+
+    bytes/占位串无 shape；ndarray/Tensor 按实际维度编码（bin 才追加，npy/pt
+    文件自带 shape）。"""
+    shape = getattr(data, "shape", None)
+    if shape is None:
+        return None
+    return _encode_shape(tuple(int(dimension) for dimension in shape))
+
+
 class DataDumper:
     """worker 内按 DumpConfig 落盘。一次构造，四方法反复调。"""
 
@@ -91,11 +102,15 @@ class DataDumper:
             os.makedirs(self.dump_dir, exist_ok=True)
             self._dir_created = True
 
-    def _write(self, role: str, data, idx: Optional[int], dtype, segment: Optional[str]):
+    def _write(
+        self, role: str, data, idx: Optional[int], dtype, segment: Optional[str], shape_token: Optional[str] = None
+    ):
         self._ensure_dir()
         seg = f"_{segment}" if segment else ""
         # tiling_data 等无 dtype/无 idx 的特殊 role：idx=None 直用 {role}{segment}
         name = f"{role}{seg}" if idx is None else f"{role}{seg}_{idx}_{_dtype_name(dtype)}"
+        if shape_token is not None:
+            name += f"_shape_{shape_token}"
         self._formatter().dump(data, self.dump_dir, name, dtype=dtype)
 
     # ── 四槽位 ──
@@ -141,17 +156,20 @@ class DataDumper:
 
     def dump_xpu(self, third_parties: dict, force: bool = False) -> None:
         """force or cfg.dump_xpu → xpu_{provider}_{idx}_{dtype}.{ext}
-        （third_parties 按 provider 分组遍历，provider 占 segment 位；
-        dtype 缺省从数据自推——ndarray/Tensor 进文件名，bytes 无自描述则 none）。"""
+        （third_parties 按 provider 分组遍历，provider 占 segment 位；dtype
+        缺省从数据自推——ndarray/Tensor 进文件名，bytes 无自描述则 none；
+        bin 格式追加 `_shape_<token>` 段，回放按文件名自描述还原）。"""
         if not (force or self.cfg.dump_xpu):
             return
         logging.info("Dump XPU third-party data....")
+        bin_format = self._formatter().ext == "bin"
         for provider, outputs in (third_parties or {}).items():
             _validate_xpu_provider(provider)
             for idx, data in enumerate(outputs):
                 if data is None or isinstance(data, str):
                     continue
-                self._write("xpu", data, idx, _slot_dtype((), idx, data), str(provider))
+                shape_token = _shape_token(data) if bin_format else None
+                self._write("xpu", data, idx, _slot_dtype((), idx, data), str(provider), shape_token=shape_token)
 
     def dump_named(self, name: str, data, dtype=None) -> None:
         """特殊条目（tiling_data 等）：按调用方组合名直写 {name}.{ext}，不走开关。"""

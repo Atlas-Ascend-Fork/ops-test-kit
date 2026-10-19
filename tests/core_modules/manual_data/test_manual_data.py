@@ -21,10 +21,17 @@ from ttk.core_modules.aclnn.testcase import TestcaseAclnn
 from ttk.core_modules.common.dump import (
     ManualDataError,
     ManualDataStore,
+    dump_manual_dataset,
     load_manual_data_case,
+    load_replay_goldens,
     manual_data_dump_store,
 )
-from ttk.core_modules.common.dump.manual_data import ManualDataCase, _ManualDataFile
+from ttk.core_modules.common.dump.manual_data import (
+    ManualDataCase,
+    _decode_shape,
+    _encode_shape,
+    _ManualDataFile,
+)
 from ttk.core_modules.common.xpu import dump_xpu_slot_files, load_manual_third_parties
 from ttk.core_modules.framework_api.input_generate import generate_inputs
 from ttk.core_modules.framework_api.testcase import TestcaseE2e
@@ -100,16 +107,19 @@ def test_round_trip_uses_only_typed_data_files(tmp_path, file_format):
         file_format=file_format,
     )
     loaded = store.load_case(case, "aclnn")
-    loaded_goldens = loaded.load_goldens(references=goldens)
+    loaded_goldens = loaded.load_goldens(device_outputs=goldens)
 
     np.testing.assert_array_equal(loaded.inputs[0], inputs[0])
     np.testing.assert_array_equal(loaded.inputs[1], np.ones(2, dtype=np.float32))
     np.testing.assert_array_equal(loaded.scalars[0], scalars[0])
     np.testing.assert_array_equal(loaded_goldens[0], goldens[0])
+    golden_name = f"golden_0_float32.{file_format}"
+    if file_format == "bin":
+        golden_name = "golden_0_float32_shape_2.bin"
     assert {path.name for path in case_dir.iterdir()} == {
         f"input_0_float32.{file_format}",
         f"scalar_0_float32.{file_format}",
-        f"golden_0_float32.{file_format}",
+        golden_name,
     }
 
 
@@ -239,7 +249,7 @@ def test_complete_dataset_remains_loadable_after_directory_move(tmp_path, file_f
     ManualDataStore(source).write_case(case, "aclnn", inputs, goldens, scalars=scalars, file_format=file_format)
     shutil.copytree(source, destination)
     loaded = ManualDataStore(destination).load_case(case, "aclnn")
-    loaded_goldens = loaded.load_goldens(references=goldens)
+    loaded_goldens = loaded.load_goldens(device_outputs=goldens)
 
     assert loaded.case_dir.parent == destination.resolve()
     np.testing.assert_array_equal(loaded.inputs[0], inputs[0])
@@ -258,7 +268,7 @@ def test_npy_round_trip_restores_custom_bfloat16_dtype(tmp_path):
 
     store.write_case(case, "e2e", inputs, golden, file_format="npy")
     loaded = store.load_case(case, "e2e")
-    loaded_golden = loaded.load_goldens(references=golden)
+    loaded_golden = loaded.load_goldens(device_outputs=golden)
 
     assert loaded.inputs[0].dtype.name == "bfloat16"
     assert loaded_golden[0].dtype.name == "bfloat16"
@@ -332,7 +342,7 @@ def test_e2e_noncontiguous_backing_storage_and_none_slot_round_trip(tmp_path):
 
     store.write_case(case, "e2e", [first, second], golden)
     loaded = store.load_case(case, "e2e")
-    loaded_golden = loaded.load_goldens(references=golden)
+    loaded_golden = loaded.load_goldens(device_outputs=golden)
 
     np.testing.assert_array_equal(loaded.inputs[0], first)
     assert loaded_golden[1] is None
@@ -352,7 +362,7 @@ def test_e2e_none_golden_suppresses_optional_device_output(tmp_path):
 
     loaded = store.load_case(case, "e2e")
     goldens = loaded.load_goldens(
-        references=[
+        device_outputs=[
             np.zeros((2, 2), np.float32),
             np.zeros((1, 2), np.float32),
         ]
@@ -383,7 +393,7 @@ def test_extra_goldens_are_loaded_for_operator_specific_compare(tmp_path, file_f
 
     loaded = store.load_case(case, "e2e")
     restored = loaded.load_goldens(
-        references=[
+        device_outputs=[
             np.zeros_like(goldens[0]),
             np.zeros_like(goldens[3]),
         ]
@@ -391,12 +401,9 @@ def test_extra_goldens_are_loaded_for_operator_specific_compare(tmp_path, file_f
 
     assert len(restored) == len(goldens)
     for actual, expected in zip(restored, goldens):
-        if file_format == "bin":
-            # 当前协议：golden 数 > 设备 output 数时无位置 shape 映射，bin 无
-            # 文件内 shape → 读一维流，交 custom compare hook 解释
-            np.testing.assert_array_equal(actual, expected.reshape(-1))
-        else:
-            np.testing.assert_array_equal(actual, expected)
+        # golden 数 > 设备 output 数：无位置 shape 映射，bin 靠文件名 shape 段、
+        # npy/pt 靠文件内 shape 各自还原，交 custom compare hook 解释
+        np.testing.assert_array_equal(actual, expected)
 
 
 def test_tensor_list_grouping_is_rebuilt_from_csv_structure(tmp_path):
@@ -728,7 +735,7 @@ def test_mixed_data_formats_use_whole_dataset_priority(tmp_path, formats, expect
             shutil.copy2(path, target_dir / path.name)
 
     loaded = target_store.load_case(case, "e2e")
-    loaded_golden = loaded.load_goldens(references=[np.zeros((2, 2), np.float32)])
+    loaded_golden = loaded.load_goldens(device_outputs=[np.zeros((2, 2), np.float32)])
 
     assert loaded.file_format == expected_format
     np.testing.assert_array_equal(loaded.inputs[0], np.full((3, 3), expected_value, np.float32))
@@ -758,12 +765,12 @@ def test_incomplete_high_priority_format_does_not_fall_back(tmp_path):
     for source_dir in (bin_dir, npy_dir):
         for path in source_dir.iterdir():
             shutil.copy2(path, target_dir / path.name)
-    (target_dir / "golden_0_float32.bin").unlink()
+    (target_dir / "golden_0_float32_shape_2x2.bin").unlink()
 
     loaded = target_store.load_case(case, "e2e")
     assert loaded.file_format == "bin"
     with pytest.raises(ManualDataError, match="golden slot count"):
-        loaded.load_goldens(references=[np.zeros((2, 2), np.float32)])
+        loaded.load_goldens(device_outputs=[np.zeros((2, 2), np.float32)])
 
 
 def test_long_case_name_maps_stably_within_directory_limit(tmp_path):
@@ -784,7 +791,7 @@ def test_long_case_name_maps_stably_within_directory_limit(tmp_path):
     assert store.case_dir(name + "changed") != case_dir
 
 
-@pytest.mark.parametrize("filename", ["input_1_float32.bin", "golden_0_float32.bin"])
+@pytest.mark.parametrize("filename", ["input_1_float32.bin", "golden_0_float32_shape_2x2.bin"])
 def test_missing_data_slot_is_rejected(tmp_path, filename):
     """缺少任一数据槽位文件时加载报错。"""
     case = _e2e_case("missing_slot")
@@ -798,7 +805,7 @@ def test_missing_data_slot_is_rejected(tmp_path, filename):
     (case_dir / filename).unlink()
 
     with pytest.raises(ManualDataError, match="slot count|contiguous"):
-        store.load_case(case, "e2e").load_goldens(references=[np.zeros((2, 2), np.float32)])
+        store.load_case(case, "e2e").load_goldens(device_outputs=[np.zeros((2, 2), np.float32)])
 
 
 @pytest.mark.parametrize("file_format", ["bin", "npy", "pt"])
@@ -817,7 +824,7 @@ def test_nonempty_none_marker_is_rejected(tmp_path, file_format):
 
     loaded = store.load_case(case, "e2e")
     with pytest.raises(ManualDataError, match="must be empty"):
-        loaded.load_goldens(references=[None])
+        loaded.load_goldens(device_outputs=[None])
 
 
 def test_bin_golden_filename_shape_matches_device_output(tmp_path):
@@ -833,15 +840,15 @@ def test_bin_golden_filename_shape_matches_device_output(tmp_path):
     )
 
     loaded = store.load_case(case, "e2e")
-    restored = loaded.load_goldens(references=[np.zeros((2, 2), np.float32)])
+    restored = loaded.load_goldens(device_outputs=[np.zeros((2, 2), np.float32)])
 
     assert restored[0].shape == (2, 2)
-    assert (case_dir / "golden_0_float32.bin").is_file()
+    assert (case_dir / "golden_0_float32_shape_2x2.bin").is_file()
     np.testing.assert_array_equal(restored[0], golden)
 
 
 def test_bin_golden_same_numel_wrong_shape_legacy_suffix_rejected(tmp_path):
-    """存量数据（文件名带 shape 段）同 numel 但设备输出 shape 不符时仍被拒绝。"""
+    """存量数据（文件名带 __shape_ 段）同 numel 但设备输出 shape 不符时仍被拒绝。"""
     case = _e2e_case("same_numel_wrong_shape_legacy")
     store = ManualDataStore(tmp_path)
     case_dir = store.write_case(
@@ -850,16 +857,16 @@ def test_bin_golden_same_numel_wrong_shape_legacy_suffix_rejected(tmp_path):
         [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
         [np.arange(6, dtype=np.float32).reshape(2, 3)],
     )
-    (case_dir / "golden_0_float32.bin").rename(case_dir / "golden_0_float32__shape_2x3.bin")
+    (case_dir / "golden_0_float32_shape_2x3.bin").rename(case_dir / "golden_0_float32__shape_2x3.bin")
 
     loaded = store.load_case(case, "e2e")
     with pytest.raises(ManualDataError, match="saved shape .*device output shape"):
-        loaded.load_goldens(references=[np.zeros((3, 2), np.float32)])
+        loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
 
 
-def test_bin_golden_same_numel_reshapes_by_reader_shape(tmp_path):
-    """新数据无 shape 段：reshape 真值 = 读侧传入的设备输出 shape。"""
-    case = _e2e_case("same_numel_reader_truth")
+def test_bin_golden_same_numel_wrong_shape_new_suffix_rejected(tmp_path):
+    """新协议（_shape_ 段）同 numel 但设备输出 shape 不符时被拒绝。"""
+    case = _e2e_case("same_numel_wrong_shape_new")
     store = ManualDataStore(tmp_path)
     store.write_case(
         case,
@@ -869,7 +876,43 @@ def test_bin_golden_same_numel_reshapes_by_reader_shape(tmp_path):
     )
 
     loaded = store.load_case(case, "e2e")
-    restored = loaded.load_goldens(references=[np.zeros((3, 2), np.float32)])
+    with pytest.raises(ManualDataError, match="saved shape .*device output shape"):
+        loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
+
+
+def test_bin_golden_loads_standalone_from_filename_shape(tmp_path):
+    """带 shape 段的 bin golden 无读侧映射也按存档 shape 独立还原。"""
+    case = _e2e_case("standalone_bin_shape")
+    store = ManualDataStore(tmp_path)
+    golden = np.arange(6, dtype=np.float32).reshape(2, 3)
+    store.write_case(
+        case,
+        "e2e",
+        [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+        [golden],
+    )
+
+    loaded = store.load_case(case, "e2e")
+    restored = loaded.load_goldens()
+
+    assert restored[0].shape == (2, 3)
+    np.testing.assert_array_equal(restored[0], golden)
+
+
+def test_bin_golden_without_shape_segment_falls_back_to_reader_shape(tmp_path):
+    """无 shape 段的 bin golden（CSV 手工路/旧数据）仍按读侧传入 shape 还原。"""
+    case = _e2e_case("same_numel_reader_truth")
+    store = ManualDataStore(tmp_path)
+    case_dir = store.write_case(
+        case,
+        "e2e",
+        [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+        [np.arange(6, dtype=np.float32).reshape(2, 3)],
+    )
+    (case_dir / "golden_0_float32_shape_2x3.bin").rename(case_dir / "golden_0_float32.bin")
+
+    loaded = store.load_case(case, "e2e")
+    restored = loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
 
     assert restored[0].shape == (3, 2)
 
@@ -882,8 +925,8 @@ def test_bin_golden_same_numel_reshapes_by_reader_shape(tmp_path):
         ((2, 0, 3), "2x0x3"),
     ],
 )
-def test_bin_golden_restores_scalar_and_zero_dimensions_by_reader_shape(tmp_path, shape, token):
-    """bin golden 标量与含 0 维度 shape 由读侧 references 还原（文件名无 shape 段）。"""
+def test_bin_golden_restores_scalar_and_zero_dimensions_by_filename_shape(tmp_path, shape, token):
+    """bin golden 标量与含 0 维度 shape 由文件名 shape 段还原。"""
     case = _e2e_case(f"shape_{token}")
     store = ManualDataStore(tmp_path)
     golden = np.zeros(shape, dtype=np.float32)
@@ -895,11 +938,105 @@ def test_bin_golden_restores_scalar_and_zero_dimensions_by_reader_shape(tmp_path
     )
 
     loaded = store.load_case(case, "e2e")
-    restored = loaded.load_goldens(references=[np.zeros(shape, np.float32)])
+    restored = loaded.load_goldens()
 
-    assert (case_dir / "golden_0_float32.bin").is_file()
-    expected_storage_shape = (1,) if shape == () else shape
-    assert restored[0].shape == expected_storage_shape
+    assert (case_dir / f"golden_0_float32_shape_{token}.bin").is_file()
+    expected_storage = (1,) if shape == () else shape
+    assert restored[0].shape == expected_storage
+    np.testing.assert_array_equal(restored[0], golden)
+
+
+@pytest.mark.parametrize(
+    ("shape", "token"),
+    [
+        ((), "scalar"),
+        ((0,), "0"),
+        ((2, 0, 3), "2x0x3"),
+        ((2, 3), "2x3"),
+    ],
+)
+def test_shape_token_encode_decode_round_trip(shape, token):
+    """shape 段编解码互逆：scalar/0 维/多维。"""
+    assert _encode_shape(shape) == token
+    assert _decode_shape(token) == shape
+
+
+def test_shape_token_decode_accepts_legacy_double_underscore_files(tmp_path):
+    """存量 __shape_ 文件名与新版 _shape_ 混存于同一目录均可扫描解析。"""
+    case = _e2e_case("mixed_shape_segments")
+    store = ManualDataStore(tmp_path)
+    case_dir = store.write_case(
+        case,
+        "e2e",
+        [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+        [np.zeros((2, 2), np.float32), np.zeros((3,), np.float32)],
+    )
+    (case_dir / "golden_1_float32_shape_3.bin").rename(case_dir / "golden_1_float32__shape_3.bin")
+
+    loaded = store.load_case(case, "e2e")
+    restored = loaded.load_goldens(device_outputs=[np.zeros((2, 2), np.float32), np.zeros((3,), np.float32)])
+
+    assert restored[0].shape == (2, 2)
+    assert restored[1].shape == (3,)
+
+
+class TestCommonLoadDumpEntrances:
+    """公共入口 load_replay_goldens / dump_manual_dataset 的单元语义。"""
+
+    @staticmethod
+    def _switches(dump_golden=True):
+        return SimpleNamespace(dump_config=SimpleNamespace(dump_golden=dump_golden, file_format="bin"))
+
+    def test_load_replay_goldens_none_without_case_or_goldens(self):
+        assert load_replay_goldens(None) is None
+        empty = ManualDataCase([], [], None, "bin", ())
+        assert load_replay_goldens(empty) is None
+
+    def test_load_replay_goldens_passes_through_to_case(self, tmp_path):
+        case = _e2e_case("replay_common")
+        store = ManualDataStore(tmp_path)
+        golden = np.arange(6, dtype=np.float32).reshape(2, 3)
+        store.write_case(
+            case,
+            "e2e",
+            [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+            [golden],
+        )
+
+        loaded = store.load_case(case, "e2e")
+        goldens = load_replay_goldens(loaded, shapes=((2, 3),), dtypes=("float32",))
+
+        assert goldens is not None
+        assert goldens[0].shape == (2, 3)
+        np.testing.assert_array_equal(goldens[0], golden)
+
+    def test_dump_manual_dataset_skips_placeholder_goldens(self, tmp_path):
+        case = _e2e_case("placeholder_dump")
+        store = ManualDataStore(tmp_path)
+        case_dir = dump_manual_dataset(
+            store,
+            case,
+            "e2e",
+            [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+            ["GOLDEN_FAILURE"],
+            self._switches(),
+        )
+
+        assert not any(p.name.startswith("golden_") for p in case_dir.iterdir())
+
+    def test_dump_manual_dataset_writes_golden_with_shape_segment(self, tmp_path):
+        case = _e2e_case("common_dump")
+        store = ManualDataStore(tmp_path)
+        case_dir = dump_manual_dataset(
+            store,
+            case,
+            "e2e",
+            [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+            [np.zeros((2, 3), np.float32)],
+            self._switches(),
+        )
+
+        assert (case_dir / "golden_0_float32_shape_2x3.bin").is_file()
 
 
 @pytest.mark.parametrize("file_format", ["bin", "npy", "pt"])
@@ -917,7 +1054,7 @@ def test_scalar_golden_round_trip_preserves_shape(tmp_path, file_format):
     )
 
     loaded = store.load_case(case, "e2e")
-    restored = loaded.load_goldens(references=[np.array(0.0, np.float32)])
+    restored = loaded.load_goldens(device_outputs=[np.array(0.0, np.float32)])
 
     assert restored[0].shape == (1,)
     np.testing.assert_array_equal(restored[0], golden)
@@ -1247,7 +1384,7 @@ class TestDumpLoadClosedLoop:
         dump_xpu_slot_files(testcase, _switches(dump_xpu=True), [arr], "torch")
 
         case_dir = tmp_path / "roundtrip_case"
-        assert (case_dir / "xpu_torch_0_float32.bin").is_file()
+        assert (case_dir / "xpu_torch_0_float32_shape_8.bin").is_file()
 
         # ── load 侧：manual case 从该目录建立，槽位装载 ──
         store = ManualDataStore((str(tmp_path),))
@@ -1271,6 +1408,32 @@ class TestDumpLoadClosedLoop:
         assert has_manual_xpu_source(consumer, manual_case) is True
         assert has_manual_xpu_source(SimpleNamespace(flat_manual_xpu_binaries=None), None) is False
         assert has_manual_xpu_source(SimpleNamespace(flat_manual_xpu_binaries=("/nonexistent",)), None) is True
+
+    def test_roundtrip_loads_self_describing_without_declared_shapes(self, tmp_path, monkeypatch):
+        """bin xpu 槽位带 shape 段：无声明 shape/dtype（e2e 无 references）亦按文件名自描述装载。"""
+        monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
+        arr = np.arange(6, dtype=np.float16).reshape(2, 3)
+
+        testcase = SimpleNamespace(testcase_name="selfdesc_case", flat_manual_xpu_binaries=None)
+        dump_xpu_slot_files(testcase, _switches(dump_xpu=True), [arr], "torch")
+
+        store = ManualDataStore((str(tmp_path),))
+        manual_case = store.load_case(SimpleNamespace(testcase_name="selfdesc_case"), "kernel", require_goldens=False)
+
+        consumer = SimpleNamespace(
+            testcase_name="selfdesc_case",
+            flat_manual_xpu_binaries=None,
+            flat_output_shapes=((2, 3),),
+            flat_output_dtypes=None,
+        )
+        consumer.flat_output_dtypes = None
+        consumer.flat_output_shapes = None
+        consumer.flat_output_view_shapes = None
+        arrays = load_manual_third_parties(consumer, manual_case)
+
+        assert arrays is not None
+        assert arrays[0].shape == (2, 3)
+        np.testing.assert_array_equal(arrays[0], arr)
 
     def test_dump_disabled_writes_nothing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))

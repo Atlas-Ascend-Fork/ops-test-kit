@@ -43,7 +43,7 @@ TTK（`ops-test-kit`）目前只能在真实 Ascend 芯片上执行算子。NPUS
   - aclnn：`aclnn/execute.py` `execute_on_device()` → `AclOpExecutor._acl_sequence()` → `AclInterface`（`aclnn/runtime.py`，libascendcl.so + libnnopbase.so）→ `aclnnXxxGetWorkspaceSize` + `aclnnXxx`。返回 `ApiProfilingResult(success, api_prof, op_prof, output_bytes, output_view_shapes)`。
 - 比对：`common/comparison/comparison.py` `compare(outputs, goldens, dtypes, standards)`；选择逻辑 `common/comparison/resolve.py`；结果 `EachCompareResult(precision, is_pass, log, standard, metrics)`。
 - **已有 model 语义可复用**：`MODE.ASCEND_CAMODEL`（`ttk/switches.py`）时 `use_device()=False`、`run_time=1`、`RTSInterface(camodel=True)` 加载 `libruntime_camodel.so`、跳过 clear_l1/ub、`rts_stream=None`。
-- Manual Data 两阶段：`--no-prof --dump in,golden` prepare / `--manual-data-dirs` replay（`bridge.py::configure_manual_data`、`ttk/core_modules/common/dump/manual_data.py`），现行文件命名 `input_{idx}_{dtype}.{ext}`、`golden_{idx}_{dtype}.{ext}`（`__shape_{dims}` 段仅为存量 bin Golden 兼容），支持 bin/npy/pt。
+- Manual Data 两阶段：`--no-prof --dump in,golden` prepare / `--manual-data-dirs` replay（`bridge.py::configure_manual_data`、`ttk/core_modules/common/dump/manual_data.py`），现行文件命名 `input_{idx}_{dtype}.{ext}`、`golden_{idx}_{dtype}.{ext}`（bin Golden 文件名带 `_shape_{dims}` 段，`scalar` 表示标量；`__shape_{dims}` 段为存量兼容），支持 bin/npy/pt。
 
 ## 3. 总体架构
 

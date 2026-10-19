@@ -209,7 +209,7 @@ Golden。新数据在隐藏临时目录中写入并回读校验，
 
 | 调试产物 | 读回处理 |
 | --- | --- |
-| `golden_{idx}_{dtype}`、`xpu_{provider}_{idx}_{dtype}` | 直接读（与协议同名） |
+| `golden_{idx}_{dtype}[_shape_{dims}]`、`xpu_{provider}_{idx}_{dtype}[_shape_{dims}]` | 直接读（与协议同名；shape 段可选） |
 | `input_dyn_{idx}_{dtype}`（kernel）、`input_{const,dynamic}_{idx}_{dtype}`（geir） | 去掉模式段映射到 input 槽；同槽多份要求字节一致 |
 | `output[_{segment}]_{idx}_{dtype}`、`tiling_data[_{segment}]` | 忽略（读回会重新执行/编译产出） |
 | `input_{eager,graph_*}_{idx}_{dtype}`（e2e dump-on-fail 执行后补漏） | 拒绝（in-place API 可能已改写输入） |
@@ -232,20 +232,29 @@ Golden。新数据在隐藏临时目录中写入并回读校验，
 ├── input_1_int32.bin
 ├── input_2_none.bin
 ├── scalar_0_float32.bin
-└── golden_0_bfloat16.bin
+└── golden_0_bfloat16_shape_2x2x2.bin
 ```
 
-所有数据文件（含 bin Golden）使用统一文件名，不编码 shape：
+input/scalar 使用统一文件名，不编码 shape；bin Golden 的文件名额外携带 shape 段
+（`_shape_<shape-token>`，shape-token 形如 `scalar`、`2x3`；npy/pt 文件内自带 shape，
+不带该段）：
 
 ```text
-<input|scalar|golden>_<从0开始的扁平索引>_<numpy-dtype|none>.<bin|npy|pt>
+<input|scalar>_<从0开始的扁平索引>_<numpy-dtype|none>.<bin|npy|pt>
+golden_<从0开始的扁平索引>_<numpy-dtype|none>[_shape_<shape-token>].<bin|npy|pt>
 ```
 
-bin Golden 的 reshape 真值 = load 侧传入的设备 output / CSV output shape
-（`--manual-data-dirs` 回放时由 TTK 自动传入）；元素总数不符会在字节数预检中
-报错。**存量兼容**：早期版本落盘的 bin Golden 文件名带
-`__shape_<shape-token>` 段（如 `golden_0_float32__shape_2x3.bin`），load 时
-仍解析并与设备 output shape 核对（同 numel 错误 shape 报错），无需重新落盘。
+bin Golden 的 reshape 真值 = 文件名 shape 段（按存档时物理存储 shape 还原，`scalar`
+还原为 `(1,)`）；load 侧传入的设备 output / CSV output shape 仅用于与其**交叉核对**，
+shape 漂移（同 numel 错误 shape）报错。文件名不带 shape 段的 bin Golden（CSV
+`manual_golden_binaries` 手工路径等）仍按 load 侧 shape 还原，无映射时读为一维流交
+custom compare 解释。**存量兼容**：早期版本落盘的 bin Golden 文件名带
+`__shape_<shape-token>` 段（如 `golden_0_float32__shape_2x3.bin`），load 时同样解析
+并核对，无需重新落盘。
+
+XPU 三方输出槽位同样位于 case 目录：`xpu_{provider}_{idx}_{dtype}[_shape_{dims}].{ext}`
+（`--dump xpu` 采集后由 DataDumper 写回同名目录）。bin 带 shape 段时按段自描述还原
+（声明/device_outputs shape 缺席也可装载）；声明 shape 存在时与 golden 同口径交叉核对。
 
 ### 4.1 槽位和 `None`
 
@@ -262,7 +271,7 @@ bin Golden 的 reshape 真值 = load 侧传入的设备 output / CSV output shap
 
 | 格式 | 保存方式 | shape 来源 |
 | --- | --- | --- |
-| `bin` | 连续原始字节 | input/scalar 来自 CSV；Golden 来自 load 侧设备/CSV shape（存量文件名 shape 段仍核对） |
+| `bin` | 连续原始字节 | input/scalar 来自 CSV；Golden 来自文件名 shape 段（`scalar`→`(1,)`），无段时回退 load 侧设备/CSV shape |
 | `npy` | NumPy 数组 | 文件内 shape；custom dtype 使用等宽 `voidN`，逻辑 dtype 由文件名恢复 |
 | `pt` | CPU Torch 数据 | 文件内 shape；Torch 不支持的 dtype 在同一 pt 内保存 raw bytes 和 shape |
 
@@ -314,8 +323,20 @@ load都可从其`input_tensors`、ACLNN `input_scalars`（Kernel为空tuple）�
 
 ## 6. 历史字段说明
 
-ACLNN 的 `manual_tensor_binaries/manual_golden_binaries` 是另一组历史字段，
-直接按 CSV 内文件路径读取，不接入本目录协议。
+CSV 手工路径字段按通路分布如下——这些字段直接按 CSV 内文件路径读取
+（`load_array` + CSV 声明 dtype/shape），不接入本目录协议、不解析文件名：
+
+| 字段 | kernel | geir | aclnn | e2e |
+| --- | --- | --- | --- | --- |
+| `manual_input_binaries` | ✓ | ✓ | — | — |
+| `manual_tensor_binaries`（历史名） | — | — | ✓ | — |
+| `manual_golden_binaries` | ✓ | ✓ | ✓ | — |
+| `manual_xpu_binaries` | ✓ | ✓ | ✓ | ✓ |
+
+优先级统一为：CLI 目录集 replay > CSV 手工路径 > 正常生成（golden 的
+Disable 占位介于 replay 与 CSV 之间，由通路 golden 模块处理）；replay 与
+CSV 互斥（replay 命中时 CSV 字段不再参与）。CSV 路径中填写的文件名无
+shape 段也可读取（按声明/device_outputs shape 还原）。
 
 ## 7. 参数约束
 

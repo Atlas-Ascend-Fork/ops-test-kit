@@ -40,6 +40,8 @@ from ..common.comparison.resolve import needs_promote_golden
 from ..common.comparison.resolve import resolve_tolerance as _resolve_tolerance
 from ..common.dump import (
     DataDumper,
+    dump_manual_dataset,
+    load_replay_goldens,
     manual_data_dump_store,
     resolve_manual_case,
     snapshot_manual_values,
@@ -284,7 +286,8 @@ def _generate_golden_ahead(context, process_ctx, manual_case, switches) -> bool:
     if manual_case is not None and manual_case.has_goldens:
         try:
             process_ctx.notify_status("OnLoadManualGolden")
-            context.golden_tensors = manual_case.load_goldens(
+            context.golden_tensors = load_replay_goldens(
+                manual_case,
                 shapes=context.flat_output_view_shapes,
                 dtypes=context.flat_output_dtypes,
             )
@@ -561,7 +564,8 @@ def _reload_replay_golden_if_needed(context, process_ctx, manual_case, golden_lo
         return None
     try:
         process_ctx.notify_status("OnLoadManualGolden")
-        context.golden_tensors = manual_case.load_goldens(
+        context.golden_tensors = load_replay_goldens(
+            manual_case,
             shapes=context.prof_result.output_view_shapes,
             dtypes=context.flat_output_dtypes,
         )
@@ -596,17 +600,16 @@ def _manual_data_dump(
     if not (dump_store is not None and manual_case is None and not golden_is_xpu and prepared_inputs is not None):
         return _dump_only_end(context, process_ctx) if no_prof_end else None
     goldens = context.golden_tensors or ()
-    write_goldens = bool(switches.dump_config.dump_golden) and not any(isinstance(g, str) for g in goldens)
     try:
         process_ctx.notify_status("OnWriteManualData")
-        case_dir = dump_store.write_case(
+        case_dir = dump_manual_dataset(
+            dump_store,
             context,
             "aclnn",
             prepared_inputs,
-            goldens if write_goldens else (),
+            goldens,
+            switches,
             scalars=prepared_scalars,
-            file_format=switches.dump_config.file_format,
-            write_goldens=write_goldens,
         )
         logging.info(f"[{context.testcase_name}] manual data dumped: {case_dir}")
     except Exception as exc:

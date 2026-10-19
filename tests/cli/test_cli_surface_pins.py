@@ -196,6 +196,34 @@ class TestExtendedChoicesCurrent:
         for mode in ("Enable", "Disable", "Promote", "XPU"):
             assert _parse(["kernel", "-i", "cases.csv", "--golden-mode", mode]).golden_mode == mode
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("enable", "Enable"), ("DISABLE", "Disable"), ("promote", "Promote"), ("xpU", "XPU")],
+    )
+    def test_golden_mode_cli_is_case_insensitive(self, raw, expected):
+        assert _parse(["kernel", "-i", "cases.csv", "--golden-mode", raw]).golden_mode == expected
+
+    def test_golden_mode_cli_rejects_unknown_value(self):
+        with pytest.raises(SystemExit):
+            _parse(["kernel", "-i", "cases.csv", "--golden-mode", "xxx"])
+
+    @pytest.mark.parametrize(
+        ("override", "expected"),
+        [("xpu", "XPU"), ("DISABLE", "Disable"), ("Promote", "Promote"), ("bogus", "Enable")],
+    )
+    def test_golden_mode_resolver_is_case_insensitive(self, override, expected):
+        # 用例级 golden_mode_override 同样大小写不敏感；未知值告警后回 Enable
+        from types import SimpleNamespace
+
+        from ttk.core_modules.common.invoke import golden_mode
+
+        class _Case:
+            golden_mode_override = None
+
+        case = _Case()
+        case.golden_mode_override = override
+        assert golden_mode(case, SimpleNamespace(golden_mode="Enable")) == expected
+
     def test_dump_tokens_and_xpu_slot(self):
         # DumpConfig bool 位 + xpu 位；full 四类全开（无远端配置时 CLI 层降级关闭 xpu）
         sw = _switches(["kernel", "-i", "cases.csv", "--dump", "in,out,golden"])

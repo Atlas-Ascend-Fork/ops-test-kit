@@ -27,6 +27,8 @@ from ...utilities import deep_flatten, get, render_table, resolve_numpy_dtypes
 from ..common.comparison.batch_consistency import assemble_batch_summary
 from ..common.dump import (
     DataDumper,
+    dump_manual_dataset,
+    load_replay_goldens,
     manual_data_dump_store,
     resolve_manual_case,
     snapshot_manual_values,
@@ -355,7 +357,8 @@ def _generate_golden(context: TestcaseKernel, manual_case, tol_state):
             process_ctx.notify_status("OnLoadManualGolden")
             # 槽位声明经 testcase 协议（manual_data_golden_shapes/dtypes）——
             # 含 shape-unknown 元数据槽，读侧 CSV 可推导
-            stored_goldens = manual_case.load_goldens(
+            stored_goldens = load_replay_goldens(
+                manual_case,
                 shapes=context.manual_data_golden_shapes,
                 dtypes=context.manual_data_golden_dtypes,
             )
@@ -408,14 +411,7 @@ def _write_manual_dump(context: TestcaseKernel, dump_store, prepared_inputs):
     process_ctx = process_context()
     try:
         process_ctx.notify_status("OnWriteManualData")
-        case_dir = dump_store.write_case(
-            context,
-            "kernel",
-            prepared_inputs,
-            context.golden_arrays,
-            file_format=switches.dump_config.file_format,
-            write_goldens=switches.dump_config.dump_golden,
-        )
+        case_dir = dump_manual_dataset(dump_store, context, "kernel", prepared_inputs, context.golden_arrays, switches)
     except Exception as exc:
         logging.exception("Manual Kernel data dump failure")
         return early_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")

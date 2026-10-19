@@ -30,7 +30,9 @@ __all__ = [
     "ManualDataError",
     # store 族编排入口（worker 编排层消费）：dump 方向落盘 + load 方向装载
     "manual_data_dump_store",
+    "dump_manual_dataset",
     "load_manual_data_case",
+    "load_replay_goldens",
     "manual_data_store",
     "resolve_manual_data_directories",
 ]
@@ -43,7 +45,9 @@ from .manual_data import (
     ManualDataError,
     ManualDataStore,
     case_directory_name,
+    dump_manual_dataset,
     load_manual_data_case,
+    load_replay_goldens,
     manual_data_dump_store,
     manual_data_store,
     resolve_manual_data_directories,
