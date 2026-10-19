@@ -9,6 +9,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """reader 输入格式适配：BOM 兼容、GBK 回退解码与 zip 成员展开。"""
 
+import csv
 import zipfile
 
 import pytest
@@ -78,6 +79,35 @@ def test_iter_tables_yields_single_table_for_csv(tmp_path):
     assert tables[0].name == path
     assert tables[0].header == ["testcase_name", "op_name"]
     assert tables[0].rows == [["case_plain", "add"]]
+
+
+class TestEmptyCsvRecords:
+    """空记录判定：全空单元格的记录与空白行等价，CSV 与 XLSX 口径一致。"""
+
+    def test_empty_cell_records_dropped_like_blank_lines(self, tmp_path):
+        content = ",\n" + PLAIN_CSV + ' , \ncase_two , abs\r\n"",""\n'
+        path = _write_csv(tmp_path / "cases.csv", content)
+        assert read_table(path) == (
+            ["testcase_name", "op_name"],
+            [["case_plain", "add"], ["case_two", "abs"]],
+        )
+
+    def test_workbook_and_csv_roundtrip_agree_on_empty_rows(self, tmp_path):
+        openpyxl = pytest.importorskip("openpyxl")
+        book = openpyxl.Workbook()
+        sheet = book.active
+        for row in ([None, None], ["testcase_name", "op_name"], ["case1", "add"], [" ", " "], ["case2", "abs"]):
+            sheet.append(row)
+        xlsx_path, csv_path = tmp_path / "cases.xlsx", tmp_path / "cases.csv"
+        book.save(xlsx_path)
+        with csv_path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            for row in sheet.iter_rows(values_only=True):
+                writer.writerow(row)
+        book.close()
+        expected = (["testcase_name", "op_name"], [["case1", "add"], ["case2", "abs"]])
+        assert read_table(str(xlsx_path)) == expected
+        assert read_table(str(csv_path)) == expected
 
 
 class TestResolvedSheet:

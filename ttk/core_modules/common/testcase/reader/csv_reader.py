@@ -33,12 +33,16 @@ def decode_csv_bytes(data: bytes) -> str:
 
 
 def read_csv_rows(fileobj) -> tuple:
-    """文本流 → (header, rows)。单元格 strip、空行丢弃、首个非空行为表头。
-    吃 fileobj 而非 path：zip 成员流与普通文件共用同一解析。"""
+    """文本流 → (header, rows)，与 xlsx_reader 同口径。
+
+    单元格 strip；全空单元格的记录与空白行同等丢弃；首个含非空单元格的
+    记录为表头。部分字段为空的记录保留，交由上层字段校验处理。
+    吃 fileobj 而非 path：zip 成员流与普通文件共用同一解析。
+    """
     rows = []
     for raw in csv.reader(fileobj):
         row = [column.strip() for column in raw]
-        if row:
+        if any(row):
             rows.append(row)
     if not rows:
         raise ValueError("Empty table: no rows found")

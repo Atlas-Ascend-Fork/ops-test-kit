@@ -123,7 +123,9 @@ def mtls_env(tmp_path_factory):
     import yaml
 
     certs = tmp_path_factory.mktemp("certs")
+    wrong_certs = tmp_path_factory.mktemp("wrong_certs")
     _gen_certs(certs)
+    _gen_certs(wrong_certs)  # independent CA for the wrong-CA negative test
 
     port = _free_port()
     sync = tmp_path_factory.mktemp("sync")
@@ -162,6 +164,8 @@ def mtls_env(tmp_path_factory):
             "ca": str(certs / "ca.crt"),
             "client_crt": str(certs / f"{_TENANT}.client.crt"),
             "client_key": str(certs / f"{_TENANT}.client.key"),
+            "wrong_client_crt": str(wrong_certs / f"{_TENANT}.client.crt"),
+            "wrong_client_key": str(wrong_certs / f"{_TENANT}.client.key"),
         }
     finally:
         proc.terminate()
@@ -192,4 +196,11 @@ class TestMTLSE2E:
         subprocess.run(["bash", os.path.abspath(_SCRIPT), "init-ca", str(wrong)], check=True, capture_output=True)
         monkeypatch.setenv("SSL_CERT_FILE", str(wrong / "ca.crt"))
         with pytest.raises(ssl.SSLCertVerificationError):
+            _https_get(mtls_env["host"], mtls_env["port"])
+
+    def test_handshake_rejects_client_cert_from_wrong_ca(self, mtls_env):
+        # negative: server trusts only the configured CA, so a client cert from
+        # the independent wrong CA must fail the mTLS handshake.
+        _set_tls(mtls_env["ca"], mtls_env["wrong_client_crt"], mtls_env["wrong_client_key"])
+        with pytest.raises(ssl.SSLError):
             _https_get(mtls_env["host"], mtls_env["port"])

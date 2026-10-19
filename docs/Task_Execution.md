@@ -57,6 +57,10 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2
 | `--sheet` | | 首个工作表 | Excel 工作表名；仅 `.xlsx`/`.xlsm` 生效，csv 忽略。xlsx 默认输出名带实际 sheet 名（如 `cases_T2_result.csv`），多 sheet 互不覆盖 | `--sheet T2` |
 | `--config` | | 无 | ttk 配置 YAML 路径（覆盖 `~/.config/ttk/` 和 `./ttk.conf.yaml`） | `--config ttk.conf.yaml` |
 
+默认结果名对工作表名中的空格、文件名不安全字符及 `%` 使用 `%XX` 转义，普通字母、数字、下划线及中文保持原样。
+例如 `A B` 写入 `cases_A%20B_result.csv`，`A_B` 写入 `cases_A_B_result.csv`，`A%20B` 写入 `cases_A%2520B_result.csv`。
+这些字符的旧默认文件名会改变；需要指定路径时可继续使用 `-o`。
+
 ## 用例筛选
 
 | 参数 | 缩写 | 默认值 | 说明 | 示例 |

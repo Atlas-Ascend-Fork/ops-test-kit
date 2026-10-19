@@ -9,8 +9,10 @@
 # ----------------------------------------------------------------------------
 """Tests for ttk.core_modules.common.instance: header assembly & handle_error dispatch.
 
-错误三分支（crash/fail/none）+ 结果行组装的基类回归。"""
+错误三分支（crash/fail/none）+ 结果行组装 + open_output 默认结果文件名。"""
 
+import csv
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -281,3 +283,94 @@ def test_execution_sorted_prefers_selection_key_over_csv(switches):
     ins._apply_selection_order()
     reordered = list(reversed(ins.flatten_testcases))  # 模拟上游打乱后交给 build_tasks
     assert [tc.testcase_name for tc in ins._execution_sorted(reordered)] == ["b1", "a1"]
+
+
+# ── open_output 默认结果文件名（xlsx 多 sheet 互不覆盖） ──
+
+
+@pytest.fixture
+def make_xlsx(tmp_path):
+    """工厂：创建含指定 worksheet 名的 xlsx（无数据行，仅 sheet 名参与输出命名）。"""
+    openpyxl = pytest.importorskip("openpyxl")
+
+    def _make(names):
+        wb = openpyxl.Workbook()
+        wb.active.title = names[0]
+        for name in names[1:]:
+            wb.create_sheet(name)
+        path = tmp_path / "cases.xlsx"
+        wb.save(path)
+        wb.close()
+        return path
+
+    return _make
+
+
+def _output_instance(switches, source, sheet=None, output=None, append=False):
+    """复用 switches fixture 与 _FakeInstance，仅初始化文件输出所需状态。"""
+    switches.input_files = [str(source)]
+    switches.sheet = sheet
+    switches.output_file_name = str(output) if output else None
+    switches.append_mode = append
+    ins = _make_instance(switches)
+    ins.result_titles = lambda: ("marker",)
+    case = _make_case(name="case")
+    case.get_all_visible_headers.return_value = ("testcase_name",)
+    ins.flatten_testcases = [case]
+    return ins
+
+
+def _write_output(ins, marker):
+    ins.open_output()
+    try:
+        ins.write_row(("case", marker))
+    finally:
+        ins.result_csv_file.close()
+    return ins.result_path
+
+
+def _read_rows(path):
+    with open(path, newline="", encoding="utf-8") as stream:
+        return list(csv.reader(stream))
+
+
+@pytest.mark.parametrize("names", [("A B", "A_B"), ("A%20B", "A B"), ("A|B", "A_B"), ('A"B', "A_B"), ("A<B", "A_B")])
+def test_distinct_sheet_names_keep_distinct_result_files(switches, make_xlsx, names):
+    source = make_xlsx(names)
+    first = _write_output(_output_instance(switches, source, names[0]), "first")
+    second = _write_output(_output_instance(switches, source, names[1]), "second")
+    assert first != second
+    assert _read_rows(first) == [["testcase_name", "marker"], ["case", "first"]]
+    assert _read_rows(second) == [["testcase_name", "marker"], ["case", "second"]]
+    assert not any(char in os.path.basename(first) for char in '\\/:*?"<>| ')
+    assert not any(char in os.path.basename(second) for char in '\\/:*?"<>| ')
+
+
+@pytest.mark.parametrize("sheet", ["T2", "中文表"])
+def test_ordinary_sheet_default_names_unchanged(switches, make_xlsx, sheet):
+    source = make_xlsx([sheet])
+    result = _write_output(_output_instance(switches, source, sheet), "control")
+    assert os.path.basename(result) == f"cases_{sheet}_result.csv"
+
+
+def test_first_sheet_default_output_keeps_own_file(switches, make_xlsx):
+    source = make_xlsx(["A B", "A_B"])
+    first = _write_output(_output_instance(switches, source), "default")
+    second = _write_output(_output_instance(switches, source, "A_B"), "selected")
+    assert first != second
+    assert _read_rows(first)[1] == ["case", "default"]
+
+
+def test_explicit_output_and_append_keep_contract(switches, make_xlsx, tmp_path):
+    source = make_xlsx(["A B", "A_B"])
+    explicit = tmp_path / "chosen.csv"
+    _write_output(_output_instance(switches, source, "A B", explicit), "first")
+    _write_output(_output_instance(switches, source, "A_B", explicit, append=True), "second")
+    assert _read_rows(explicit) == [["testcase_name", "marker"], ["case", "first"], ["case", "second"]]
+
+
+def test_csv_default_output_has_no_sheet_tag(switches, tmp_path):
+    source = tmp_path / "cases.csv"
+    source.write_text("testcase_name,op_name\ncase,Add\n", encoding="utf-8")
+    result = _write_output(_output_instance(switches, source, "ignored"), "csv")
+    assert os.path.basename(result) == "cases_result.csv"

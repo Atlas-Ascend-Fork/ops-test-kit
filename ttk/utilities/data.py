@@ -298,6 +298,20 @@ class RandomData:
             flat[start:end] = numpy.random.uniform(low, high, end - start)
         return out
 
+    @classmethod
+    def _gen_float64_uniform_data(cls, low, high, dtype, shape):
+        """float64 均匀采样：跨度算得出来走常规 uniform；跨度溢出（两端异号且都很大）时按端点加权平均生成。"""
+        if math.isfinite(float(high) - float(low)):
+            return cls._gen_uniform_data(low, high, dtype, shape)
+        # 两端绝对值都 ≤ max，加权平均不会溢出；分块写避免全尺寸临时数组
+        out = numpy.empty(shape, dtype=dtype)
+        flat = out.ravel()
+        for start in range(0, flat.size, CHUNK_ELEMS):
+            end = min(start + CHUNK_ELEMS, flat.size)
+            weights = numpy.random.random_sample(end - start)
+            flat[start:end] = low * (1 - weights) + high * weights
+        return out
+
     @staticmethod
     def _gen_bool_data(shape):
         """bool 离散域均匀抽样，分块写入预分配缓冲区（同 _gen_uniform_data）。
@@ -345,13 +359,9 @@ class RandomData:
 
         L0 range form:      constant (single value / both-nan) → constant fill
         L1 distribution:    normal → truncated normal; otherwise the uniform family
-        L2 uniform family:  dtype overflow clamp (float64) → range form:
-                            spans dtype range → log-uniform, else linear uniform
+        L2 uniform family:  float64 → 端点收进 float64 值域，跨度溢出时端点加权平均；
+                            其余 dtype：覆盖整个值域 → log-uniform，否则线性 uniform
         Tail:               must-contain border values mixed in (_mix_must_contain_values)
-
-        The float64 full-range shadowing is emergent, not ordering-dependent:
-        the /2 clamp leaves max_abs at 50% of dtype max, failing the 0.99
-        full-range threshold on its own.
         """
         low, high = self._data_range[:2]
         if self._is_constant_range(low, high):
@@ -366,9 +376,9 @@ class RandomData:
                 array = numpy.random.uniform(low, high, shape).astype(dtype, copy=False)
             elif dtype in ("float64", "double"):
                 finfo = numpy.finfo(numpy.float64)
-                low = max(low, finfo.min / 2)
-                high = min(high, finfo.max / 2)
-                array = numpy.random.uniform(low, high, shape).astype(dtype, copy=False)
+                low = max(low, finfo.min)
+                high = min(high, finfo.max)
+                array = self._gen_float64_uniform_data(low, high, dtype, shape)
             elif distribution == "uniform" and dtype == "bool" and self._covers_bool_domain(low, high):
                 # bool 非 integer：uniform astype(bool) 非零全 True；覆盖完整域改离散抽样
                 array = self._gen_bool_data(shape)
@@ -404,11 +414,7 @@ class RandomData:
 
     @staticmethod
     def _clamp_overflow(low, high, dtype):
-        """float64 uniform overflows computing high-low at ±finfo.max; halve the bounds.
-
-        This clamp is also what shadows the full-value-range log-uniform path for
-        float64 (max_abs drops to 50% of dtype max, below the 0.99 threshold).
-        """
+        """溢出兜底：float64 在 _random 的 float64 分支已处理，其余 dtype 原样返回。"""
         if dtype in ("float64", "double"):
             finfo = numpy.finfo(numpy.float64)
             return max(low, finfo.min / 2), min(high, finfo.max / 2)
@@ -417,7 +423,8 @@ class RandomData:
     def _gen_truncated_normal(self, low, high, dtype, shape) -> numpy.ndarray:
         from scipy.stats import truncnorm
 
-        mean = (high + low) / 2
+        # 两端点相加溢出时改为各自先除以 2 再相加，普通区间不变
+        mean = (high + low) / 2 if math.isfinite(float(high) + float(low)) else high / 2 + low / 2
         sigma = (high - mean) / 3
         gen = truncnorm((low - mean) / sigma, (high - mean) / sigma, loc=mean, scale=sigma)
         return self._gen_normal_data(gen, dtype, shape)

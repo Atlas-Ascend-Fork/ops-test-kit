@@ -528,7 +528,8 @@ class InstanceBase(metaclass=ABCMeta):
             sheet = self._resolved_output_sheet()
             tag = ""
             if sheet:
-                tag = "_" + sheet.translate(str.maketrans(dict.fromkeys('\\/:*?"<>| ', "_")))
+                # Escape the escape marker too, so distinct legal sheet names cannot collapse to one path.
+                tag = "_" + sheet.translate(str.maketrans({char: f"%{ord(char):02X}" for char in '\\/:*?"<>| %'}))
             self.result_path = root + tag + "_result.csv"
             logging.info(f"Output csv file is not specified. It will be set as {self.result_path}")
         if not self.result_path.endswith(".csv"):
