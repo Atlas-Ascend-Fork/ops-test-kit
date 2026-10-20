@@ -59,7 +59,7 @@ def test_npu_memory_pick_data():
 
 
 def test_npu_memory_workspace_converted_to_mb():
-    """回归锚：workspace 字节须 /1e6 转 MB（result.py 契约），与 e2e / GPU
+    """回归锚：workspace 字节须 /1e6 转 MB（result.py 契约），与 e2e / 远端
     peak_memory_mb 单位对齐；重构 6fd9eb3 曾丢失原修复 37ec723 的换算。"""
     import re
     from pathlib import Path

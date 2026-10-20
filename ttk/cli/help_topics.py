@@ -58,7 +58,7 @@ or --config); there is no local-execution backend.
 
 interplay:
   remote endpoints configured (ttk.conf.yaml/--config) -> XPU collection
-  goes remote; --golden-mode XPU uses the same routing (GPU output as golden).
+  goes remote; --golden-mode XPU uses the same routing (third-party output as golden).
   --super-kernel cannot be combined with --backend cpu.""",
     },
     "dump": {
@@ -96,7 +96,7 @@ values:
   Promote   CPU golden computed at promoted input precision
             (fp16/bf16->fp32, fp32->fp64) — for cross_check where the
             golden must be more accurate than both sides
-  XPU       third-party (GPU) output AS the golden; the 8c collection
+  XPU       third-party output AS the golden; the 8c collection
             runs once and feeds both the golden slot and third_party
 
 interplay:

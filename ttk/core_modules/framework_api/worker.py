@@ -1425,7 +1425,7 @@ def _collect_xpu(
 
 
 def _evaluate_precision(
-    testcase, switches, process_ctx, raw_inputs, outputs, golden_nps, third_parties, api, return_struct
+    testcase, switches, process_ctx, raw_inputs, outputs, golden_nps, third_parties, api, return_struct, backend
 ):
     """比对收尾：eager / graph 各形态 dump + 精度评估 + 终态屏显。"""
     if outputs.result_nps is None:
@@ -1438,7 +1438,7 @@ def _evaluate_precision(
             return
     else:
         process_ctx.notify_status("OnDumpOutput")
-        dump_outputs(testcase, outputs.result_nps, switches, segment="eager")
+        dump_outputs(testcase, outputs.result_nps, switches, segment="eager", backend=backend)
 
         # pre_compare 随 evaluate_eager_precision 内的统一比对入口生效（不再
         # 编排层原地改写——变换不跨 eager→graph 泄漏，golden 每比对独立复制）
@@ -1450,11 +1450,11 @@ def _evaluate_precision(
     if api.graph_enabled:
         process_ctx.notify_status("OnGraphComparison")
         if getattr(switches, "aclgraph_enabled", False) and outputs.graph_aclgraph_nps:
-            dump_outputs(testcase, outputs.graph_aclgraph_nps, switches, segment="graph_aclgraph")
+            dump_outputs(testcase, outputs.graph_aclgraph_nps, switches, segment="graph_aclgraph", backend=backend)
         if switches.cst_switches.enabled and outputs.graph_cst_nps:
-            dump_outputs(testcase, outputs.graph_cst_nps, switches, segment="graph_cst")
+            dump_outputs(testcase, outputs.graph_cst_nps, switches, segment="graph_cst", backend=backend)
         if switches.dyn_switches.enabled and outputs.graph_dyn_nps:
-            dump_outputs(testcase, outputs.graph_dyn_nps, switches, segment="graph_dyn")
+            dump_outputs(testcase, outputs.graph_dyn_nps, switches, segment="graph_dyn", backend=backend)
         if getattr(switches, "aclgraph_enabled", False):
             evaluate_graph_precision(
                 testcase,
@@ -1589,7 +1589,7 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
         return
 
     _evaluate_precision(
-        testcase, switches, process_ctx, raw_inputs, outputs, golden_nps, third_parties, api, return_struct
+        testcase, switches, process_ctx, raw_inputs, outputs, golden_nps, third_parties, api, return_struct, backend
     )
     if deterministic_level == 3:
         # dl=3 batch 一致性：比对后切 output 0 逐样本 MD5 → batch_summary

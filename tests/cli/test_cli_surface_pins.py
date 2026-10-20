@@ -192,7 +192,7 @@ class TestExtendedChoicesCurrent:
             assert _switches(["kernel", "-i", "cases.csv", "--compare", token]).compare_method == token
 
     def test_golden_mode_choices_include_xpu(self):
-        # XPU 态已加入（GPU 输出作 golden）
+        # XPU 态已加入（三方输出作 golden）
         for mode in ("Enable", "Disable", "Promote", "XPU"):
             assert _parse(["kernel", "-i", "cases.csv", "--golden-mode", mode]).golden_mode == mode
 

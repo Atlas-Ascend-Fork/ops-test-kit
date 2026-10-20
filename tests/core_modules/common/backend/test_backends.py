@@ -32,7 +32,7 @@ def _torch_import_lines(path, top_level_only=False):
     """ast 全量（含函数体内惰性 import）收集 torch/torch_npu 导入行号。
 
     top_level_only=True 仅扫模块层（tree.body）——用于装配面 __init__.py：
-    其函数内的惰性 torch import（_npu_torch_available，torch 分支独占）不违规。
+    其函数体内的惰性 torch import（_probe，torch 分支独占）不违规。
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     hits = []
@@ -49,8 +49,10 @@ def _torch_import_lines(path, top_level_only=False):
 
 
 def test_backend_abc_has_new_methods():
-    """Backend ABC 必须包含 device_name/device_type/has_device/is_npu 方法。"""
-    assert all(hasattr(Backend, m) for m in ["device_name", "device_type", "has_device", "is_npu"])
+    """Backend ABC 必须包含 device_name/device_type/has_device/is_npu/third_party_provider 方法。"""
+    assert all(
+        hasattr(Backend, m) for m in ["device_name", "device_type", "has_device", "is_npu", "third_party_provider"]
+    )
 
 
 def test_backend_base_is_framework_neutral():

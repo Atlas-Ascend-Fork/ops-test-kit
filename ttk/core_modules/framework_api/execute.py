@@ -35,13 +35,14 @@ WARMUP_COUNT = 1
 def _capture_peak_memory(backend, dev_id, return_struct, fn, *args, **kwargs):
     """NPU: reset peak stats, run *fn*, record max_memory_allocated (MB) into npu_memory.
 
-    Same caliber as the GPU executor (remote/server/executor.py: reset_peak ->
-    invoke -> max_memory_allocated / 1e6): peak covers input allocations and
-    execution-time temporaries inside *fn*. CANN-internal workspace does not go
-    through the torch allocator and is not counted (GPU cuBLAS/cuDNN workspace
-    is likewise excluded). Non-NPU backends pass through, npu_memory stays None.
+    Same caliber as the remote XPU executor (remote/server/executor.py:
+    reset_peak -> invoke -> max_memory_allocated / 1e6): peak covers input
+    allocations and execution-time temporaries inside *fn*. CANN-internal
+    workspace does not go through the torch allocator and is not counted
+    (accelerator third-party library workspace is likewise excluded). Non-NPU
+    backends pass through, npu_memory stays None.
 
-    Memory-stat APIs are best-effort: any failure (like the GPU executor's
+    Memory-stat APIs are best-effort: any failure (like the remote executor's
     peak_memory_mb=NA) leaves npu_memory untouched instead of failing the case,
     and never masks fn's own result/exception.
     """

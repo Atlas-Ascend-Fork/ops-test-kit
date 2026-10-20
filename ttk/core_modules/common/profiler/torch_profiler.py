@@ -12,7 +12,7 @@
 torch 生态的两个互斥分支（factory 按 torch.* 前缀二选一，永不独立被选，
 故同族同居一文件）+ 共享引擎函数：
 
-- TorchProfiler：torch.profiler（torch.* 非 NPU——CPU 本地 / 远端 GPU 同构）
+- TorchProfiler：torch.profiler（torch.* 非 NPU——CPU 本地 / 远端加速卡同构）
 - TorchNpuProfiler：torch_npu.profiler（torch.*/torch_npu.* × NPU——dispatcher
   可见、schedule 采集时 step 过滤、aclgraph Model ID 过滤）
 - resolve_activities / summarize_events / _is_device_kernel：共享引擎，

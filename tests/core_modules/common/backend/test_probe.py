@@ -8,16 +8,19 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
 
-"""get_backend 路由测试：framework × (CPU | NPU) 二叉决策。
+"""get_backend 路由测试 + _probe 硬件探测单元。
 
-torch：_npu_torch_available 探测（import torch_npu + torch.npu.is_available，
-失败告警回落）；tf：npu_device 包安装探测。force_cpu 直取 CPU 系。
+torch 路径：iterate _hw_profiles("torch")（frameworks 配置段），跳过 cpu
+profile，_probe 命中即 _build；全部 miss → CPU 回落。tf 路径：npu_device
+包安装探测。force_cpu 直取 CPU 系。
 """
 
 from __future__ import annotations
 
+import importlib
+
 import ttk.core_modules.common.backend as be
-from ttk.core_modules.common.backend import get_backend
+from ttk.core_modules.common.backend import _probe, get_backend
 from ttk.core_modules.common.backend.cpu_tf_backend import CpuTfBackend
 from ttk.core_modules.common.backend.cpu_torch_backend import CpuTorchBackend
 
@@ -27,22 +30,82 @@ def test_force_cpu_returns_cpu_backend():
     assert isinstance(get_backend(force_cpu=True, framework="tf"), CpuTfBackend)
 
 
-def test_torch_npu_probe_failure_falls_back_to_cpu(monkeypatch):
-    monkeypatch.setattr(be, "_npu_torch_available", lambda: False)
-    backend = get_backend()
-    assert isinstance(backend, CpuTorchBackend)
-
-
-def test_torch_npu_probe_success_returns_npu(monkeypatch):
+def test_torch_npu_profile_probe_success_returns_npu(monkeypatch):
     from ttk.core_modules.common.backend.npu_torch_backend import NpuTorchBackend
 
-    monkeypatch.setattr(be, "_npu_torch_available", lambda: True)
+    monkeypatch.setattr(
+        be,
+        "_hw_profiles",
+        lambda fw: {"npu": {"torch_lib": "npu", "profiler": "builtin"}} if fw == "torch" else {},
+    )
+    monkeypatch.setattr(be, "_probe", lambda p: True)
     backend = get_backend()
     assert isinstance(backend, NpuTorchBackend)
-    # _build 注入等价物改为类属性：profiler 工厂与 alias 消费
+    # _build 注入 profile/segment（类属性等价物）：profiler 工厂与 alias 消费
     assert backend.profile == {"torch_lib": "npu", "profiler": "builtin"}
     assert backend.device_type() == "npu"
     assert backend.torch_lib == "npu"
+
+
+def test_torch_xpu_profile_probe_success_returns_xpu(monkeypatch):
+    from ttk.core_modules.common.backend.xpu_torch_backend import XpuTorchBackend
+
+    profile = {"torch_lib": "cuda", "profiler": {"activities": ["CPU", "CUDA"]}}
+    monkeypatch.setattr(be, "_hw_profiles", lambda fw: {"xpu": profile})
+    monkeypatch.setattr(be, "_probe", lambda p: True)
+    backend = get_backend()
+    assert isinstance(backend, XpuTorchBackend)
+    assert backend.torch_lib == "cuda"
+    assert backend.profile == profile
+    assert backend.device_type() == "xpu"  # alias = segment name
+
+
+def test_torch_probe_failure_falls_back_to_cpu(monkeypatch):
+    monkeypatch.setattr(
+        be,
+        "_hw_profiles",
+        lambda fw: {"npu": {"torch_lib": "npu", "profiler": "builtin"}},
+    )
+    monkeypatch.setattr(be, "_probe", lambda p: False)
+    assert isinstance(get_backend(), CpuTorchBackend)
+
+
+def test_torch_no_profiles_falls_back_to_cpu(monkeypatch):
+    monkeypatch.setattr(be, "_hw_profiles", lambda fw: {})
+    assert isinstance(get_backend(), CpuTorchBackend)
+
+
+def test_probe_cuda_skips_import(monkeypatch):
+    """cuda native skips import: importlib.import_module must not be called."""
+    called = []
+
+    def spy(name):
+        called.append(name)
+        raise AssertionError("should not import for cuda")
+
+    monkeypatch.setattr(importlib, "import_module", spy)
+    _probe({"torch_lib": "cuda"})  # no raise + import not called
+    assert called == []
+
+
+def test_probe_missing_torch_lib_returns_false(caplog):
+    """A profile missing torch_lib is rejected up front (not swallowed as
+    "device not available"). Both empty {} and {profiler: ...} -> False +
+    warning naming torch_lib."""
+    for bad in ({}, {"profiler": "builtin"}):
+        caplog.clear()
+        assert _probe(bad) is False
+        assert any("torch_lib" in rec.message for rec in caplog.records)
+
+
+def test_probe_catches_runtime_error(monkeypatch):
+    """PrivateUse1 single-slot RuntimeError caught by except."""
+
+    def boom(name):
+        raise RuntimeError("rename_privateuse1_backend already set")
+
+    monkeypatch.setattr(importlib, "import_module", boom)
+    assert _probe({"torch_lib": "mlu"}) is False
 
 
 def test_tf_npu_device_probe(monkeypatch):

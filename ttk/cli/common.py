@@ -122,7 +122,7 @@ def _add_precision_args(parser):
         default="Enable",
         type=_golden_mode_arg,
         choices=list(_GOLDEN_MODE_CHOICES),
-        help="Golden mode: Enable/Disable (no comparison, verdict SKIP)/Promote (CPU high-precision)/XPU (GPU output as golden)",
+        help="Golden mode: Enable/Disable (no comparison, verdict SKIP)/Promote (CPU high-precision)/XPU (third-party output as golden)",
     )
     group.add_argument(
         "--input-dist",

@@ -79,9 +79,23 @@ def dump_inputs(testcase, raw_inputs, switches):
     _make_dumper(testcase, switches).dump_inputs(raw_inputs)
 
 
-def dump_outputs(testcase, result_nps, switches, segment=None):
-    """output 逐形态 dump（segment 区分，避免各形态同名互相覆盖）。"""
-    _make_dumper(testcase, switches).dump_outputs(result_nps, segment=segment)
+def dump_outputs(testcase, result_nps, switches, segment=None, backend=None):
+    """output 逐形态 dump（segment 区分，避免各形态同名互相覆盖）。
+
+    backend 经 third_party_provider 钩子声明产物按三方槽位落盘
+    （eager：xpu_{framework}_{idx}_{dtype}；图形态带段防与 eager 互相覆盖——
+    XPU 三方采集只跑 eager 单算子，图执行 NPU 专属），供跨机器 manual-data
+    回放比对；钩子返回 None（npu/cpu 后端）保持 output_{segment}_ 调试命名。"""
+    dumper = _make_dumper(testcase, switches)
+    provider = None
+    if backend is not None:
+        base = backend.third_party_provider(getattr(switches, "framework", None) or "torch")
+        if base is not None:
+            provider = base if segment in (None, "eager") else f"{base}_{segment}"
+    if provider is None:
+        dumper.dump_outputs(result_nps, segment=segment)
+    else:
+        dumper.dump_xpu_outputs(result_nps, provider)
 
 
 def dump_goldens(testcase, golden_nps, switches):

@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""XPU（GPU）profiler pass——server _run_perf 的采集层。
+"""XPU profiler pass——server _run_perf 的采集层。
 
 - torch_xpu_profiler_pass：torch.profiler Self device time（schedule wait/
   warmup/active=runtime）——activities 解析与事件聚合复用 common/profiler/

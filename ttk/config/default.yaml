@@ -26,6 +26,29 @@ remote:
   #     # providers 由 /v1/heartbeat 发现(可选 yaml override);顺序无优先级语义
 
 # ---------------------------------------------------------------------------
+# frameworks — 硬件中立配置（framework_api backends）
+# ---------------------------------------------------------------------------
+# 每个 framework 段下是 hardware profile（key = role: npu/xpu/cpu）。
+# torch_lib 是 torch 模块属性名（'npu'/'mlu'/'cpu'，torch binding value）；
+# profiler 为 'builtin' 或带 activities 的 dict。
+# 仅 cpu 是合法默认（无 framework 段时 get_hardware_config 返回 {}）。
+frameworks:
+  torch:
+    npu:
+      torch_lib: npu
+      profiler: builtin
+    # xpu 部署态补（在 ttk.conf.yaml 覆盖加此段），示例：
+    # xpu:
+    #   torch_lib: cuda          # torch 内建设备库（跳过 import torch_cuda）
+    #   profiler:
+    #     module: torch.profiler
+    #     activities: [CPU, CUDA]
+    #   # torch_lib: mlu          # 加速卡厂商库（需 import torch_mlu）
+    #   # profiler:
+    #   #   module: torch.profiler
+    #   #   activities: [CPU, MLU]
+
+# ---------------------------------------------------------------------------
 # cascade — MC2 算子级联通信配置
 # ---------------------------------------------------------------------------
 # 多卡 cascade worker 子进程的 TCP/HCCL 端口配置。

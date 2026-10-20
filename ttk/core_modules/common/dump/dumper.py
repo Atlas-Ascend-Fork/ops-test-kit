@@ -145,14 +145,17 @@ class DataDumper:
 
     def dump_goldens(self, goldens: Sequence, dtypes: Sequence = (), force: bool = False) -> None:
         """force or cfg.dump_golden → golden_{idx}_{dtype}.{ext}（无 segment；
-        None/str 占位跳过保 idx，同 dump_inputs）。"""
+        None/str 占位跳过保 idx，同 dump_inputs）。bin 追加 `_shape_<token>`
+        段——调试期无需对齐声明槽即可从文件名读出 shape（回放协议本就支持）。"""
         if not (force or self.cfg.dump_golden):
             return
         logging.info("Dump Golden data....")
+        bin_format = self._formatter().ext == "bin"
         for idx, data in enumerate(goldens):
             if data is None or isinstance(data, str):
                 continue
-            self._write("golden", data, idx, _slot_dtype(dtypes, idx, data), None)
+            shape_token = _shape_token(data) if bin_format else None
+            self._write("golden", data, idx, _slot_dtype(dtypes, idx, data), None, shape_token=shape_token)
 
     def dump_xpu(self, third_parties: dict, force: bool = False) -> None:
         """force or cfg.dump_xpu → xpu_{provider}_{idx}_{dtype}.{ext}
@@ -170,6 +173,16 @@ class DataDumper:
                     continue
                 shape_token = _shape_token(data) if bin_format else None
                 self._write("xpu", data, idx, _slot_dtype((), idx, data), str(provider), shape_token=shape_token)
+
+    def dump_xpu_outputs(self, outputs: Sequence, provider: str, dtypes: Sequence = (), force: bool = False) -> None:
+        """XPU 后端执行：force or cfg.dump_output → xpu_{provider}_{idx}_{dtype}.{ext}。
+
+        开关口径与 dump_outputs 一致（--dump out/full），只改命名——device
+        输出落地为三方槽位协议（provider 口径同三方比对：torch/tf），供跨
+        机器 manual-data 回放比对。"""
+        if not (force or self.cfg.dump_output):
+            return
+        self.dump_xpu({provider: list(outputs)}, force=True)
 
     def dump_named(self, name: str, data, dtype=None) -> None:
         """特殊条目（tiling_data 等）：按调用方组合名直写 {name}.{ext}，不走开关。"""

@@ -85,6 +85,11 @@ def get_remote_config() -> Optional[RemoteConfig]:
     return RemoteConfig.from_dict(remote)
 
 
+def get_hardware_config() -> dict:
+    """frameworks 段；空返回 {}（仅 cpu 合法默认，区别 remote 的 None）。"""
+    return get_config().get("frameworks", {}) or {}
+
+
 # ── CascadeConfig ──
 
 

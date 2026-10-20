@@ -190,7 +190,7 @@ class TestDataDumper:
         case_dir = tmp_path / "dump" / "softmax_v2"
         assert (case_dir / "input_dyn_0_float32.bin").exists()
         assert (case_dir / "output_cst_0_float32.bin").exists()
-        assert (case_dir / "golden_0_float32.bin").exists()
+        assert (case_dir / "golden_0_float32_shape_2.bin").exists()
 
     def test_npu_dump_path_env_override(self, tmp_path, monkeypatch):
         override = tmp_path / "external"
@@ -223,7 +223,7 @@ class TestDataDumper:
         dumper.dump_goldens(["GOLDEN_FAILURE", None, arr])
         case_dir = tmp_path / "dump" / "case"
         assert sorted(p.name for p in case_dir.iterdir()) == [
-            "golden_2_float32.bin",
+            "golden_2_float32_shape_1.bin",
             "input_1_float32.bin",
             "output_1_float32.bin",
         ]
@@ -245,7 +245,7 @@ class TestDataDumper:
         case_dir = tmp_path / "dump" / "case"
         assert (case_dir / "input_const_0_int32.bin").exists()
         assert (case_dir / "output_const_0_int32.bin").exists()
-        assert (case_dir / "golden_0_int32.bin").exists()
+        assert (case_dir / "golden_0_int32_shape_1.bin").exists()
 
     def test_dump_on_fail_fills_disabled_slots_only(self, tmp_path):
         cfg = DumpConfig(dump_input=True, dump_on_fail=True)
@@ -255,7 +255,7 @@ class TestDataDumper:
         # input 已开：不重复写；output/golden 未开：force 补漏
         assert not (tmp_path / "dump" / "case" / "input_0_int32.bin").exists()
         assert (tmp_path / "dump" / "case" / "output_0_int32.bin").exists()
-        assert (tmp_path / "dump" / "case" / "golden_0_int32.bin").exists()
+        assert (tmp_path / "dump" / "case" / "golden_0_int32_shape_1.bin").exists()
 
     def test_dump_on_fail_respects_switch(self, tmp_path):
         cfg = DumpConfig()  # dump_on_fail 关

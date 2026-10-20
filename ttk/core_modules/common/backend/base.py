@@ -10,6 +10,7 @@
 
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import numpy as np
 
@@ -101,6 +102,11 @@ class Backend(ABC):
     def soc_series(self) -> str:
         """Default: degrade to device_name() (model). NpuTorchBackend overrides short."""
         return self.device_name()
+
+    def third_party_provider(self, framework: str) -> Optional[str]:
+        """本后端执行产物按三方槽位（xpu_*）落盘时的 provider；None 表示保持
+        output_{segment}_ 调试命名。XpuTorchBackend 覆写为框架名（torch/tf）。"""
+        return None
 
     # ========== Framework tensor-lifecycle methods ==========
 
