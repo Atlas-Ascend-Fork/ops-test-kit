@@ -296,6 +296,9 @@ class GoldenGenerator:
         non-contiguous — e.g. FRACTAL_NZ logical views over ceil-aligned fractal storage)
         are promoted whole-storage elementwise with the original view geometry rebuilt,
         so bytes beyond the logical view (fractal tail padding) survive the cast.
+        Pure output slots (ctx.pure_output_indexes) are NOT promoted: they are
+        result containers whose dtype is the CSV/API-declared output dtype, not
+        operands of the golden computation.
         If source dtype is non-torch-native but target is (cross-boundary), raises
         NotImplementedError (numpy<->torch conversion not yet implemented).
         Bare generator (no @contextlib.contextmanager) — _golden_mode uses yield from."""
@@ -304,13 +307,15 @@ class GoldenGenerator:
         ctx = self._ctx
         t_dtypes = list(ctx.flat_tensor_dtypes)
         s_dtypes = list(ctx.flat_scalar_dtypes or ())
-        t_need = [d in DTYPE_PROMOTE_MAP for d in t_dtypes]
+        pure_outputs = set(ctx.pure_output_indexes)
+        t_need = [d in DTYPE_PROMOTE_MAP and i not in pure_outputs for i, d in enumerate(t_dtypes)]
         s_need = [d in DTYPE_PROMOTE_MAP for d in s_dtypes]
         if not (any(t_need) or any(s_need)):
             yield
             return
         # scenario-2 guard
-        for d in t_dtypes + s_dtypes:
+        guard_dtypes = [d for i, d in enumerate(t_dtypes) if i not in pure_outputs] + s_dtypes
+        for d in guard_dtypes:
             if d in DTYPE_PROMOTE_MAP:
                 tgt = DTYPE_PROMOTE_MAP[d]
                 if not is_torch_native_dtype(d) and is_torch_native_dtype(tgt):

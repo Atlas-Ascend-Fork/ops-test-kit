@@ -32,7 +32,13 @@ from typing import Union
 
 import numpy
 
-from .dtypes import is_4bit_dtype, torch_to_numpy_tensor, unpack_4bits
+from .dtypes import (
+    _NUMPY_DTYPE_SOURCES,
+    is_4bit_dtype,
+    resolve_numpy_dtype,
+    torch_to_numpy_tensor,
+    unpack_4bits,
+)
 from .shape import shape_numel
 
 
@@ -46,13 +52,21 @@ def file_md5(file_path: str):
 
 
 def _resolve_load_dtype(dtype):
-    """Map special dtypes to a numpy-loadable dtype for raw file reading."""
+    """Map special dtypes to a numpy-loadable dtype for raw file reading.
+
+    Custom dtype names (bfloat16/fp8/fp4/hifloat*) resolve to their provider
+    dtype objects — resolve_numpy_dtype also imports ml_dtypes/en_dtypes,
+    which registers the bare names with numpy (fromfile/view reject them
+    before that).
+    """
     if dtype in ("uint1", "int1"):
         return "uint8"
     if dtype == "complex32":
         return "float16"
     if is_4bit_dtype(dtype):
         return "uint8"
+    if isinstance(dtype, str) and dtype in _NUMPY_DTYPE_SOURCES:
+        return resolve_numpy_dtype(dtype)
     return dtype
 
 

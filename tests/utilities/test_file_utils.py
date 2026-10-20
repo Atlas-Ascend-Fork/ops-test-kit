@@ -63,6 +63,34 @@ def test_load_array_e5m2_pt(tmp_path):
     numpy.testing.assert_array_equal(back.view(numpy.uint8), t.view(torch.uint8).numpy())
 
 
+def test_load_array_bfloat16_fresh_interpreter(tmp_path):
+    """干净解释器（无 ml_dtypes 预载）按 'bfloat16' 裸名装载 bin/npy。
+
+    load_array 须自行 resolve 自定义 dtype 名并触发依赖包注册，不依赖
+    调用方先行 import。
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    ml_dtypes = pytest.importorskip("ml_dtypes")
+    arr = numpy.array([1.5, -0.25], dtype=ml_dtypes.bfloat16)
+    arr.tofile(tmp_path / "x.bin")
+    numpy.save(tmp_path / "x.npy", arr)
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        f"import sys; sys.path.insert(0, {str(root)!r})\n"
+        f"from ttk.utilities.file_utils import load_array\n"
+        "for f in ('x.bin', 'x.npy'):\n"
+        f"    a = load_array({str(tmp_path)!r} + '/' + f, 'bfloat16', (2,))\n"
+        "    assert str(a.dtype) == 'bfloat16', a.dtype\n"
+        "print('OK')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    assert "OK" in out.stdout
+
+
 def test_load_array_storage_shape_int1(tmp_path):
     """int1：尾维 //8（8 元素/字节）。"""
     numpy.arange(8, dtype=numpy.uint8).tofile(tmp_path / "x.bin")

@@ -147,7 +147,7 @@ def generate_golden_data(testcase, raw_inputs, switches, backend, dump=True):
             ),
             switches,
         )
-    if dump:
+    if dump and switches.dump_config.dump_golden:
         process_ctx.notify_status("OnDumpGolden")
         dump_goldens(testcase, golden_nps, switches)
     return golden_nps

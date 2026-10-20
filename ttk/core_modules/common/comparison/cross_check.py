@@ -293,7 +293,7 @@ class CrossCheckComparison(ComparisonBase):
         return metrics
 
     def _log_diff_output(self, diff_index, diff_order=None):
-        """Three-party diff (t/g/b + |t-g| + |b-g|), worst-first.
+        """Three-party diff (NPU/golden/third_party + |t-g| + |b-g|), worst-first.
         large positions use %.6e, small positions use %.10e (small values need
         more digits). [L]/[S] tag distinguishes large/small in each row."""
         log = ""
@@ -309,8 +309,9 @@ class CrossCheckComparison(ComparisonBase):
             fmt = "%.10e" if is_small else "%.6e"
             tag = "S" if is_small else "L"
             log += (
-                f"Index: {idx:03d} RealIndex: {i:06d} [{tag}] t={fmt % float(t[i])} g={fmt % float(g[i])} "
-                f"b={fmt % float(b[i])} |t-g|={fmt % float(abs(t[i] - g[i]))} |b-g|={fmt % float(abs(b[i] - g[i]))}\n"
+                f"Index: {idx:03d} RealIndex: {i:06d} [{tag}] "
+                f"NPU(t)={fmt % float(t[i])} golden(g)={fmt % float(g[i])} third_party(b)={fmt % float(b[i])} "
+                f"|t-g|={fmt % float(abs(t[i] - g[i]))} |b-g|={fmt % float(abs(b[i] - g[i]))}\n"
             )
         return log
 

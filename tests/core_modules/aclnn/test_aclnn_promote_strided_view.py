@@ -46,6 +46,7 @@ class _Ctx:
         self.scalar_list_dist = ()
         self.flat_tensor_dtypes = tuple(dtypes)
         self.flat_scalar_dtypes = tuple(scalar_dtypes)
+        self.pure_output_indexes = ()
 
     def invalidate_flat_cache(self, *_names):
         pass
@@ -282,3 +283,28 @@ def test_golden_mode_enable_skips_promote():
         assert ctx.tensors[0] is view
         assert ctx.tensors[0].dtype == torch.float16
     assert ctx.tensors[0] is view
+
+
+def test_promote_skips_pure_output_slots():
+    """Pure output placeholder slots must not be promoted.
+
+    Whole-case Promote (set when one output uses cross_check/mixed) promotes only
+    input/inplace slots: hifloat8/e8m0 pure output templates keep their declared
+    dtype and object identity while the fp16 input promotes to fp32.
+    """
+    storage = torch.arange(8, dtype=torch.float16)
+    view = torch.as_strided(storage, (3, 2), (2, 1), 0)
+    tpl_hif8 = torch.zeros((4,), dtype=torch.float16)
+    tpl_e8m0 = torch.zeros((4,), dtype=torch.float16)
+    ctx = _Ctx((view, tpl_hif8, tpl_e8m0), ("float16", "hifloat8", "float8_e8m0"))
+    ctx.pure_output_indexes = (1, 2)
+    with _generator(ctx)._golden_mode():
+        promoted_view, kept_hif8, kept_e8m0 = ctx.tensors
+        assert promoted_view.dtype == torch.float32
+        assert _storage_numel(promoted_view) == 8
+        assert kept_hif8 is tpl_hif8, "pure output template must keep object identity (no promote)"
+        assert kept_e8m0 is tpl_e8m0, "pure output template must keep object identity (no promote)"
+        assert ctx.tensor_dtypes == ("float32", "hifloat8", "float8_e8m0")
+    assert ctx.tensors[1] is tpl_hif8
+    assert ctx.tensors[2] is tpl_e8m0
+    assert ctx.tensor_dtypes == ("float16", "hifloat8", "float8_e8m0")

@@ -149,6 +149,17 @@ def _profiling_print(testcase, backend, dev_id, switches):
     )
 
 
+_TABLE_CELL_WIDTH = 80
+
+
+def _wrap_table_cell(text, width=_TABLE_CELL_WIDTH):
+    """长单元格按固定宽度折行（render_table 边框按最长行定宽、不折行）。"""
+    text = str(text)
+    if len(text) <= width:
+        return text
+    return "\n".join(text[i : i + width] for i in range(0, len(text), width))
+
+
 def _profiling_end_print(testcase, return_struct, golden_nps=None, switches=None):
     """结果后屏显：kernel 同款 render_table（MODE × Device/CPU/Comparison）。
 
@@ -191,7 +202,7 @@ def _profiling_end_print(testcase, return_struct, golden_nps=None, switches=None
                 "EAGER",
                 str(return_struct.eager_device_perf_us),
                 str(return_struct.eager_cpu_perf_us),
-                str(return_struct.eager_precision),
+                _wrap_table_cell(return_struct.eager_precision),
             )
         )
     if return_struct.graph_cst_precision is not None:
@@ -200,7 +211,7 @@ def _profiling_end_print(testcase, return_struct, golden_nps=None, switches=None
                 "GRAPH CST",
                 str(return_struct.graph_cst_device_perf_us),
                 str(return_struct.graph_cst_cpu_perf_us),
-                str(return_struct.graph_cst_precision),
+                _wrap_table_cell(return_struct.graph_cst_precision),
             )
         )
     if return_struct.graph_dyn_precision is not None:
@@ -209,7 +220,7 @@ def _profiling_end_print(testcase, return_struct, golden_nps=None, switches=None
                 "GRAPH DYN",
                 str(return_struct.graph_dyn_device_perf_us),
                 str(return_struct.graph_dyn_cpu_perf_us),
-                str(return_struct.graph_dyn_precision),
+                _wrap_table_cell(return_struct.graph_dyn_precision),
             )
         )
     if return_struct.graph_aclgraph_precision is not None:
@@ -218,7 +229,7 @@ def _profiling_end_print(testcase, return_struct, golden_nps=None, switches=None
                 "GRAPH ACLGRAPH",
                 str(return_struct.graph_aclgraph_device_perf_us),
                 str(return_struct.graph_aclgraph_cpu_perf_us),
-                str(return_struct.graph_aclgraph_precision),
+                _wrap_table_cell(return_struct.graph_aclgraph_precision),
             )
         )
 
@@ -232,8 +243,8 @@ def _profiling_end_print(testcase, return_struct, golden_nps=None, switches=None
 
     golden_shapes = tuple(_print_get_shape(g) if isinstance(g, np.ndarray) else g for g in golden_nps)
     golden_dtypes = tuple(str(_print_get_dtype(g)) if isinstance(g, np.ndarray) else g for g in golden_nps)
-    lines.append((f"Golden Shapes: {golden_shapes}",))
-    lines.append((f"Golden Dtypes: {golden_dtypes}",))
+    lines.append((_wrap_table_cell(f"Golden Shapes: {golden_shapes}"),))
+    lines.append((_wrap_table_cell(f"Golden Dtypes: {golden_dtypes}"),))
 
     msg_parts = []
     for details, label in (

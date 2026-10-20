@@ -352,8 +352,10 @@ class TestFilterUnhealthyDevices:
             5: 0x99,
         }
         excluded = InstanceBase._filter_unhealthy_devices(_health_inst(), [0, 1, 2, 3, 4, 5])
-        assert excluded == (3, 4, 5)
-        assert any("IMPORTANT health alarm scheduled" in r.message for r in caplog.records)
+        assert excluded == (4, 5)
+        alarm_msg = next(r.message for r in caplog.records if "health alarm scheduled" in r.message)
+        assert "IMPORTANT" in alarm_msg
+        assert "CRITICAL" in alarm_msg
 
     @pytest.mark.usefixtures("_fake_health_dsmi")
     def test_none_query_failure_keeps_device(self):

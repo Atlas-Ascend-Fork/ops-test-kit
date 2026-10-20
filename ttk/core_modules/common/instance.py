@@ -858,10 +858,10 @@ class InstanceBase(metaclass=ABCMeta):
         return available
 
     def _filter_unhealthy_devices(self, device_ids):
-        """DSMI 健康态过滤（仅在线板态）：CRITICAL/OFF 及未知健康码的卡
-        不进调度池（授权域/派发池/CSV 校验域同步收缩）。WARNING/IMPORTANT 视为
-        可用（IMPORTANT 打告警放行——挡单卡开发机过激进，结果可信度由告警留痕）；
-        单卡查询失败保留该卡；查询能力缺失（无驱动/.so——asys 同源层）打告警不做检查。
+        """DSMI 健康态过滤（仅在线板态）：OFF 及未知健康码的卡不进调度池
+        （授权域/派发池/CSV 校验域同步收缩）；OK/WARNING 直接可用，
+        IMPORTANT/CRITICAL 打告警放行（结果可信度由告警留痕）；单卡查询失败
+        保留该卡；查询能力缺失（无驱动/.so——asys 同源层）打告警不做检查。
         CPU 运行（--backend cpu 或 torch_npu 缺失回落）时池内是 CPU 槽位而非
         NPU id，不做健康检查。"""
         if not device_ids:
@@ -878,13 +878,20 @@ class InstanceBase(metaclass=ABCMeta):
         if states is None:
             logging.warning("Device health check skipped (DSMI unavailable); all detected devices scheduled")
             return ()
-        schedulable = (DSMI_HEALTH_STATE.OK, DSMI_HEALTH_STATE.WARNING, DSMI_HEALTH_STATE.IMPORTANT)
-        important = {d for d, h in states.items() if h is DSMI_HEALTH_STATE.IMPORTANT}
-        if important:
+        _ALARM_STATES = (DSMI_HEALTH_STATE.IMPORTANT, DSMI_HEALTH_STATE.CRITICAL)
+        alarmed = {d: h for d, h in states.items() if h in _ALARM_STATES}
+        if alarmed:
+            detail = {d: getattr(h, "name", h) for d, h in sorted(alarmed.items())}
             logging.warning(
-                f"Device(s) with IMPORTANT health alarm scheduled anyway: {sorted(important)}; "
+                f"Device(s) with health alarm scheduled anyway: {detail}; "
                 f"results may be unreliable (check dsmi_get_device_error)"
             )
+        schedulable = (
+            DSMI_HEALTH_STATE.OK,
+            DSMI_HEALTH_STATE.WARNING,
+            DSMI_HEALTH_STATE.IMPORTANT,
+            DSMI_HEALTH_STATE.CRITICAL,
+        )
         unhealthy = {d: h for d, h in states.items() if h is not None and h not in schedulable}
         if unhealthy:
             detail = {d: getattr(h, "name", h) for d, h in sorted(unhealthy.items())}
