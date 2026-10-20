@@ -26,7 +26,7 @@ TTK（`ops-test-kit`）目前只能在真实 Ascend 芯片上执行算子。NPUS
 
 | 事实 | 说明 |
 |---|---|
-| user_app 直接给 `.py` 路径即可 | `launch_spec.py` 判非 ELF → `bash -c` 执行，`is_python=True` 注入 `TASK_QUEUE_ENABLE=0`；退出码 0 = PASS（`runner.py:179`） |
+| user_app 直接给 `.py` 路径即可 | 可直接执行 Python 脚本（脚本内自动关闭任务排队）；退出码 0 只表示 NPUSim 自身执行完成，算子的 PASS/FAIL 以 wrapper 产出的结果文件判定（见 §7） |
 | record 持久产物仅 `instr.bin` + `.soc-version` | `log/`、`log_ca/`、`run_log/` 跑完被 `artifacts.py::cleanup_internal_dirs` 清理 |
 | **NPUSim 不产出设备端 tensor 数值** | 必须由 user_app（TTK 生成的 wrapper）自行回读算子输出并写盘，TTK 再读取比对 |
 | report 输入优先级 | helper DB → `instr.bin` → `log_ca/`；引擎 BiProfRunner（需 plotly≥5） |

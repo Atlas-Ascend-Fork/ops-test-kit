@@ -53,7 +53,7 @@ TTK 支持两种等价的输入文件格式，表头与字段定义完全相同�
 | `is_enabled` | BOOL | 否 | `True` | 设为 `False` 跳过此用例。 |
 | `remark` | STRING | 否 | `None` | 自由备注信息。 |
 | `soc_series` | STRING_CONTAINER | 否 | `None` | SoC过滤。前缀 `-` 表示排除。如 `('Ascend910A', '-Ascend310P')` |
-| `priority` | INT | 否 | `0` | 优先级，用于选择性执行。 |
+| `priority` | INT | 否 | `0` | 优先级，用于选择性执行。非负整数。 |
 | `attributes` | DICT | 否 | `{}` | 算子/API 属性参数，语义随模式不同（Kernel 为算子属性，ACLNN 为标量参数，E2E 为 API 参数），详见各模式用例编写文档。 |
 | `device_ids` | STRING | 否 | `None` | 用例级设备指定（与 `--devices`/`--dev` 可用池取交集）。 |
 | `batch_axis` / `batch_slice_info` / `batch_seed` | — | 否 | `None` | 批一致性三字段（all-or-nothing），详见[确定性计算与批一致性](./Deterministic_Compute.md)。 |

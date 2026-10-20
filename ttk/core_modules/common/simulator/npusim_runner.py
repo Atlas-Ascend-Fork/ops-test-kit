@@ -15,8 +15,10 @@ Its record format matches the installed camodel, so no separate
 npu-simulator repository source is needed.
 """
 
+import contextlib
 import logging
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -106,6 +108,95 @@ def _latest_record_dir(record_out: Path, before: Iterable[str] = ()) -> Path:
     return dirs[-1]
 
 
+def _terminate_group(proc: subprocess.Popen, grace_s: float = 2.0) -> None:
+    """Stop the whole process group of ``proc`` (npusim + wrapper descendants).
+
+    SIGTERM first, then SIGKILL whatever survives the grace window. Safe when
+    the group is already gone: ProcessLookupError is ignored (the group exists
+    while any member is alive, so the final SIGKILL reaps stragglers).
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace_s)
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+class _GroupSignal(Exception):
+    """SIGTERM/SIGHUP 转成异常，复用清理路径。"""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _run_with_cleanup(cmd: list, env: dict, timeout: Optional[float]) -> subprocess.CompletedProcess:
+    """subprocess.run replacement that also reaps npusim's descendants.
+
+    ``subprocess.run(timeout=...)`` kills only the direct child: npusim
+    spawns the wrapper via ``bash -c``, which would survive the timeout and
+    keep simulating / writing result files. Run npusim in its own session so
+    the whole tree shares one process group; on timeout or interrupt the group
+    gets SIGTERM then SIGKILL, the pipes are drained and the exception is
+    re-raised (callers keep their current timeout semantics).
+
+    TTK 收到外部 SIGTERM/SIGHUP（CI 取消）时会直接退出、漏掉本函数清理。
+    运行窗口内注册处理器把这些信号转成 ``_GroupSignal``：走同一套整组回收，
+    再恢复默认处置重发，保留信号的退出语义。
+    """
+
+    def _handler(signum, frame):
+        raise _GroupSignal(signum)
+
+    old_handlers = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            old_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handler)
+    except ValueError:
+        # signal.signal requires the main thread; keep the legacy
+        # timeout/KeyboardInterrupt-only cleanup when not available.
+        old_handlers.clear()
+
+    signal_death = False
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except BaseException as exc:
+            # TimeoutExpired, KeyboardInterrupt and _GroupSignal alike: stop the
+            # whole group, drain the pipes (repeated communicate without input
+            # is allowed) and re-raise the original exception so callers keep
+            # their current semantics.
+            #
+            # Draining can block forever only if a descendant escaped the group
+            # (setsid/daemonize) and still holds the pipe fds — the wrapper runs
+            # camodel in-process and stays in the group, so this does not happen.
+            _terminate_group(proc)
+            proc.communicate()
+            if isinstance(exc, _GroupSignal):
+                signal_death = True
+                signal.signal(exc.signum, signal.SIG_DFL)
+                os.kill(os.getpid(), exc.signum)
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    finally:
+        if not signal_death:
+            for sig, prev in old_handlers.items():
+                signal.signal(sig, prev)
+
+
 def run_record(sw, wrapper_path: Path, case_dir: Path, extra_argv: Iterable[str] = ()) -> Path:
     """Run ``record <wrapper> -s <soc> -o <case_dir>/record_out [-n ...] [-f ...]``.
 
@@ -135,14 +226,7 @@ def run_record(sw, wrapper_path: Path, case_dir: Path, extra_argv: Iterable[str]
     cmd += list(extra_argv)
 
     logging.info("npusim record: %s", " ".join(cmd))
-    proc = subprocess.run(
-        cmd,
-        env=build_sim_env(sw),
-        timeout=(sw.proc_timeout or None),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    proc = _run_with_cleanup(cmd, build_sim_env(sw), sw.proc_timeout or None)
     if proc.stdout:
         logging.debug("npusim record stdout tail: %s", proc.stdout[-2000:])
     if proc.returncode != 0:
@@ -194,14 +278,7 @@ def run_report(sw, export_dir: Path, output_dir: Optional[Path] = None) -> Optio
         if getattr(sw, "sim_cores", None):
             cmd += ["-n", sw.sim_cores]
         logging.info("npusim report: %s", " ".join(cmd))
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            timeout=(sw.proc_timeout or None),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        proc = _run_with_cleanup(cmd, env, sw.proc_timeout or None)
     except Exception as exc:  # noqa: BLE001 - report is best-effort
         logging.warning("npusim report failed: %s", exc)
         return None

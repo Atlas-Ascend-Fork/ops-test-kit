@@ -457,6 +457,118 @@ class TestCannsimBackend:
         cmd = npusim_runner._cannsim_cmd()
         assert cmd == [sys.executable, str(fake_script)]
 
+    @staticmethod
+    def _write_fake_npusim(tmp_path, pid_file):
+        fake = tmp_path / "fake_npusim.py"
+        fake.write_text(
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "time.sleep(120)\n"
+        )
+        return fake
+
+    @staticmethod
+    def _wait_dead(pid, deadline_s=5.0):
+        """True when pid is gone or a reparented zombie (state Z in /proc)."""
+        import time
+
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline:
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    state = f.read().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return True
+            if state == "Z":
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_run_record_timeout_kills_descendants(self, tmp_path, monkeypatch):
+        """超时后 npusim 与 wrapper 后代整组被杀，不留后台仿真进程。"""
+        import subprocess
+
+        from ttk.core_modules.common.simulator import npusim_runner
+
+        pid_file = tmp_path / "child.pid"
+        fake = self._write_fake_npusim(tmp_path, pid_file)
+        sw = SWITCHES()
+        sw.proc_timeout = 1
+        monkeypatch.setattr(npusim_runner, "_cannsim_cmd", lambda: [sys.executable, str(fake)])
+        monkeypatch.setattr(npusim_runner, "build_sim_env", lambda sw: dict(os.environ))
+        wrapper = tmp_path / "caseA_kernel.py"
+        wrapper.write_text("")
+        with pytest.raises(subprocess.TimeoutExpired):
+            npusim_runner.run_record(sw, wrapper, tmp_path / "case")
+        assert self._wait_dead(int(pid_file.read_text())), "wrapper descendant survived record timeout"
+
+    def test_interrupt_kills_process_group(self, tmp_path, monkeypatch):
+        """KeyboardInterrupt 时同样整组清理后重新抛出。"""
+        import subprocess
+
+        from ttk.core_modules.common.simulator import npusim_runner
+
+        pid_file = tmp_path / "child.pid"
+        fake = self._write_fake_npusim(tmp_path, pid_file)
+
+        real_communicate = subprocess.Popen.communicate
+        calls = {"n": 0}
+
+        def fake_communicate(self, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Let the fake npusim spawn its child and record the pid
+                # before the interrupt lands, otherwise there is nothing to
+                # leak-assert against.
+                import time
+
+                deadline = time.monotonic() + 5
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                raise KeyboardInterrupt()
+            return real_communicate(self, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess.Popen, "communicate", fake_communicate)
+        with pytest.raises(KeyboardInterrupt):
+            npusim_runner._run_with_cleanup([sys.executable, str(fake)], dict(os.environ), timeout=30)
+        assert self._wait_dead(int(pid_file.read_text())), "wrapper descendant survived KeyboardInterrupt"
+
+    def test_sigterm_reaps_detached_group(self, tmp_path):
+        """外部 SIGTERM（如 CI 取消任务）同样整组回收：npusim 后代不残留，进程保持信号退出语义。"""
+        import signal
+        import subprocess
+        import time
+
+        pid_file = tmp_path / "child.pid"
+        self_pid_file = tmp_path / "self.pid"
+        fake_cmd = (
+            "import subprocess, sys, time\n"
+            f"c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(c.pid))\n"
+            "time.sleep(120)\n"
+        )
+        script = (
+            "import os, sys\n"
+            "from ttk.core_modules.common.simulator import npusim_runner\n"
+            f"open({str(self_pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            f"npusim_runner._run_with_cleanup([sys.executable, '-c', {fake_cmd!r}], dict(os.environ), None)\n"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", script], env=dict(os.environ))
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if pid_file.exists() and self_pid_file.exists():
+                    break
+                time.sleep(0.02)
+            os.kill(int(self_pid_file.read_text()), signal.SIGTERM)
+            proc.wait(timeout=10)
+            assert proc.returncode == -signal.SIGTERM, "TTK 子进程应保持 SIGTERM 信号退出语义"
+            assert self._wait_dead(int(pid_file.read_text())), "npusim descendant survived TTK SIGTERM"
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
 
 class TestSimRecordFailure:
     """run_record failures surface as structured fail results, not crashes."""

@@ -94,10 +94,20 @@ class TestFormatterSemantics:
         assert back.dtype == numpy.float16
         numpy.testing.assert_array_equal(back, arr)
 
-    def test_bytes_npy_no_dtype_raw_write(self, tmp_path):
+    def test_bytes_npy_no_dtype_stored_as_uint8(self, tmp_path):
         payload = b"\xff\xfe"
         get_formatter("npy").dump(payload, str(tmp_path), "p", dtype=None)
-        assert (tmp_path / "p.npy").read_bytes() == payload
+        back = numpy.load(tmp_path / "p.npy")
+        assert back.dtype == numpy.uint8
+        assert back.tobytes() == payload
+
+    def test_bytes_pt_no_dtype_stored_as_uint8(self, tmp_path):
+        torch = pytest.importorskip("torch")
+        payload = b"\xff\xfe"
+        get_formatter("pt").dump(payload, str(tmp_path), "p", dtype=None)
+        back = torch.load(tmp_path / "p.pt")
+        assert back.dtype == torch.uint8
+        assert back.numpy().tobytes() == payload
 
     def test_torch_pt_roundtrip_if_available(self, tmp_path):
         torch = pytest.importorskip("torch")

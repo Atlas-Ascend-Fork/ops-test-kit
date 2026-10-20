@@ -55,7 +55,11 @@ def _add_case_filter_args(parser):
         "--no-op", "--exclude-operator", dest="exclude_operator", metavar="NAMES", help="Exclude operator name(s)"
     )
     group.add_argument("--op", "--operator", dest="operator", metavar="NAMES", help="Filter by operator name(s)")
-    group.add_argument("--priority", metavar="LIST", help="Filter by priority, e.g. --priority=1,3 or --priority=1-3")
+    group.add_argument(
+        "--priority",
+        metavar="LIST",
+        help="Filter by priority (non-negative int: N, N-M or M-), e.g. --priority=1,3 or --priority=1-3",
+    )
     group.add_argument("-t", "--testcase", metavar="NAMES", help="Specify testcase name(s), comma-separated")
     group.add_argument(
         "--tc",

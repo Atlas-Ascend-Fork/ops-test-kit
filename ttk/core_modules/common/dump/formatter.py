@@ -12,7 +12,7 @@
 一格式一实现，dump 写 / load 读成对。数据三形态 × 格式的语义矩阵：
   ndarray : bin=tofile（4bit 先 pack）/ npy=直存 / pt=转 torch 存 / print=print
   bytes   : bin=原样写文件 / npy·pt=按 dtype frombuffer 解码（uint1→uint8 别名、
-            complex32→float16、4bit unpack）再存，无 dtype 裸写字节 /
+            complex32→float16、4bit unpack）再存，无 dtype 按一维 uint8 数组序列化 /
             print=print(bytes) 或解码后 print
   Tensor  : bin=转 numpy tofile / npy=转 numpy 存 / pt=torch.save / print 同 ndarray
 
@@ -163,8 +163,7 @@ class NpyFormatter(DumpFormatter):
     def _dump_bytes(self, data, dtype, file_path, file_name) -> None:
         path = self._abspath(file_path, file_name)
         if dtype is None:
-            with open(path, "wb+") as f:
-                f.write(data)
+            numpy.save(path, numpy.frombuffer(data, dtype=numpy.uint8))
             return
         result = _decode_binary_to_array(data, dtype)
         result = result if not isinstance(result, tuple) else result[0]
@@ -209,8 +208,7 @@ class PtFormatter(DumpFormatter):
 
         path = self._abspath(file_path, file_name)
         if dtype is None:
-            with open(path, "wb+") as f:
-                f.write(data)
+            torch.save(numpy_to_torch_tensor(numpy.frombuffer(data, dtype=numpy.uint8)), path)
             return
         result = _decode_binary_to_array(data, dtype)
         # 4bit 解包产物 pt 不可承载——回退写 npy 文件
