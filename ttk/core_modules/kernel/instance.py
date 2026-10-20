@@ -22,6 +22,7 @@ __all__ = ["KernelInstance"]
 # Standard Packages
 import logging
 import os
+import shutil
 import time
 from typing import Any, List, Optional
 
@@ -66,6 +67,21 @@ class KernelInstance(InstanceBase):
         opp_path = os.getenv("ASCEND_OPP_PATH", "")
         if not opp_path:
             raise RuntimeError("Install path of opp or compiler is not found. Please check Ascend installation.")
+        # AscendC 构建链（CANN 内部经 make 驱动）前置检查：缺失时编译日志深处仅
+        # `make: not found` 一行，紧随大批 `ld.lld: cannot open ./kernel_meta/*.o`，
+        # 最终 DYN_COMPILE_FAILURE 不指向根因，须在此 fail-fast
+        if (
+            not self.switches.mode.is_model()
+            and not self.switches.validate_only
+            and not (self.switches.no_prof and self.switches.manual_data_dirs)
+            and shutil.which("make") is None
+        ):
+            raise RuntimeError(
+                "System `make` is required by the AscendC build chain but not found in PATH. "
+                "Install it first (Debian/Ubuntu: apt-get install make; CentOS/EulerOS: yum install make). "
+                "Without it, compilation buries `make: not found` under massive "
+                "`ld.lld: error: cannot open ./kernel_meta/*.o` and ends in DYN_COMPILE_FAILURE."
+            )
         # 限额容器下收紧 CANN 编译内部并行度（make -j）；须在 setup() 拉起任何
         # 子进程之前注入——forkserver 子进程不继承之后才设置的环境变量
         limit_cann_compile_jobs()

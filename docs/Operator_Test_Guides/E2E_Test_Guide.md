@@ -12,8 +12,13 @@
 1、基本环境配置
 
 - 建议Python 3.8+，安装PyTorch 2.0+
-- NPU后端需额外安装 [torch_npu](https://gitcode.com/Ascend/pytorch)
+- NPU后端需额外安装 [torch_npu](https://gitcode.com/Ascend/pytorch)，**torch 与 torch_npu 必须主次版本配套**（经测试组合：`torch==2.12.0` + `torch-npu==2.12.0.post2`，CANN 9.3.0；其余组合见 torch_npu 官方配套矩阵）。`pip install ".[e2e-npu]"` 的 extras 已带版本上限约束，避免 pip 解析到配套矩阵之外的最新组合
 - 完成CANN包安装
+
+> **版本不配套的典型症状**：`import torch_npu` 直接崩溃（退出码 134），报
+> `terminate called after throwing an instance of 'c10::ValueError' what(): Duplicated key
+> 'pinned_reserve_segment_size_mb'`——报错栈不指向版本问题，实为 torch 与 torch_npu
+> 的 libc10/libtorch_npu 注册冲突。按配套矩阵重装配套版本组合即可恢复。
 
 ```shell
 # 默认路径安装，以root用户为例（非root用户，将/usr/local替换为${HOME}）

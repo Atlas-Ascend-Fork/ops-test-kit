@@ -302,7 +302,16 @@ class ComparisonBase(metaclass=ABCMeta):
                         f"Diff: {self._fmt_log_value(-(golden_v - actual_v) / golden_v, ':<14.06f')}\n"
                     )
                 else:
-                    log += f"Index: {idx:03d} RealIndex: {real_index:06d} Expected: {str(golden_v)} Actual: {str(actual_v)} Diff: FAIL\n"
+                    gold_str, actual_str = str(golden_v), str(actual_v)
+                    if "bool" in str(self.output.dtype):
+                        # 非规范 bool 字节（如 0x02）值层仍渲染 True，不带字节值会呈现
+                        # "Expected: True Actual: True Diff: FAIL" 的自相矛盾日志
+                        gold_str = f"{gold_str}(0x{self.golden.view(np.uint8)[real_index]:02x})"
+                        actual_str = f"{actual_str}(0x{self.output.view(np.uint8)[real_index]:02x})"
+                    log += (
+                        f"Index: {idx:03d} RealIndex: {real_index:06d} "
+                        f"Expected: {gold_str} Actual: {actual_str} Diff: FAIL\n"
+                    )
         return log
 
 

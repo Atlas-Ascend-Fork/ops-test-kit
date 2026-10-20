@@ -28,8 +28,10 @@ TTK（ops Test Tool Kit）是[CANN](https://hiascend.com/software/cann)算子库
 
 - 按照昇腾社区安装CANN环境：[官方链接](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850alpha001/softwareinst/instg/instg_quick.html)
 - Python版本建议选择3.8及以上
+- Kernel 通路依赖系统工具链 `make`（AscendC 构建链，可用 `make --version` 检查；缺失时 `make: not found` 会埋在编译日志深处并伴随大量 `ld.lld: cannot open ./kernel_meta/*.o`，新版 TTK 已前置拦截并提示安装）
 - GEIR 通路依赖系统工具链 `g++`（GE 图编译，可用 `g++ --version` 检查）
-- ACLNN 通路额外依赖 `torch`（输入生成/Golden计算），E2E 通路额外依赖 `torch`/`torch_npu`（均不在 `requirements.txt` 中，需按本地 CANN 版本配套安装，参见 [torch_npu 安装指引](https://gitee.com/ascend/pytorch)）
+- ACLNN 通路额外依赖 `torch`（输入生成/Golden计算），E2E 通路额外依赖 `torch`/`torch_npu`（均不在 `requirements.txt` 中，需按本地 CANN 版本配套安装，参见 [torch_npu 安装指引](https://gitee.com/ascend/pytorch)）。**torch 与 torch_npu 必须主次版本配套**：`pip install ".[e2e-npu]"` 已带上限约束防止解析到配套矩阵之外的组合；经测试组合 `torch==2.12.0` + `torch-npu==2.12.0.post2`（CANN 9.3.0）。若 `import torch_npu` 崩溃退出码 134 并报 `Duplicated key 'pinned_reserve_segment_size_mb'`，即版本不配套，按 [torch_npu 配套矩阵](https://gitee.com/ascend/pytorch) 重装配套版本
+- 自带示例用例（`examples/case_store/`）包含 fp8/fp4 等前沿 dtype 覆盖用例，其通过依赖本地 CANN 版本的算子支持面；不支持时报 `E80008`/`EZ1001`/`EZ3002` 等 dtype 不支持类错误，属预期行为而非环境装错，详见[示例用例说明](./examples/case_store/README.md)
 
 ```shell
 git clone https://gitcode.com/cann/ops-test-kit.git

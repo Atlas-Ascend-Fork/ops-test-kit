@@ -2,6 +2,8 @@
 
 单文件 `cases.csv` 覆盖 Kernel 通路的主要功能面，每条用例的 `remark` 列即测试项。GEIR 模式复用本文件（GEIR 同样支持 shape-unknown 用例）。
 
+> 前沿 dtype/算子用例（`abs_int16_3d` / `pad_float8` / `pad_float4` / `requant_float8` / `matmul_v3_optional_inputs`）的通过依赖本地 CANN 版本的算子支持面（GEIR 模式复用时同理），不支持时的预期错误签名见上级 [README 的 CANN 版本配套说明](../README.md)。Kernel 通路另依赖系统 `make`（AscendC 构建链，缺失时新版 TTK 会前置拦截提示安装）。
+
 ```bash
 K=examples/case_store/kernel
 # 全量（动态/静态/二进制三模式一次跑齐，18 例）

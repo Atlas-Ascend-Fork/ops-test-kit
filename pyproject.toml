@@ -41,7 +41,9 @@ dependencies = [
 [project.optional-dependencies]
 tf = ["tensorflow>=2.12"]
 torch = ["torch>=2.0"]
-e2e-npu = ["torch>=2.0", "torch_npu>=2.1"]
+# torch 与 torch_npu 必须主次版本配套（官方配套矩阵外的组合 import 即崩：<2.13 为
+# 经测试矩阵上限，矩阵扩容后同步上调）
+e2e-npu = ["torch>=2.0,<2.13", "torch_npu>=2.1,<2.13"]
 e2e-xpu = ["torch>=2.0"]
 dev = [
     "pytest>=7",

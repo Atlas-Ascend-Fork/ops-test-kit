@@ -2,6 +2,8 @@
 
 按框架分文件：`tf_cases.csv`（TensorFlow，13 例）与 `torch_cases.csv`（torch/torch_npu，24 例），每条用例的 `remark` 列即测试项。
 
+> 前沿 dtype/算子用例（fp8 族、`causal_conv1d_fn_basic`、`add_bool` 等）的通过依赖本地 CANN 版本的算子支持面，不支持时的预期错误签名见上级 [README 的 CANN 版本配套说明](../README.md)。
+
 ```bash
 E=examples/case_store/e2e
 # TF 全量（13 例）；torch 全量（24 例）
@@ -17,7 +19,7 @@ python3 -m ttk e2e -i $E/torch_cases.csv
 |---|---|---|
 | `add_f32_alpha` / `tf_add_f32` | torch / tf | 基础双输入 + 标量属性（alpha） |
 | `add_f16` · `add_bf16` · `add_int32` / `tf_add_f16` · `tf_add_bf16` · `tf_add_int32` | torch / tf | dtype 覆盖：fp16 / bf16 / int32（整型 binary_equal） |
-| `add_int8` · `add_int16` · `add_int64` · `add_uint8` · `add_bool` · `add_f64` · `add_complex64` | torch | dtype 补齐：int8 / int16 / int64 / uint8 / bool（binary_equal）、float64（mix）、complex64（isclose） |
+| `add_int8` · `add_int16` · `add_int64` · `add_uint8` · `add_bool` · `add_f64` · `add_complex64` | torch | dtype 补齐：int8 / int16 / int64 / uint8 / bool（binary_equal）、float64（mix）、complex64（isclose）；`add_bool` 为字节级比对——部分版本线 NPU 侧按算术加实现（双 True 字节 0x02 而非 0x01）会如实暴露为设备侧 bool 规范表示缺陷 |
 | `pad_fp8_e5m2` · `pad_fp8_e4m3` · `pad_fp8_e8m0` | torch | 低比特 dtype：float8_e5m2 / float8_e4m3fn / float8_e8m0fnu 常量填充（e5m2/e4m3 走 fp8 分档 mix，e8m0 无 0 表示须填非零值、binary_equal）；fp4/int4 为 torch 存储态 dtype（无 copy/pad 内核，CPU/NPU 均不可执行——其覆盖在 Kernel/GEIR 通路） |
 | `add_range_mustappear` | torch | `input_data_ranges` 值域定制 + 第 3 元必现值 0 |
 | `add_broadcast` / `tf_add_broadcast` | torch / tf | 广播语义（输出 shape 自动推导） |
@@ -51,7 +53,7 @@ python3 -m ttk e2e -i $E/tf_cases.csv -t tf_scatter_div_stateful,tf_dequantize_s
 | 用例 | 测试项 |
 |---|---|
 | `npu_gelu_f16` | NPU 专属算子 + `golden_api` 交叉参照（CPU golden 用 `F.gelu`，实测 f16 最大偏差 ~6e-5）；CPU 环境预期 FAIL-fast |
-| `causal_conv1d_fn_basic` | `torch.ops` 扩展命名空间 + 整型索引输入混排；`golden_api=disable`（自定义算子无 CPU 参照，执行验证为主）；aclnn 约束 dim∈[64,16384] |
+| `causal_conv1d_fn_basic` | `torch.ops` 扩展命名空间 + 整型索引输入混排；`golden_api=disable`（自定义算子无 CPU 参照，执行验证为主）；aclnn 约束 dim∈[64,16384]。需部署配套 cann-ops-transformer 算子包，且加载其 C++ 扩展依赖系统 `ninja`（缺失时报 `Ninja is required to load C++ extensions`） |
 
 ```bash
 python3 -m ttk e2e -i $E/torch_cases.csv -t npu_gelu_f16,causal_conv1d_fn_basic

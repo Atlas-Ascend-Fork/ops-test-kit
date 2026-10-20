@@ -97,6 +97,20 @@ def test_log_diff_output_respects_max():
     assert f"Output 0 Compare Difference length {ComparisonBase.MAX_DIFF_OUTPUT} (index ascending)" in log
 
 
+def test_bool_diff_log_shows_noncanonical_bytes():
+    """bool 差异日志补字节值：非规范 bool 字节（如 NPU 算术和 1+1=2）值层仍渲染
+    True，日志须呈现 True(0x01) vs True(0x02) 而非自相矛盾的 True==True FAIL。"""
+    from ttk.core_modules.common.comparison.registry import get_comparison
+
+    raw = np.zeros(3, np.uint8)
+    raw[1] = 2
+    output = raw.view(np.bool_)
+    golden = np.array([False, True, False])
+    _p, log, is_pass, _m = get_comparison("bin")(output, golden, 0, "bool", {}).compare()
+    assert is_pass is False
+    assert "Expected: True(0x01) Actual: True(0x02) Diff: FAIL" in log
+
+
 def test_register_comparison_rejects_bad_arg():
     """register_comparison 入参须为 list/tuple/str，其余 TypeError。"""
     with pytest.raises(TypeError, match="list / tuple / str"):

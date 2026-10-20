@@ -134,6 +134,44 @@ class TestBuildTasksDualPool:
         assert second.depends_on == []
 
 
+class TestPrepareEnvMakePrecheck:
+    """prepare_env make 前置检查：AscendC 构建链（CANN 内部经 make 驱动）缺 make 时
+    fail-fast 并给安装指引——否则 `make: not found` 埋在数千行编译日志中，最终
+    DYN_COMPILE_FAILURE 不指根因；model/validate/manual-data 等不编译场景放行。"""
+
+    def _prepare(self, switches, monkeypatch, make_present=False, **kw):
+        monkeypatch.setenv("ASCEND_OPP_PATH", "/usr/local/Ascend/opp")
+        monkeypatch.setattr(
+            "ttk.core_modules.kernel.instance.shutil.which",
+            lambda _name: "/usr/bin/make" if make_present else None,
+        )
+        switches.mode.is_model.return_value = kw.get("is_model")
+        switches.validate_only = kw.get("validate_only", False)
+        switches.no_prof = kw.get("no_prof", False)
+        switches.manual_data_dirs = kw.get("manual_data_dirs")
+        with patch("ttk.core_modules.kernel.instance.limit_cann_compile_jobs"):
+            _make_instance(switches).prepare_env()
+
+    def test_missing_make_fails_fast_with_hint(self, switches, monkeypatch):
+        with pytest.raises(RuntimeError, match="apt-get install make"):
+            self._prepare(switches, monkeypatch, make_present=False)
+
+    def test_make_present_passes(self, switches, monkeypatch):
+        self._prepare(switches, monkeypatch, make_present=True)
+
+    @pytest.mark.parametrize(
+        "kw",
+        [
+            {"is_model": "CAMODEL"},
+            {"validate_only": True},
+            {"no_prof": True, "manual_data_dirs": ["/tmp/x"]},
+        ],
+        ids=["model", "validate", "manual_data"],
+    )
+    def test_non_compile_modes_skip_check(self, switches, monkeypatch, kw):
+        self._prepare(switches, monkeypatch, make_present=False, **kw)
+
+
 class TestHandleResult:
     def test_compile_result_applied_and_none_returned(self, switches):
         ki = _make_instance(switches)
