@@ -82,7 +82,11 @@ class FrameworkAdapter(ABC):
         is_aclgraph=False,
         deterministic_level=None,
     ):
-        """图模式执行器：torch → torch.compile + torchair；tf → tf.function。"""
+        """图模式执行器：torch → torch.compile + torchair；tf → tf.function。
+
+        返回 4 元组 (nps, ProfileResult, det_status, err_msg)：执行失败时
+        nps=[]、err_msg 带异常描述；成功或跳过时 err_msg 为 None。
+        """
 
     # ── eager 模式钩子（execute._execute_eager 消费） ─────────
 

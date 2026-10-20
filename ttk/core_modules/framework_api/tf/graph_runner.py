@@ -104,14 +104,15 @@ def execute_tf_graph(
         dynamic: True for dynamic shape graph, False for static shape graph
 
     Returns:
-        (list of numpy arrays, ProfileResult, det_status) on success, or ([], None, None) on failure
+        (nps, ProfileResult, det_status, err_msg)：执行失败时 nps=[]、
+        err_msg 带异常描述；成功或跳过时 err_msg 为 None。
     """
     if is_aclgraph:
         logging.warning("aclgraph mode not supported for TF, skipping")
-        return [], None, None
+        return [], None, None, None
     if tuple(getattr(testcase, "dyn_input_slot_indexes", ()) or ()):
         logging.error(f"TF graph mode does not support -1 dynamic slots: {testcase.testcase_name}")
-        return [], None, None
+        return [], None, None, f"TF graph mode does not support -1 dynamic slots: {testcase.testcase_name}"
 
     mode_str = "dynamic" if dynamic else "static"
     logging.info(f"Executing TF graph mode: {mode_str}")
@@ -230,10 +231,10 @@ def execute_tf_graph(
         det_status = finalize_det_status(md5_list, testcase.testcase_name)
     except Exception as e:
         logging.error(f"TF graph {mode_str} execution failed: {e}", exc_info=True)
-        return [], None, None
+        return [], None, None, f"TF graph {mode_str} execution failed: {e}"
 
     del args, kwargs
-    return result_nps, perf, det_status
+    return result_nps, perf, det_status, None
 
 
 # ── 图网络构造与执行 ────────────────────────────────────────────

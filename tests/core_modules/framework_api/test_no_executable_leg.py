@@ -5,12 +5,14 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""eager/graph 模式执行开关的编排级行为（worker.run 对外入口）。
+"""eager/graph 模式执行开关与失败消息回写的编排级行为（worker 入口）。
 
 - --eager=false 且图模式被后端降级（如 CPU 不支持）→ 显式 FAIL 行
   （修复前两模式全空、precision_status 保持 None，用例静默无判定）；
 - eager 默认开 + 图模式降级 → 降级仅跳过图执行，eager 照常出结果；
-- --aclgraph 不内置关 eager（想关需显式 --eager=false）。
+- --aclgraph 不内置关 eager（想关需显式 --eager=false）；
+- 执行/比对异常经顶层兜底与 _run_graph_phase 带消息落结果列，
+  _attach_plog_errors 拼 plog [ERROR] 行并单行化。
 """
 
 from contextlib import nullcontext
@@ -42,7 +44,7 @@ class _NoOpAdapter:
         return False
 
     def run_graph(self, *args, **kwargs):
-        return [], None, None
+        return [], None, None, None
 
 
 def _case():
@@ -156,3 +158,113 @@ def test_aclgraph_does_not_disable_eager(monkeypatch):
     ret, eager_calls = _run(monkeypatch, _switches(aclgraph=True))
     assert eager_calls == [1]
     assert ret.precision_status == "PASS"
+
+
+def test_eager_exception_carries_plog_detail(monkeypatch):
+    """eager 异常穿透顶层兜底：eager_precision 附带 plog [ERROR] 行（对齐 kernel/aclnn）。"""
+    import time
+
+    _stub_orchestration(monkeypatch)
+    sw = _switches()
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        "ttk.utilities.plog.extract_plog_errors",
+        lambda max_lines=10: ["[ERROR] aclnn tiling check failed"],
+    )
+
+    def execute(*_a, **_k):
+        raise RuntimeError("eager boom")
+
+    monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
+    set_global_storage(sw)
+    ret = e2e_worker.run(_case(), {}, {}, 0)
+
+    assert ret.precision_status == "FAIL"
+    assert "eager boom" in ret.eager_precision
+    assert "[ERROR] aclnn tiling check failed" in ret.eager_precision
+
+
+# ── 图模式执行失败的消息链路 ─────────────────────────────
+
+
+def test_graph_phase_captures_escaping_exception(monkeypatch):
+    """执行器异常不再穿透顶层：转成该模式失败，err 带异常描述。"""
+
+    def boom(**kwargs):
+        raise RuntimeError("capture OOM")
+
+    nps, perf, det, err = e2e_worker._run_graph_phase("aclgraph", boom)
+    assert (nps, perf, det) == ([], None, None)
+    assert err == "Graph aclgraph execution failed: capture OOM"
+
+
+def test_graph_phase_passes_through_executor_error():
+    """执行器按 4 元组回传内部失败：err 原样透传。"""
+
+    def failed(**kwargs):
+        return [], None, None, "Graph static execution failed: compile error"
+
+    nps, perf, det, err = e2e_worker._run_graph_phase("static", failed)
+    assert (nps, perf, det) == ([], None, None)
+    assert err == "Graph static execution failed: compile error"
+
+
+def test_attach_plog_errors_appends_error_lines(monkeypatch):
+    """plog 有 [ERROR] 行：拼到异常消息末尾，整体单行。"""
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        "ttk.utilities.plog.extract_plog_errors",
+        lambda max_lines=10: ["[ERROR] TILING check failed", "[ERROR] shape [127] should be [128]"],
+    )
+    out = e2e_worker._attach_plog_errors("Graph aclgraph execution failed: boom")
+    assert out == (
+        "Graph aclgraph execution failed: boom | "
+        "plog: [ERROR] TILING check failed | [ERROR] shape [127] should be [128]"
+    )
+
+
+def test_attach_plog_errors_flattens_multiline_exception(monkeypatch):
+    """多行异常文本：单行化折叠后落列，不带换行。"""
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.setattr("ttk.utilities.plog.extract_plog_errors", lambda max_lines=10: [])
+    out = e2e_worker._attach_plog_errors("torchair failed:\n  line one\n  line two")
+    assert out == "torchair failed: | line one | line two"
+    assert "\n" not in out
+
+
+def test_attach_plog_errors_without_error_lines_unchanged(monkeypatch):
+    """plog 无 [ERROR] 行（占位串/raw 行/空）：原样返回。"""
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        "ttk.utilities.plog.extract_plog_errors",
+        lambda max_lines=10: ["No plog file found, check ascend log manually"],
+    )
+    assert e2e_worker._attach_plog_errors("boom") == "boom"
+
+
+def test_attach_plog_errors_short_circuits_without_err(monkeypatch):
+    """err 为空（成功路径）：不触碰 plog，也不 sleep。"""
+    from unittest.mock import MagicMock
+
+    mocked = MagicMock(return_value=[])
+    monkeypatch.setattr("ttk.utilities.plog.extract_plog_errors", mocked)
+    assert e2e_worker._attach_plog_errors(None) is None
+    mocked.assert_not_called()
+
+
+def test_attach_plog_errors_extract_failure_unchanged(monkeypatch):
+    """plog 提取异常（读取失败）：原样返回，不放大失败。"""
+    import time
+
+    def boom(max_lines=10):
+        raise OSError("plog unreadable")
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.setattr("ttk.utilities.plog.extract_plog_errors", boom)
+    assert e2e_worker._attach_plog_errors("boom") == "boom"

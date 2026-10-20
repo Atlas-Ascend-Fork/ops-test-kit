@@ -592,3 +592,28 @@ class TestCustomCompareEndToEnd:
 
         assert return_struct.eager_precision == "COMPARE_FAILURE"
         assert return_struct.precision_status == "FAIL"
+
+
+class TestEvaluateGraphPrecisionFailure:
+    """evaluate_graph_precision 空 nps 失败行：图执行 err 拼进 GRAPH_EXEC_FAILURE 落列。"""
+
+    @staticmethod
+    def _run(mode, err_msg=None):
+        from ttk.core_modules.framework_api import compare as prof_module
+        from ttk.core_modules.framework_api.result import FrameworkApiReturnStructure
+
+        return_struct = FrameworkApiReturnStructure()
+        prof_module.evaluate_graph_precision(MagicMock(), [], [], None, None, return_struct, mode, err_msg=err_msg)
+        return return_struct
+
+    def test_err_msg_appended_to_graph_exec_failure(self):
+        """有 err：图执行异常描述随 GRAPH_EXEC_FAILURE 写回对应模式列。"""
+        return_struct = self._run("aclgraph", err_msg="Graph aclgraph execution failed: boom")
+        assert return_struct.graph_aclgraph_precision == "GRAPH_EXEC_FAILURE: Graph aclgraph execution failed: boom"
+        assert return_struct.precision_status == "FAIL"
+
+    def test_no_err_msg_keeps_legacy_string(self):
+        """无 err（历史路径/skip）：保持原固定串，不产生 None 拼接。"""
+        return_struct = self._run("static")
+        assert return_struct.graph_cst_precision == "GRAPH_EXEC_FAILURE"
+        assert return_struct.precision_status == "FAIL"

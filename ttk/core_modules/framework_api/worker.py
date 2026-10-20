@@ -301,7 +301,7 @@ def run(testcase, device_grant_events, device_granted_indices, dev_id, is_multi_
             )
     except Exception as e:
         logging.error(f"[{testcase.testcase_name}] Error: {e}", exc_info=True)
-        return_struct.eager_precision = str(e)
+        return_struct.eager_precision = _attach_plog_errors(str(e))
         return_struct.precision_status = "FAIL"
         _profiling_end_print(testcase, return_struct, switches=switches)
 
@@ -1001,6 +1001,46 @@ def _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_i
     )
 
 
+def _attach_plog_errors(err_msg):
+    """异常消息落 CSV 列前拼接 plog 报错并折叠为单行。
+
+    多行异常按行折成 " | "（CSV 单元格不能带换行）。plog 按本进程 pid
+    取文件（worker 与 CANN 同进程），提取前 sleep 0.5s 等落盘，只取
+    [ERROR] 行。plog 无 [ERROR] 行或读取失败时，返回折叠后的原消息。
+    """
+    if not err_msg:
+        return err_msg
+    one_line_err = " | ".join(line.strip() for line in err_msg.splitlines() if line.strip())
+    try:
+        import time
+
+        from ttk.utilities.plog import extract_plog_errors
+
+        time.sleep(0.5)
+        error_lines = [line.strip() for line in extract_plog_errors(max_lines=10) if "[ERROR]" in line and line.strip()]
+    except Exception:
+        return one_line_err
+    if not error_lines:
+        return one_line_err
+    return f"{one_line_err} | plog: {' | '.join(error_lines)}"
+
+
+def _run_graph_phase(mode_label, graph_fn, *args, **kwargs):
+    """三种图模式（cst/dyn/aclgraph）的统一执行入口。
+
+    返回 4 元组 (nps, perf, det_status, err_msg)。执行器抛出的异常在这里
+    转成该模式的失败结果，不再向上抛——err_msg 携带异常与 plog（见
+    _attach_plog_errors），最终进结果 CSV 的 graph_<mode>_precision 列，
+    其余图模式照常执行。
+    """
+    try:
+        nps, perf, det_status, err = graph_fn(*args, **kwargs)
+        return nps, perf, det_status, _attach_plog_errors(err)
+    except Exception as exc:
+        logging.error(f"Graph {mode_label} execution failed: {exc}", exc_info=True)
+        return [], None, None, _attach_plog_errors(f"Graph {mode_label} execution failed: {exc}")
+
+
 def _execute_phases(
     testcase,
     backend,
@@ -1038,6 +1078,9 @@ def _execute_phases(
     graph_cst_det = None
     graph_dyn_det = None
     graph_aclgraph_det = None
+    graph_aclgraph_err = None
+    graph_cst_err = None
+    graph_dyn_err = None
     with DeviceLock(
         process_ctx,
         dev_id,
@@ -1070,7 +1113,9 @@ def _execute_phases(
             graph_fn = adapter.run_graph
             if getattr(switches, "aclgraph_enabled", False):
                 process_ctx.notify_status("OnGraphAclgraph")
-                graph_aclgraph_nps, graph_aclgraph_perf, graph_aclgraph_det = graph_fn(
+                graph_aclgraph_nps, graph_aclgraph_perf, graph_aclgraph_det, graph_aclgraph_err = _run_graph_phase(
+                    "aclgraph",
+                    graph_fn,
                     testcase,
                     backend,
                     dev_id,
@@ -1086,7 +1131,9 @@ def _execute_phases(
                 )
             if switches.cst_switches.enabled:
                 process_ctx.notify_status("OnGraphCst")
-                graph_cst_nps, graph_cst_perf, graph_cst_det = graph_fn(
+                graph_cst_nps, graph_cst_perf, graph_cst_det, graph_cst_err = _run_graph_phase(
+                    "static",
+                    graph_fn,
                     testcase,
                     backend,
                     dev_id,
@@ -1101,7 +1148,9 @@ def _execute_phases(
                 )
             if switches.dyn_switches.enabled:
                 process_ctx.notify_status("OnGraphDyn")
-                graph_dyn_nps, graph_dyn_perf, graph_dyn_det = graph_fn(
+                graph_dyn_nps, graph_dyn_perf, graph_dyn_det, graph_dyn_err = _run_graph_phase(
+                    "dynamic",
+                    graph_fn,
                     testcase,
                     backend,
                     dev_id,
@@ -1131,6 +1180,9 @@ def _execute_phases(
         graph_dyn_perf=graph_dyn_perf,
         graph_aclgraph_nps=graph_aclgraph_nps,
         graph_aclgraph_perf=graph_aclgraph_perf,
+        graph_aclgraph_err=graph_aclgraph_err,
+        graph_cst_err=graph_cst_err,
+        graph_dyn_err=graph_dyn_err,
     )
 
 
@@ -1414,6 +1466,7 @@ def _evaluate_precision(
                 "aclgraph",
                 outputs.graph_aclgraph_perf,
                 third_parties,
+                err_msg=outputs.graph_aclgraph_err,
             )
         if switches.cst_switches.enabled:
             evaluate_graph_precision(
@@ -1426,6 +1479,7 @@ def _evaluate_precision(
                 "static",
                 outputs.graph_cst_perf,
                 third_parties,
+                err_msg=outputs.graph_cst_err,
             )
         if switches.dyn_switches.enabled:
             evaluate_graph_precision(
@@ -1438,6 +1492,7 @@ def _evaluate_precision(
                 "dynamic",
                 outputs.graph_dyn_perf,
                 third_parties,
+                err_msg=outputs.graph_dyn_err,
             )
 
     _profiling_end_print(testcase, return_struct, golden_nps, switches)

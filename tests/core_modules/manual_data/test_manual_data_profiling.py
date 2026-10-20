@@ -131,7 +131,7 @@ class _NoOpAdapter:
         return False
 
     def run_graph(self, *args, **kwargs):
-        return [], None, None
+        return [], None, None, None
 
 
 def _no_op_adapter():

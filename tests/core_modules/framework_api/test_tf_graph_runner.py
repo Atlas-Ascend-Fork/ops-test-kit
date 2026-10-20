@@ -108,7 +108,7 @@ def test_no_output_mutable_readback_pinned_to_phase1(tmp_path, monkeypatch):
     )
     raw_inputs = [np.zeros((), dtype=np.float32)]
 
-    result_nps, perf, det_status = execute_tf_graph(
+    result_nps, perf, det_status, _err = execute_tf_graph(
         tc,
         _FakeBackend(),
         0,
@@ -157,7 +157,7 @@ def test_output_bearing_result_from_last_run(tmp_path, monkeypatch):
     )
     raw_inputs = [np.ones(3, dtype=np.float32)]
 
-    result_nps, perf, det_status = execute_tf_graph(
+    result_nps, perf, det_status, _err = execute_tf_graph(
         tc,
         _FakeBackend(),
         0,
@@ -202,7 +202,7 @@ def test_unmappable_dtype_fails_leg(tmp_path, monkeypatch):
     )
     raw_inputs = [np.ones(3, dtype=np.float32)]
 
-    result_nps, perf, det_status = execute_tf_graph(
+    result_nps, perf, det_status, _err = execute_tf_graph(
         tc,
         _FakeBackend(),
         0,
@@ -217,6 +217,9 @@ def test_unmappable_dtype_fails_leg(tmp_path, monkeypatch):
     )
 
     assert (result_nps, perf, det_status) == ([], None, None)
+    assert _err is not None
+    assert "TF graph static execution failed" in _err
+    assert "not_a_dtype" in _err
     assert profiler.windows == 0
 
 

@@ -417,7 +417,8 @@ def test_tf_graph_rejects_preprocess_tensor_materialization(monkeypatch, caplog)
         False,
     )
 
-    assert result == ([], None, None)
+    assert result[:3] == ([], None, None)
+    assert "npu_preprocess tensor materialization" in (result[3] or "")
     assert "TF graph mode does not support npu_preprocess tensor materialization" in caplog.text
 
 

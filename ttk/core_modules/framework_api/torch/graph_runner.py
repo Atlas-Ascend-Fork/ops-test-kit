@@ -412,11 +412,12 @@ def execute_graph(
         dynamic: True for dynamic shape graph, False for static shape graph
 
     Returns:
-        (list of numpy arrays, ProfileResult, det_status) on success, or ([], None, None) on failure
+        (nps, ProfileResult, det_status, err_msg)：执行失败时 nps=[]、
+        err_msg 带异常描述；成功或跳过时 err_msg 为 None。
     """
     if not backend.is_npu():
         logging.warning("Graph mode only supports NPU backend, skipping")
-        return [], None, None
+        return [], None, None, None
 
     if deterministic_level is None:
         deterministic_level = resolve_deterministic_level(switches, testcase)
@@ -489,7 +490,7 @@ def execute_graph(
         npu_backend = _get_npu_backend_aclgraph() if is_aclgraph else _get_npu_backend()
     except Exception as e:
         logging.error(f"Failed to get TorchAir NPU backend: {e}")
-        return [], None, None
+        return [], None, None, f"Failed to get TorchAir NPU backend: {e}"
 
     use_fullgraph = bool(switches.fullgraph)
     try:
@@ -533,7 +534,7 @@ def execute_graph(
 
     except Exception as e:
         logging.error(f"Graph {mode_str} execution failed: {e}", exc_info=True)
-        return [], None, None
+        return [], None, None, f"Graph {mode_str} execution failed: {e}"
 
     if result_nps and inplace_input_indexes and not custom_cls:
         for idx in sorted(inplace_input_indexes):
@@ -541,7 +542,7 @@ def execute_graph(
                 inplace_np = backend.to_numpy(args[idx].detach().clone())
                 result_nps.append(inplace_np)
 
-    return result_nps, perf, det_status
+    return result_nps, perf, det_status, None
 
 
 # ── 图网络构造与执行 ────────────────────────────────────────────

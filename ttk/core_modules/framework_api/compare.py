@@ -198,16 +198,29 @@ def evaluate_eager_precision(
 
 
 def evaluate_graph_precision(
-    testcase, raw_inputs, graph_nps, golden_nps, switches, return_struct, mode, perf=None, third_parties=None
+    testcase,
+    raw_inputs,
+    graph_nps,
+    golden_nps,
+    switches,
+    return_struct,
+    mode,
+    perf=None,
+    third_parties=None,
+    err_msg=None,
 ):
     """Compare graph mode results against golden.
 
     Args:
-        mode: "static" or "dynamic"
+        mode: "static", "dynamic" or "aclgraph"
         perf: ProfileResult from graph execution (may be None)
+        err_msg: 图执行失败的异常描述（run_graph 4 元组第 4 位）。graph_nps
+            为空时拼成 `GRAPH_EXEC_FAILURE: {err_msg}` 落列；为空则保持
+            原固定串 `GRAPH_EXEC_FAILURE`。
     """
     if not graph_nps:
-        return_struct.construct("GRAPH_EXEC_FAILURE", "FAIL", None, mode=mode)
+        precision_str = f"GRAPH_EXEC_FAILURE: {err_msg}" if err_msg else "GRAPH_EXEC_FAILURE"
+        return_struct.construct(precision_str, "FAIL", None, mode=mode)
         return
 
     output_dtypes = tuple(str(g.dtype) if g is not None else None for g in graph_nps)
