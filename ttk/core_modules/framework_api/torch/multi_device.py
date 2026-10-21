@@ -883,8 +883,8 @@ def _load_plan(plan_path):
     return plan, int(plan.get("proc_timeout", 3600)), int(plan.get("deterministic_level", 0) or 0)
 
 
-def _init_distributed(rank, world_size, port, timeout, deterministic_level):
-    torch.npu.set_device(rank)
+def _init_distributed(rank, world_size, port, timeout, deterministic_level, device_id):
+    torch.npu.set_device(device_id)
     if deterministic_level:
         torch_npu.npu.set_deterministic_level(deterministic_level)
     dist.init_process_group(
@@ -995,7 +995,7 @@ def _np_to_torch(np_arr, tensor_dtypes, index):
     return torch.from_numpy(np_arr)
 
 
-def _materialize_inputs(my_inputs_np, tensor_dtypes, rank):
+def _materialize_inputs(my_inputs_np, tensor_dtypes, device_id):
     """CPU copy (float32 for golden) and NPU copy (original dtype for API call)."""
 
     def is_none_input(value):
@@ -1006,7 +1006,7 @@ def _materialize_inputs(my_inputs_np, tensor_dtypes, rank):
         for i, x in enumerate(my_inputs_np)
     ]
     dev_tensors = [
-        None if is_none_input(x) else _np_to_torch(x.copy(), tensor_dtypes, i).npu(rank)
+        None if is_none_input(x) else _np_to_torch(x.copy(), tensor_dtypes, i).npu(device_id)
         for i, x in enumerate(my_inputs_np)
     ]
     return cpu_inputs_for_rank, dev_tensors
@@ -1151,7 +1151,7 @@ def _share_inputs_via_files(rank, world_size, result_path, cpu_inputs_for_rank, 
         os.remove(rank_file)
 
 
-def _gather_cross_rank_inputs(api_name, rank, world_size, result_path, cpu_inputs_for_rank):
+def _gather_cross_rank_inputs(api_name, rank, world_size, result_path, cpu_inputs_for_rank, device_id):
     """Gather all ranks' CPU inputs to every rank via dist (data transport only, NOT golden).
 
     Use torch_npu dist all_gather to move CPU inputs across cards.
@@ -1171,7 +1171,7 @@ def _gather_cross_rank_inputs(api_name, rank, world_size, result_path, cpu_input
             continue
         t_cpu = cpu_inputs_for_rank[tensor_idx]
         # Move to NPU for all_gather transport, then back to CPU for golden
-        t_npu = t_cpu.npu(rank)
+        t_npu = t_cpu.npu(device_id)
         gather_list = [torch.empty_like(t_npu) for _ in range(world_size)]
         dist.all_gather(gather_list, t_npu)
         for r in range(world_size):
@@ -1317,10 +1317,12 @@ def _run_graph_phase(
         np.savez(result_path, **save_arrays)
 
 
-def worker(rank, world_size, port, input_path, plan_path, result_path, error_path, graph_mode=""):
+def worker(rank, world_size, port, input_path, plan_path, result_path, error_path, graph_mode="", device_ids=None):
     plan, timeout, deterministic_level = _load_plan(plan_path)
+    # Rank is logical; the selected physical device may have a different ID.
+    device_id = rank if device_ids is None else int(device_ids[rank])
     try:
-        hcomm = _init_distributed(rank, world_size, port, timeout, deterministic_level)
+        hcomm = _init_distributed(rank, world_size, port, timeout, deterministic_level, device_id)
         api_name, attrs, golden_disabled, remark, tensor_dtypes = _parse_plan(plan)
         moe_hcomm = _create_moe_group(api_name, rank, world_size)
 
@@ -1328,7 +1330,7 @@ def worker(rank, world_size, port, input_path, plan_path, result_path, error_pat
         attrs = _setup_dual_ep_tp_groups(api_name, rank, world_size, attrs)
 
         my_inputs_np = _load_rank_inputs(input_path, rank)
-        cpu_inputs_for_rank, dev_tensors = _materialize_inputs(my_inputs_np, tensor_dtypes, rank)
+        cpu_inputs_for_rank, dev_tensors = _materialize_inputs(my_inputs_np, tensor_dtypes, device_id)
 
         attrs = _setup_moe_attrs(api_name, rank, world_size, moe_hcomm, attrs)
 
@@ -1342,7 +1344,7 @@ def worker(rank, world_size, port, input_path, plan_path, result_path, error_pat
             attrs = dict(attrs)
             attrs["_rank"] = rank
         result = _call_api(api_name, dev_tensors, hcomm, world_size, attrs)
-        torch.npu.synchronize(rank)
+        torch.npu.synchronize(device_id)
 
         if result is None:
             _save_executed_pass(rank, world_size, result_path)
@@ -1354,7 +1356,9 @@ def worker(rank, world_size, port, input_path, plan_path, result_path, error_pat
             _save_executed_pass(rank, world_size, result_path)
             return
 
-        cpu_inputs_per_rank = _gather_cross_rank_inputs(api_name, rank, world_size, result_path, cpu_inputs_for_rank)
+        cpu_inputs_per_rank = _gather_cross_rank_inputs(
+            api_name, rank, world_size, result_path, cpu_inputs_for_rank, device_id
+        )
 
         # Pure CPU golden (each golden function references ACLNN hccl_dispatcher.py logic)
         goldens = _compute_golden(
@@ -1482,6 +1486,7 @@ if __name__ == "__main__":
             result_path,
             error_path,
             graph_mode,
+            device_ids,
         )
         sys.exit(1 if os.path.exists(error_path) else 0)
 

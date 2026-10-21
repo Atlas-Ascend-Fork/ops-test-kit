@@ -91,8 +91,9 @@ def _apply_devices(sw, spec, dev_count=None):
     count = dev_count if dev_count is not None else max(picks) + 1
     # available 集 → 数量 + 黑名单（全量 - available；_initialize_device_lock 唯一消费面）
     sw.device_count = count
-    # 正选点名语义：越界物理卡数按配置错误报错，不做压缩
-    sw.device_count_is_limit = False
+    # 与 --dev 组合：N 为池上限，保留压缩语义（看护脚本随意设大 --dev 不受影响）；
+    # 纯 --devices 正选：点名语义，越界物理卡数按配置错误报错，不做压缩。
+    sw.device_count_is_limit = dev_count is not None
     sw.device_blacklist = tuple(i for i in range(count) if i not in picks)
 
 

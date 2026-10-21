@@ -122,6 +122,13 @@ class HeartbeatManager:
                 self._process.exitcode,
             )
             self._process = None
+            # No process can refresh this snapshot; retaining it advertises a dead endpoint as alive.
+            try:
+                os.unlink(self.health_path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning("Failed to remove stale health file %s: %s", self.health_path, e)
             return
         log.warning(
             "HB subprocess died (exitcode=%s), respawning (attempt %d/%d)",

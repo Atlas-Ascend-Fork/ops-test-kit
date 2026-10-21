@@ -512,6 +512,7 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
 
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length > 10 * 1024 * 1024 * 1024:
+            self.close_connection = True
             self._send_json(413, {"error": "sync body too large (max 10GB)"})
             return
         body = self.rfile.read(content_length)

@@ -113,7 +113,6 @@ class SWITCHES:
         "proc_no_reuse",
         "no_memory_check",
         "warmup",
-        "tiling_run_time",
         "kernel_meta",
         "compile_options",
         "op_impl_mode",
@@ -136,8 +135,6 @@ class SWITCHES:
         "progress_output",
         "validate_only",
         "deterministic_level",
-        "_run_time",
-        "_compile_only",
         # 精度与数据
         "input_distribution",
         "golden_mode",
@@ -167,6 +164,12 @@ class SWITCHES:
         "sim_report",
         "sim_cores",
         "sim_object_file",
+        # 私有槽：property run_time / tiling_run_time / compile_only 的存储——
+        # 公开读写走 property：run_time/tiling_run_time 默认值回退+正数校验，
+        # compile_only 三模式 prof 联动。
+        "_run_time",
+        "_tiling_run_time",
+        "_compile_only",
     ]
 
     def __init__(self):
@@ -201,6 +204,16 @@ class SWITCHES:
         if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
             raise ValueError(f"run_time must be a positive int, got {val!r}")
         self._run_time = val
+
+    @property
+    def tiling_run_time(self) -> int:
+        return self._tiling_run_time or 3
+
+    @tiling_run_time.setter
+    def tiling_run_time(self, val):
+        if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+            raise ValueError(f"tiling_run_time must be a positive int, got {val!r}")
+        self._tiling_run_time = val
 
     @property
     def compile_only(self) -> bool:
@@ -267,7 +280,6 @@ class SWITCHES:
         self.proc_no_reuse = False
         self.no_memory_check = False  # --no-memory-check：跳过 host 内存闸门（宽松版，process/memory_gate）
         self.warmup = True
-        self.tiling_run_time = 3
         self.kernel_meta = os.path.join(self.root_path, "kernel_meta")
         self.compile_options: dict = {}
         self.op_impl_mode: Optional[str] = None
@@ -291,9 +303,10 @@ class SWITCHES:
         self.progress_output = None
         self.validate_only: bool = False  # --validate 仅解析校验用例，不执行
         self.deterministic_level: int = 0  # 确定性等级，kernel/aclnn/geir/e2e 全链消费
-        # 私有槽（property run_time / compile_only 的存储——公开读写走 property：
-        # run_time 有默认值回退+校验，compile_only 有三模式 prof 联动）
+        # 私有槽（property run_time / tiling_run_time / compile_only 的存储——公开读写走 property：
+        # run_time/tiling_run_time 有默认值回退+正数校验，compile_only 有三模式 prof 联动）
         self._run_time: Optional[int] = None
+        self._tiling_run_time: Optional[int] = None
         self._compile_only: bool = False
 
     def _init_precision(self):

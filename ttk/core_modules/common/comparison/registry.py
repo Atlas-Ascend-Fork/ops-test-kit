@@ -262,8 +262,10 @@ class ComparisonBase(metaclass=ABCMeta):
 
     @staticmethod
     def _fmt_log_value(value, spec=":<14.18f") -> str:
-        """差异日志数值格式化：复数走 str 保留虚部（float() 丢虚部并告警），其余按 spec 定宽。"""
+        """复数和整数走 str 保留原值，避免 float() 丢失虚部或整数精度，其余按 spec 定宽。"""
         if isinstance(value, (complex, np.complexfloating)):
+            return str(value)
+        if isinstance(value, (int, np.integer)):
             return str(value)
         return format(float(value), spec)
 

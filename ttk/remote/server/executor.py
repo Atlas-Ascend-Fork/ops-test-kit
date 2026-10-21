@@ -672,6 +672,11 @@ def _to_numpy_pair(v, provider):
     dt = a.dtype.name
     if "bfloat16" in dt or "bf16" in dt:
         return np.ascontiguousarray(a).view(np.int16), "bfloat16"
+    if dt in _FLOAT8_WIRE_DTYPES:
+        # NumPy/TF float8 dtypes use a non-standard ``<f1`` descriptor that
+        # NumPy cannot read back from NPZ. Keep the semantic dtype in schema
+        # and serialize only the raw byte representation, like torch outputs.
+        return np.ascontiguousarray(a).reshape(a.shape).view(np.uint8), dt
     return a, dt
 
 
