@@ -25,7 +25,7 @@ import numpy
 
 from ....utilities import is_4bit_dtype, resolve_numpy_dtypes
 from ....utilities.data import constant_array
-from ....utilities.dtypes import numpy_to_torch_tensor, torch_to_numpy_tensor
+from ....utilities.dtypes import dtype_to_name, numpy_to_torch_tensor, torch_to_numpy_tensor
 from .formatter import _CUSTOM_NUMPY_DTYPES, DumpLoadError, get_formatter
 
 SUPPORTED_MANUAL_DATA_FORMATS = ("bin", "npy", "pt")
@@ -442,7 +442,7 @@ def _saved_array_shape(shape) -> Tuple[int, ...]:
 
 def physical_array_spec(logical_dtype, logical_shape) -> Tuple[str, Tuple[int, ...]]:
     """Return the dtype/shape of the numpy backing array saved by TTK."""
-    dtype_name = getattr(logical_dtype, "name", str(logical_dtype))
+    dtype_name = dtype_to_name(logical_dtype)
     shape = tuple(int(dimension) for dimension in logical_shape)
     if dtype_name == "complex32":
         return "float16", shape + (2,)
