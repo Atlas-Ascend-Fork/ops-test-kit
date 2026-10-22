@@ -31,10 +31,12 @@ import os
 from ttk.switches import get_global_storage
 
 from ...utilities import (
+    get,
     nest_by_distribution,
     render_table,
     resolve_numpy_dtypes,
 )
+from ...utilities.dtypes import DTYPE_MAP
 from ..common.comparison.batch_consistency import assemble_batch_summary
 from ..common.comparison.resolve import needs_promote_golden
 from ..common.comparison.resolve import resolve_tolerance as _resolve_tolerance
@@ -53,6 +55,7 @@ from ..common.process import DeviceLock, MultiDeviceLock, gate_host_memory, proc
 from ..common.result import format_xpu_metrics
 from ..common.testcase.batch import resolve_deterministic_level
 from ..common.testcase.input_data import reseed_per_testcase
+from ..common.testcase.tensor import make_storage_view
 from .compare import Comparator
 from .execute import execute_on_device
 from .golden import GoldenGenerator
@@ -133,14 +136,57 @@ def prof_end(context, print_content):
     return return_structure
 
 
-def _aclnn_xpu_inputs(context: TestcaseAclnn) -> list:
-    """np_storages re-nested, pure outputs filtered → top-level input slots for XPU.
+def _xpu_view_arrays(context: TestcaseAclnn) -> list:
+    """np_storages → XPU 派发数组：按视图声明切出逻辑张量。
 
-    np_storages is flat (one per flat tensor index). Re-nest by tensor_list_dist
-    to get top-level slots, then skip pure_output_indexes (inplace outputs kept).
+    非连续输入下 storage 与逻辑视图不同构（broadcast 连元素数都不同），直接
+    派发会让三方参考按存储形态计算，cross_check 无有效结论。统一走
+    make_storage_view 重建视图，连续槽只是多一层零拷贝 as_strided；不设"连续
+    保持原数组"分支——flat_view_stride/offset 对非 None view_shape 必返回有效
+    几何，该条件恒真。声明几何无法重建时告警并回退存储形态，不让单个槽位
+    拖垮整条用例（与 XPU 通路其余"warning + 降级"语义一致）。
     """
+    flat_shapes = context.flat_tensor_view_shapes
+    flat_dtypes = context.flat_tensor_dtypes or ()
+    arrays = []
+    for idx, storage in enumerate(context.np_storages):
+        if storage is None:
+            arrays.append(None)
+            continue
+        dtype = get(flat_dtypes, idx)
+        if dtype and DTYPE_MAP.get(dtype, dtype) == "complex32":
+            # complex32 存储是 fp16(shape+[2])，numpy 切不了逻辑视图，保持存储
+            # 直通（声明非连续的 complex32 槽也按存储派发，已知局限，同 E2E）
+            arrays.append(storage)
+            continue
+        view_shape = get(flat_shapes, idx)
+        v_stride = context.flat_view_stride(idx)
+        v_offset = context.flat_view_offset(idx)
+        try:
+            arrays.append(make_storage_view(storage, view_shape, v_stride, v_offset))
+        except (TypeError, ValueError) as exc:
+            logging.warning(
+                "[%s] slot %d xpu view rebuild failed (view=%s stride=%s offset=%s): %s; fallback to storage",
+                context.testcase_name,
+                idx,
+                view_shape,
+                v_stride,
+                v_offset,
+                exc,
+            )
+            arrays.append(storage)
+    return arrays
+
+
+def _aclnn_xpu_inputs(context: TestcaseAclnn) -> list:
+    """视图派发数组 re-nested，剔纯输出 → XPU 顶层输入槽。
+
+    flat（每 flat 张量一个）按 tensor_list_dist 重嵌，剔除 pure_output_indexes
+    （inplace 输出按输入参与）。数据源为 _xpu_view_arrays 的逻辑视图。
+    """
+    arrays = _xpu_view_arrays(context)
     dist = context.tensor_list_dist
-    nested = nest_by_distribution(list(context.np_storages), dist) if dist else list(context.np_storages)
+    nested = nest_by_distribution(list(arrays), dist) if dist else list(arrays)
     inputs = []
     real_idx = 0
     for slot in nested:
