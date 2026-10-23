@@ -77,8 +77,12 @@ def _parse_params_from_signature(sig: str) -> Optional[List[ParamInfo]]:
             first = tokens[0]
             if ":" in first:
                 name = first.split(":")[0]
-                type_hint = first.split(":", 1)[1].strip() or tokens[1]
+                type_hint = main_part.split(":", 1)[1].strip()
                 type_hint = _normalize_doc_type(type_hint)
+                if not type_hint:
+                    type_hint = _infer_type_from_value(default) if default is not None else ""
+                    if not type_hint or type_hint == "Optional[Tensor]":
+                        type_hint = _infer_type_from_name(name)
             else:
                 type_hint = tokens[0]
                 name = tokens[-1].rstrip("?)")
@@ -134,21 +138,51 @@ def _parse_params_from_signature(sig: str) -> Optional[List[ParamInfo]]:
     return params if params else None
 
 
+def _normalize_union_members(members_str: str, exclude_tensors: bool) -> str:
+    """联合成员归一：未知名（_complex 等）剔除、去重保序、'|' 拼接。
+
+    exclude_tensors=True 用于 Union[...]（Tensor 重载成员由 TypeError 解析覆盖）；
+    False 用于 '|' 联合——它是参数自身的显式注解，Tensor 成员保留。
+    """
+    tensor_members = {"Tensor", "tuple of Tensors", "list of Tensors", "List[Tensor]", "Tensor[]"}
+    members = []
+    for member in split_by_comma(members_str):
+        member_s = member.strip()
+        # 归一化前按原文排除 Tensor 类成员：Tuple[Tensor, ...] 经 _normalize_args_type
+        # 会退化成 tuple of ints，黑名单拦不住
+        if exclude_tensors and "Tensor" in member_s:
+            continue
+        normalized = _normalize_args_type(member_s)
+        if not normalized or normalized in members:
+            continue
+        if exclude_tensors and normalized in tensor_members:
+            continue
+        members.append(normalized)
+    return "|".join(members) if members else ""
+
+
 def _normalize_doc_type(type_str: str) -> str:
     """Normalize type annotations from docstrings.
 
-    Examples: Tensor, Optional[Tensor], List[Tensor], int, float, bool, str
+    Examples: Tensor, Optional[Tensor], List[Tensor], Union[Number, Tensor], int, float, bool, str
     """
     type_str = type_str.strip()
     if not type_str:
         return ""
+    none_stripped = re.sub(r"\s*\|\s*None\b\s*$", "", type_str).strip()
+    if none_stripped != type_str:
+        return _normalize_doc_type(none_stripped)
     if type_str.startswith("Optional["):
         inner = type_str[len("Optional[") : -1]
-        return inner
+        return _normalize_doc_type(inner)
     if type_str.startswith("List["):
         inner = type_str[len("List[") : -1]
-        if inner == "Tensor":
-            return "List[Tensor]"
+        normalized_inner = _normalize_doc_type(inner)
+        return f"List[{normalized_inner}]" if normalized_inner else ""
+    if type_str.startswith("Union[") and type_str.endswith("]"):
+        return _normalize_union_members(type_str[len("Union[") : -1], exclude_tensors=True)
+    if "|" in type_str:
+        return _normalize_union_members(type_str.replace("|", ","), exclude_tensors=False)
     return type_str
 
 

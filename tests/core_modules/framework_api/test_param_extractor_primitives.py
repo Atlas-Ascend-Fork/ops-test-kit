@@ -120,20 +120,56 @@ class TestParseSignature:
     @pytest.mark.parametrize(
         ("sig", "expected"),
         [
-            # (签名串, [(参数名, is_optional), ...])
-            ("Tensor input, int dim=-1, bool keepdim=False", [("input", False), ("dim", True), ("keepdim", True)]),
-            ("input: Tensor, *, weight: Tensor, out: Tensor", [("input", False), ("weight", False), ("out", False)]),
-            ("input: Tensor, *, out: Optional[Tensor]", [("input", False), ("out", True)]),
-            ("a: int | None, b: Optional[str]", [("a", True), ("b", True)]),
-            ("input: Tensor, *, alpha: Number = 1", [("input", False), ("alpha", True)]),
+            # (签名串, [(参数名, 类型, 是否可选), ...])
+            (
+                "Tensor input, int dim=-1, bool keepdim=False",
+                [("input", "Tensor", False), ("dim", "int", True), ("keepdim", "bool", True)],
+            ),
+            (
+                "input: Tensor, *, weight: Tensor, out: Tensor",
+                [("input", "Tensor", False), ("weight", "Tensor", False), ("out", "Tensor", False)],
+            ),
+            ("input: Tensor, *, out: Optional[Tensor]", [("input", "Tensor", False), ("out", "Tensor", True)]),
+            ("a: int | None, b: Optional[str]", [("a", "int", True), ("b", "str", True)]),
+            ("input: Tensor, *, alpha: Number = 1", [("input", "Tensor", False), ("alpha", "Number", True)]),
+            # torch 2.14 多词括号注解：冒号后取整段归一，不按空白截断
+            ("*, alpha: Union[Number, _complex] = 1", [("alpha", "Number", True)]),
+            ("*, alpha: Union[Number, Tensor] = 1", [("alpha", "Number", True)]),
+            ("*, alpha: Union[Number, bool, int] = 1", [("alpha", "Number|bool|int", True)]),
+            ("*, dim: Union[int, SymInt] = 0", [("dim", "int", True)]),
+            ("*, out: Optional[Union[Number, Tensor]] = None", [("out", "Number", True)]),
+            # 泛化形态：'|' 联合、Optional[Union[容器]] 嵌套、List 包装保留、全滤空回退名字推断
+            ("*, initial: Number | _complex | None = 1", [("initial", "Number", True)]),
+            ("*, lengths: Tensor | None = None", [("lengths", "Tensor", True)]),
+            ("*, dim: Optional[Union[int, List[int]]] = 0", [("dim", "int|tuple of ints", True)]),
+            ("*, tensors: Union[Tuple[Tensor, ...], List[Tensor]] = None", [("tensors", "tuple of Tensors", True)]),
+            ("*, pad: List[int] = None", [("pad", "List[int]", True)]),
+            ("*, out: List[Optional[Tensor]] = None", [("out", "List[Tensor]", True)]),
         ],
-        ids=["typed-defaults", "kw-only-required", "kw-only-Optional", "union-None", "kw-only-default"],
+        ids=[
+            "typed-defaults",
+            "kw-only-required",
+            "kw-only-Optional",
+            "union-None",
+            "kw-only-default",
+            "union-number-complex",
+            "union-number-tensor",
+            "union-multi-scalar",
+            "union-int-symint",
+            "optional-union",
+            "pipe-union-number-complex",
+            "pipe-union-tensor",
+            "optional-union-list",
+            "union-tensor-tuple-all-filtered",
+            "list-int-preserved",
+            "list-optional-tensor",
+        ],
     )
     def test_typed_and_optional_params(self, sig, expected):
         """带类型/默认值签名解析：'*' 只标记 keyword-only 传参方式、不改变必填性，
-        可选仅由显式默认值或 Optional/'| None' 标记决定。"""
+        可选仅由显式默认值或 Optional/'| None' 标记决定；多词括号注解取冒号后整段。"""
         params = _parse_params_from_signature(sig)
-        assert [(p.name, p.is_optional) for p in params] == expected
+        assert [(p.name, p.type, p.is_optional) for p in params] == expected
         if sig == "Tensor input, int dim=-1, bool keepdim=False":
             assert params[0].name == "input"
             assert params[0].type == "Tensor"
@@ -151,6 +187,14 @@ class TestParseSignature:
         assert params[0].type == "Tensor"
         assert params[1].type == "int"
         assert params[2].type == "bool"
+
+    def test_torch214_index_add_signature(self):
+        """torch 2.14 docstring 首行完整签名（报错形态）：alpha 解析为 Number。"""
+        sig = "input: Tensor, dim: int, index: Tensor, source: Tensor, *, alpha: Union[Number, _complex] = 1, out: Optional[Tensor]"
+        params = _parse_params_from_signature(sig)
+        alpha = next(p for p in params if p.name == "alpha")
+        assert alpha.type == "Number"
+        assert alpha.default == "1"
 
 
 # == _infer_type_from_name ==================================================
