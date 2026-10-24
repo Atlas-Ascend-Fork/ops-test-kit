@@ -60,10 +60,10 @@ from .manual_data import (
 # load_csv_manual_case（尚未实现）。
 
 
-def resolve_manual_case(testcase, case_type: str, switches, before_load=None, require_goldens: bool = True):
+def resolve_manual_case(testcase, case_type: str, switches, notify_before_load=None, require_goldens: bool = True):
     """来源裁决：CLI 目录集命中 → 加载；未指定/全空 → None（正常生成）。worker 统一入口。"""
     return load_manual_data_case(
-        testcase, case_type, switches, before_load=before_load, require_goldens=require_goldens
+        testcase, case_type, switches, notify_before_load=notify_before_load, require_goldens=require_goldens
     )
 
 

@@ -200,9 +200,9 @@ def test_kernel_no_prof_dump_snapshots_input_and_stops_before_device(monkeypatch
 
     monkeypatch.setattr(profiling, "get_global_storage", lambda: switches)
     monkeypatch.setattr(profiling, "process_context", _process_context)
-    monkeypatch.setattr(profiling, "__apply_force_overrides", lambda *_: None)
-    monkeypatch.setattr(profiling, "__parse_dynamic_tiling_data", lambda *_: None)
-    monkeypatch.setattr(profiling, "__parse_binary_tiling_data", lambda *_: None)
+    monkeypatch.setattr(profiling, "_apply_force_overrides", lambda *_: None)
+    monkeypatch.setattr(profiling, "_parse_dynamic_tiling_data", lambda *_: None)
+    monkeypatch.setattr(profiling, "_parse_binary_tiling_data", lambda *_: None)
     monkeypatch.setattr(TestcaseKernel, "compile_failed", lambda *_: False)
     monkeypatch.setattr(profiling, "gen_input", generate_input)
     monkeypatch.setattr(profiling, "gen_output", generate_output)
@@ -250,9 +250,9 @@ def test_kernel_replay_keeps_store_intact_and_loads(monkeypatch, tmp_path):
 
     monkeypatch.setattr(profiling, "get_global_storage", lambda: switches)
     monkeypatch.setattr(profiling, "process_context", _process_context)
-    monkeypatch.setattr(profiling, "__apply_force_overrides", lambda *_: None)
-    monkeypatch.setattr(profiling, "__parse_dynamic_tiling_data", lambda *_: None)
-    monkeypatch.setattr(profiling, "__parse_binary_tiling_data", lambda *_: None)
+    monkeypatch.setattr(profiling, "_apply_force_overrides", lambda *_: None)
+    monkeypatch.setattr(profiling, "_parse_dynamic_tiling_data", lambda *_: None)
+    monkeypatch.setattr(profiling, "_parse_binary_tiling_data", lambda *_: None)
     monkeypatch.setattr(TestcaseKernel, "compile_failed", lambda *_: False)
     monkeypatch.setattr(profiling, "gen_input", generate_input)
     monkeypatch.setattr(profiling, "gen_output", generate_output)
@@ -263,7 +263,7 @@ def test_kernel_replay_keeps_store_intact_and_loads(monkeypatch, tmp_path):
 
     monkeypatch.setattr(profiling, "_dispatch_xpu", lambda *_, **__: XpuDispatch.ready((None, None, None)))
     monkeypatch.setattr(profiling, "_gen_workspaces", lambda *_: None)
-    monkeypatch.setattr(profiling, "_dump_prepared_data", lambda *_: None)
+    monkeypatch.setattr(profiling, "_dump_golden", lambda *_: None)
     monkeypatch.setattr(profiling, "_compare_and_finalize", lambda *_: object())
 
     profiling.run(case, {}, {}, 0)

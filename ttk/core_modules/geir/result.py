@@ -30,6 +30,10 @@ class GeirReturnStructure(ReturnStructureBase):
         "precision_metrics",
         "deterministic_status",
         "batch_consistency_id",
+        "golden_device_perf_us",
+        "golden_kernel_count",
+        "golden_kernel_details",
+        "golden_source",
     )
 
     def __init__(self):
@@ -45,6 +49,11 @@ class GeirReturnStructure(ReturnStructureBase):
         self.precision_metrics = {}
         self.deterministic_status = None
         self.batch_consistency_id = None
+        # golden-mode NPU：golden 执行侧性能（逐模式生成——末模式值覆盖前值）
+        self.golden_device_perf_us = None
+        self.golden_kernel_count = None
+        self.golden_kernel_details = None
+        self.golden_source = None
         # dl=3 batch 一致性：worker 切片哈希摘要（随 pipe 回传主进程，非 CSV 列——
         # cleanup 组装比对消费）
         self.batch_summary = None
@@ -67,12 +76,16 @@ class GeirReturnStructure(ReturnStructureBase):
             "precision_metrics",
             "deterministic_status",
             "batch_consistency_id",
+            "golden_device_perf_us",
+            "golden_kernel_count",
+            "golden_kernel_details",
+            "golden_source",
             "batch_summary",
             "log",
         )
 
     def construct(self, testcase, compare_result: Any, **kwargs) -> None:
-        """聚合抄写——GEIR 为直赋值式（_geir_run 逐模式写槽），无集中 construct。"""
+        """聚合抄写——GEIR 为直赋值式（_run_profile 逐模式写槽），无集中 construct。"""
 
     @staticmethod
     def get_title_indices():
@@ -102,6 +115,13 @@ class GeirReturnStructure(ReturnStructureBase):
                 data.append(self.deterministic_status)
             elif title == "batch_consistency_id":
                 data.append(self.batch_consistency_id)
+            elif title in (
+                "golden_device_perf_us",
+                "golden_kernel_count",
+                "golden_kernel_details",
+                "golden_source",
+            ):
+                data.append(getattr(self, title))
             elif title == "log":
                 data.append(self.log)
             else:

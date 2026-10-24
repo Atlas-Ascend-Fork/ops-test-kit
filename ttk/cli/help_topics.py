@@ -178,8 +178,9 @@ applies to: kernel / geir / aclnn / e2e
 
 load direction (default, running on device):
   directories holding dumped datasets; matching testcase data is
-  restored instead of being regenerated. Requires --golden-mode Enable
-  (reuses the stored golden); incompatible with --validate.
+  restored instead of being regenerated. Cannot be combined with
+  --golden-mode Disable (stored goldens would violate the SKIP verdict);
+  incompatible with --validate.
 
 dump direction (with --no-prof):
   --no-prof stops before device execution and writes a restorable

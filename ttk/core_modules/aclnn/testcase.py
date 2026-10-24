@@ -61,8 +61,6 @@ class TestcaseAclnn(ApiTestcaseBase):
     __slots__ = (
         # === aclnn-specific testcase configurations === #
         "output_inplace_indexes",
-        # scalar（scalar_dtypes/scalar_data_ranges 双模属性；scalars 槽表视图）
-        "_scalar_dtypes",
         # input attributes
         "attributes",
         "attributes1",
@@ -74,8 +72,6 @@ class TestcaseAclnn(ApiTestcaseBase):
         "attributes7",
         "attributes8",
         "attributes9",
-        # other help configuration
-        "_scalar_data_ranges",
         # specify dump file prefix
         "dump_file_prefix",
         # manual configurations
@@ -91,7 +87,16 @@ class TestcaseAclnn(ApiTestcaseBase):
         # torch.Tensor or sequence of torch.Tensor with strides & offsets.
         # （tensors/scalars 由 AoS 槽表属性提供）
         "golden_tensors",
-        # private
+        "golden_mode_override",
+        "xpu_metrics",
+        # golden-mode NPU（设备阶段执行 + 采集）
+        "golden_perf",
+        "golden_source",
+        # === 私有 === #
+        # scalar（scalar_dtypes/scalar_data_ranges 双模属性；scalars 槽表视图）
+        "_scalar_dtypes",
+        # other help configuration
+        "_scalar_data_ranges",
         "_output_dtypes",
         "_output_view_shapes",
         "_output_view_offsets",
@@ -104,8 +109,6 @@ class TestcaseAclnn(ApiTestcaseBase):
         "_scalar_slots",
         "_scalar_slots_from_declaration",
         "_scalars_written",
-        "golden_mode_override",
-        "xpu_metrics",
         "_multi_device_thread_contexts",
         "_multi_device_hccl_handles",
         # Host copies of dynamic inputs produced by npu_preprocess.  These are
@@ -170,8 +173,6 @@ class TestcaseAclnn(ApiTestcaseBase):
         super().__init__()
         # output properties
         self.output_inplace_indexes: Optional[tuple] = None
-        # scalar or scalarList dtype
-        self._scalar_dtypes: Optional[tuple] = None
         # attributes
         self.attributes: Optional[dict] = None
         self.attributes1 = None
@@ -183,8 +184,6 @@ class TestcaseAclnn(ApiTestcaseBase):
         self.attributes7 = None
         self.attributes8 = None
         self.attributes9 = None
-        # others
-        self._scalar_data_ranges = None
         # Manual controlled parameters
         self.dump_file_prefix = None
         self.manual_tensor_binaries: Optional[Tuple[str, ...]] = None
@@ -195,8 +194,16 @@ class TestcaseAclnn(ApiTestcaseBase):
         self.hccl_comms = None
         # End of testcase valid configurations
         self.golden_tensors = None
-        # Test Runtime Attributes
-        # private parameters
+        self.golden_mode_override = None
+        self.xpu_metrics = {}
+        # golden-mode NPU（设备阶段执行 + 采集）
+        self.golden_perf = None
+        self.golden_source = None
+        # === 私有 === #
+        # scalar or scalarList dtype
+        self._scalar_dtypes: Optional[tuple] = None
+        # others
+        self._scalar_data_ranges = None
         self._output_dtypes: Optional[tuple] = None
         self._output_view_shapes: Optional[tuple] = None
         self._output_view_offsets: Optional[tuple] = None
@@ -209,8 +216,6 @@ class TestcaseAclnn(ApiTestcaseBase):
         self._scalar_slots = None
         self._scalar_slots_from_declaration = False
         self._scalars_written = False
-        self.golden_mode_override = None
-        self.xpu_metrics = {}
         self._multi_device_thread_contexts = None
         self._aclnn_dynamic_tensors = {}
 

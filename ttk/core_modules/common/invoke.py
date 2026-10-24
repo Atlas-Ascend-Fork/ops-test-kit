@@ -98,15 +98,15 @@ def resolve_callable_str(s: str):
     return obj
 
 
-_GOLDEN_MODE_ALIASES = {"enable": "Enable", "disable": "Disable", "promote": "Promote", "xpu": "XPU"}
+_GOLDEN_MODE_ALIASES = {"enable": "Enable", "disable": "Disable", "promote": "Promote", "xpu": "XPU", "npu": "NPU"}
 
 
 def golden_mode(testcase, switches) -> str:
     """golden 模式解析（单份）：用例级 golden_mode_override 优先于全局 --golden-mode。
 
-    大小写不敏感（enable/xpu 等归一到规范值），未知值告警并按 Enable 兜底；
+    大小写不敏感（enable/xpu/npu 等归一到规范值），未知值告警并按 Enable 兜底；
     缺省回 "Enable"。switches 为 None / 缺字段的鸭子类型（测试 SimpleNamespace）
-    同样安全。仅 Promote/Disable/XPU 比较消费此值。
+    同样安全。与 CLI `_GOLDEN_MODE_CHOICES`（cli/common.py）保持同集。
     """
     mode = getattr(testcase, "golden_mode_override", None) or getattr(switches, "golden_mode", None) or "Enable"
     resolved = _GOLDEN_MODE_ALIASES.get(str(mode).strip().lower())
@@ -117,6 +117,27 @@ def golden_mode(testcase, switches) -> str:
 
 
 _FRAMEWORK_ROOTS = {"numpy": "numpy", "torch": "torch", "tf": "tf", "tensorflow": "tf"}
+
+
+def accepts_device(func) -> bool:
+    """golden 是否声明 device 参数（NPU golden 契约）。
+
+    NPU golden 由 golden 自行完成数据上板（框架仅提供设备环境 + 采集窗 +
+    返回值回转换）：签名含 `device_id`/`dev_id`/`device` 命名参数，或
+    `**kwargs`（`*args, **kwargs` 形态天然可收 device）。device 传字符串
+    （"npu:0"/"cpu"，与 XPU 远端 format_device 同口径），golden 直接
+    ``.to(device)``。无 signature 的 torch C builtin（原生载体）返回
+    False——由框架转换上板兜底。
+    """
+    params = sig_params(func)
+    if not params:
+        return False
+    return accepts_var_keyword(params) or any(p.name in ("device_id", "dev_id", "device") for p in params.values())
+
+
+def class_accepts_device(cls) -> bool:
+    """class 形态 golden 是否声明 device（__init__ 或 __call__ 签名任一）。"""
+    return accepts_device(cls) or accepts_device(getattr(cls, "__call__", None))  # noqa: B004  # 显式取 __call__ 判签名
 
 
 def _framework_of(func) -> Optional[str]:
@@ -308,20 +329,31 @@ class Invoke:
     NPU_PREPROCESS_FAILURE = "NPU_PREPROCESS_FAILURE:"
 
     @staticmethod
-    def golden(testcase, func, switches, invoke=None) -> list:
-        """统一执行 golden（纯 CPU 语义，三通路共享）。
+    def golden(testcase, func, switches, invoke=None, npu_invoke=None, dev_id=None, warmup_count=None) -> list:
+        """统一执行 golden（CPU 语义 + 可选 NPU 设备口子，四通路共享）。
 
-        收敛三通路 golden 执行的共性语义：占位（None/Disable）、str 形态
+        收敛四通路 golden 执行的共性语义：占位（None/Disable）、str 形态
         resolve、Timeout/Exception 占位与日志、gc。通路专有部分经 invoke
         闭包注入——func（str 已解析）传入闭包执行（kernel/aclnn：装配池 /
         class 双阶段绑定 / 框架转换 / Promote 包裹）；invoke 缺省直接调用
         func()（e2e：func 为绑定好上下文的 runner）。
 
+        NPU 口子（golden-mode NPU 时生效，缺省不进）：
+            npu_invoke + dev_id 齐备且 mode == "NPU" → 经 npu_golden_runner
+            （msprof 采集窗、warmup 跟随 --warmup）执行 NPU 闭包；NPU 执行/
+            采集失败自动回落 CPU 语义（invoke(func) / func()），异常仍收敛
+            为占位串。性能暂存于 testcase.golden_perf / golden_source
+            （通路 testcase 声明该槽位时；e2e 经 return_struct 直接消费，
+            不走本暂存）。
+
         Args:
             testcase: 通路 testcase（golden_mode_override 优先于全局）
             func: resolve 链产物（callable / class / str / None）
             switches: SWITCHES
-            invoke: (func) -> results 的通路执行闭包，None → func()
+            invoke: (func) -> results 的通路 CPU 执行闭包，None → func()
+            npu_invoke: () -> RAW outputs 的设备执行闭包（输入上板 + 调用 golden）
+            dev_id: npu_invoke 的执行设备
+            warmup_count: 采集窗预热轮数，None → 跟随 --warmup 开关
         Returns: golden 输出列表（通路侧 flatten/reshape 之前），或占位字符串列表：
             func is None            → ["UNSUPPORTED"]
             golden_mode == "Disable" → ["SUPPRESSED"]
@@ -339,6 +371,8 @@ class Invoke:
         try:
             if isinstance(func, str):
                 func = resolve_callable_str(func)
+            if mode == "NPU" and npu_invoke is not None and dev_id is not None:
+                return Invoke._golden_on_npu(testcase, func, switches, invoke, npu_invoke, dev_id, warmup_count)
             return invoke(func) if invoke is not None else func()
         except TimeoutError:
             logging.exception("Golden generation timeout")
@@ -350,6 +384,31 @@ class Invoke:
             # gen-0 足够：golden 大数组走引用计数即时释放，此处只清 torch
             # 内部等循环垃圾；全量收集每例 10-100ms，千例套件可感知
             gc.collect(0)
+
+    @staticmethod
+    def _golden_on_npu(testcase, func, switches, invoke, npu_invoke, dev_id, warmup_count):
+        """NPU 口子内核：msprof 窗执行 + CPU 回落 + 性能暂存（占位语义在外层 try）。"""
+        from .golden import npu_golden_runner
+
+        name = (
+            getattr(testcase, "testcase_name", None)
+            or getattr(testcase, "op_name", None)
+            or getattr(testcase, "api_name", None)
+            or "golden"
+        )
+
+        def _cpu_fallback():
+            return invoke(func) if invoke is not None else func()
+
+        results, perf, source = npu_golden_runner(
+            npu_invoke, _cpu_fallback, dev_id, switches, name, warmup_count=warmup_count
+        )
+        # 性能暂存（通路 testcase 声明槽位时）：kernel/aclnn/geir 经 result
+        # construct 抄写；未声明槽位的通路（e2e）不消费本暂存
+        if hasattr(testcase, "golden_perf"):
+            testcase.golden_perf = perf
+            testcase.golden_source = source
+        return results
 
     @staticmethod
     def npu_preprocess(testcase, func, switches, device_args=None, *, device_scope=None):

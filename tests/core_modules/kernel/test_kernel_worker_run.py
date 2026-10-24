@@ -106,13 +106,13 @@ def _apply_common_stubs(monkeypatch, switches, recorder):
     monkeypatch.setattr(profiling, "process_context", lambda: recorder)
     monkeypatch.setattr(profiling, "default_logging_config", lambda **_kwargs: None)
     monkeypatch.setattr(profiling, "gate_host_memory", lambda *_args: None)
-    monkeypatch.setattr(profiling, "__apply_force_overrides", lambda *_args: None)
-    monkeypatch.setattr(profiling, "__parse_dynamic_tiling_data", lambda *_args: None)
-    monkeypatch.setattr(profiling, "__parse_binary_tiling_data", lambda *_args: None)
-    monkeypatch.setattr(profiling, "__profiling_end_print", lambda *_args: None)
-    monkeypatch.setattr(profiling, "__compile_only_end_print", lambda *_args: None)
-    monkeypatch.setattr(profiling, "__dump_input", lambda *_args: None)
-    monkeypatch.setattr(profiling, "__dump_golden", lambda *_args: None)
+    monkeypatch.setattr(profiling, "_apply_force_overrides", lambda *_args: None)
+    monkeypatch.setattr(profiling, "_parse_dynamic_tiling_data", lambda *_args: None)
+    monkeypatch.setattr(profiling, "_parse_binary_tiling_data", lambda *_args: None)
+    monkeypatch.setattr(profiling, "_profiling_end_print", lambda *_args: None)
+    monkeypatch.setattr(profiling, "_compile_only_end_print", lambda *_args: None)
+    monkeypatch.setattr(profiling, "_dump_input", lambda *_args: None)
+    monkeypatch.setattr(profiling, "_dump_golden", lambda *_args: None)
     monkeypatch.setattr(profiling, "SpecResolver", _SpecResolverStub)
 
 
@@ -219,7 +219,10 @@ def test_run_normal_flow_stage_order(monkeypatch):
     statuses = recorder.statuses
     assert statuses.index("OnParseParameters") < statuses.index("OnGenInput")
     assert statuses.index("OnGenInput") < statuses.index("OnGenGolden")
-    assert statuses.index("OnGenGolden") < statuses.index("OnGenWorkspace")
+    # 落盘收敛在 golden 段内；workspace/设备锁属于设备段（此处 _device_profiling 被
+    # mock 吞掉），不占编排阶段序列——两者都不出现在编排层状态流里
+    assert statuses.index("OnGenGolden") < statuses.index("OnDumpGoldenDataIfRequired")
+    assert "OnGenWorkspace" not in statuses
     assert "OnAcquireLock" not in statuses
     assert case.input_arrays is not None
     assert case.golden_arrays[0].shape == (2,)

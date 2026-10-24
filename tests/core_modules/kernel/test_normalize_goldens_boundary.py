@@ -9,7 +9,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 """
-__normalize_goldens 溢出语义测试。
+_normalize_goldens 溢出语义测试。
 
 各 dtype 的溢出阈值/tie 归属/带外替换值须与其顶 binade 结构一致，全部语义经
 昇腾硬件实测标定：
@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from ttk.core_modules.kernel.golden import __normalize_goldens
+from ttk.core_modules.kernel.golden import _normalize_goldens
 from ttk.utilities.dtypes import get_dtype_overflow_boundary, resolve_numpy_dtypes
 
 
@@ -41,7 +41,7 @@ if not _missing("en_dtypes"):
 if _TO_REGISTER:
     resolve_numpy_dtypes(_TO_REGISTER)
 
-_normalize = __normalize_goldens
+_normalize = _normalize_goldens
 
 
 def _run(values, dtype, overflow_mode=1):

@@ -29,21 +29,28 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from ttk.core_modules.common.profiler.torch_profiler import resolve_activities, summarize_events
 
 
-def torch_xpu_profiler_pass(invoke, runtime: int, device: str, activities_cfg: list):
+def torch_xpu_profiler_pass(invoke, runtime: int, device: str, activities_cfg: list, torch_lib: Optional[str] = None):
     """torch.profiler Self device time. Returns (outputs, device_us).
 
     invoke: 无参 callable（执行一次被测 op；OP 错误由 invoke 内部传播）。
     device_us = per-iteration average（active window 总 self device time / runtime），
     仅累加真实 设备 内核条目（summarize_events 的 _is_device_kernel 过滤）。
 
+    torch_lib='npu' 时走 torch_npu.profiler（torch.profiler 采不到 NPU 内核；
+    解析复用 E2E TorchNpuProfiler 的共享实现，单一实现防漂移）。
+
     配置错误（activities 缺失/未知）raise ValueError（共享 resolve_activities）——
     server config error → 500，非 NA degrade；profiler 机制失败
     （start/stop/readout）→ NA + log。
     """
+    if torch_lib == "npu":
+        return _torch_npu_profiler_pass(invoke, runtime)
+
     import torch
 
     activities = resolve_activities(activities_cfg)
@@ -73,6 +80,52 @@ def torch_xpu_profiler_pass(invoke, runtime: int, device: str, activities_cfg: l
         device_us = total_device_us
     except Exception:
         logging.exception("torch.profiler key_averages failed; device_us=NA")
+    return outputs, device_us
+
+
+def _torch_npu_profiler_pass(invoke, runtime: int):
+    """torch_npu.profiler 采集窗（kernel_details.csv 解析与 E2E 共享）。
+
+    语义对齐 torch pass：warmup×1 + runtime 轮 active，per-iteration 平均。
+    OP 执行错误由 invoke 内部传播（→ FAIL，与 torch pass 同契约）；仅
+    profiler 机制失败（start/stop/readout）degrade 为 NA + log。
+    """
+    from ttk.core_modules.common.profiler.torch_profiler import (
+        find_npu_profile_csv,
+        parse_kernel_details_csv,
+        torch_npu_profile_start,
+    )
+
+    outdir = tempfile.mkdtemp(prefix="ttk_xpu_npu_prof_")
+    outputs = None
+    device_us = 0.0
+    try:
+        try:
+            prof, start_ns = torch_npu_profile_start(outdir, warmup_count=1, active_steps=runtime)
+        except Exception:
+            # 采集窗起不来不拦数据：回退裸执行保住 outputs（device_us 保持 NA）
+            logging.exception("torch_npu.profiler start failed; device_us=NA")
+            for _ in range(runtime + 1):
+                outputs = invoke()
+            return outputs, device_us
+        try:
+            for _ in range(runtime + 1):
+                outputs = invoke()
+                prof.step()
+        finally:
+            try:
+                prof.stop()
+            except Exception:
+                logging.exception("torch_npu.profiler stop failed")
+        kernel_csv = find_npu_profile_csv(outdir, start_ns, "kernel_details.csv")
+        if kernel_csv:
+            kernels, total_device_us = parse_kernel_details_csv(kernel_csv)
+            if not kernels:
+                logging.warning("NPU performance unavailable: no device kernel records in %s", kernel_csv)
+            elif runtime > 0:
+                device_us = total_device_us / runtime
+    finally:
+        shutil.rmtree(outdir, ignore_errors=True)
     return outputs, device_us
 
 

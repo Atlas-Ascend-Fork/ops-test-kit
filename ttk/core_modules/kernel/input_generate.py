@@ -39,7 +39,7 @@ from .params import adapt_pickup_by_names
 from .testcase import TestcaseKernel
 
 
-def __use_manual_input(context: TestcaseKernel):
+def _use_manual_input(context: TestcaseKernel):
     flat_binaries = context.flat_manual_input_binaries
     flat_shapes = promote_scalar_shapes(context.flat_input_shapes)
     flat_dtypes = resolve_numpy_dtypes(context.flat_input_dtypes)
@@ -59,7 +59,7 @@ def __use_manual_input(context: TestcaseKernel):
     context.actual_input_data_ranges = ((None, None),)
 
 
-def __need_transform(ori_format, format_, ori_shape, shape):
+def _need_transform(ori_format, format_, ori_shape, shape):
     if ori_format == format_:
         return False
     if (ori_shape is None) != (shape is None):
@@ -71,7 +71,7 @@ def __need_transform(ori_format, format_, ori_shape, shape):
     return not (tuple(ori_shape) == tuple(shape) and (ori_format == "ND" or format_ == "ND"))
 
 
-def __transform_single_to_ori(context, arr, nested_ori, group_idx, sub_idx):
+def _transform_single_to_ori(context, arr, nested_ori, group_idx, sub_idx):
     """Transform array from current format to ori_format, update nested_ori inplace."""
     dist = context.input_distribution or ()
     flat_idx = sum(max(d, 1) for d in dist[:group_idx])
@@ -85,7 +85,7 @@ def __transform_single_to_ori(context, arr, nested_ori, group_idx, sub_idx):
     shape_ = get(flat_shapes, flat_idx)
     ori_shape = get(flat_ori_shapes, flat_idx)
 
-    if not __need_transform(ori_format, format_, ori_shape, shape_):
+    if not _need_transform(ori_format, format_, ori_shape, shape_):
         if sub_idx is not None:
             nested_ori[group_idx][sub_idx][:] = arr
         else:
@@ -104,7 +104,7 @@ def __transform_single_to_ori(context, arr, nested_ori, group_idx, sub_idx):
         nested_ori[group_idx][:] = transformed
 
 
-def __override_inputs_from_attributes(context: TestcaseKernel):
+def _override_inputs_from_attributes(context: TestcaseKernel):
     if not context.attributes:
         return
     op_info = OpInfoKeeper().info_of(context.op_name)
@@ -136,19 +136,19 @@ def __override_inputs_from_attributes(context: TestcaseKernel):
             for j in range(len(item)):
                 assign_tensor_value(item[j], per_tensor_val[j], f"{name}[{j}]")
                 if nested_ori_arrays is not None and nested_ori_arrays[group_idx] is not None:
-                    __transform_single_to_ori(context, item[j], nested_ori_arrays, group_idx, j)
+                    _transform_single_to_ori(context, item[j], nested_ori_arrays, group_idx, j)
         else:
             # Single tensor
             assign_tensor_value(item, val, name)
             if nested_ori_arrays is not None:
-                __transform_single_to_ori(context, item, nested_ori_arrays, group_idx, None)
+                _transform_single_to_ori(context, item, nested_ori_arrays, group_idx, None)
 
     context.input_arrays = tuple(nested_arrays)
     if nested_ori_arrays is not None:
         context.original_input_arrays = tuple(nested_ori_arrays)
 
 
-def __transform_to_original_format(context: TestcaseKernel):
+def _transform_to_original_format(context: TestcaseKernel):
     if context.manual_golden_binaries:
         return
 
@@ -164,7 +164,7 @@ def __transform_to_original_format(context: TestcaseKernel):
         format_ = get(context.flat_input_formats, idx)
         ori_shape = get(flat_ori_shapes, idx)
         shape_ = get(flat_shapes, idx)
-        if not __need_transform(ori_format, format_, ori_shape, shape_):
+        if not _need_transform(ori_format, format_, ori_shape, shape_):
             continue
         if not format_transformation.is_transformable(format_, ori_format):
             raise RuntimeError(f"Can not transform from [{format_}] to [{ori_format}].")
@@ -183,7 +183,7 @@ def __transform_to_original_format(context: TestcaseKernel):
     context.original_input_arrays = tuple(nest_by_distribution(ori_arrays, context.input_distribution))
 
 
-def __realtime_random_input(context: TestcaseKernel):
+def _realtime_random_input(context: TestcaseKernel):
     """Realtime Input Data Generation (Default)"""
     switches = get_global_storage()
     flat_shapes = promote_scalar_shapes(context.flat_input_shapes)
@@ -213,7 +213,7 @@ def __realtime_random_input(context: TestcaseKernel):
         if base_seed and has_batch_relation:
             # batch 一致性：跨用例同 shape 同值（对齐 aclnn/e2e 播种语义）
             numpy.random.seed(base_seed + idx)
-        if __need_transform(ori_format, format_, ori_shape, shape):
+        if _need_transform(ori_format, format_, ori_shape, shape):
             if not format_transformation.is_transformable(ori_format, format_):
                 raise RuntimeError(
                     f"Can not transform from [{ori_format}] to [{format_}]. "
@@ -272,21 +272,21 @@ def gen_input(context: TestcaseKernel, stored_inputs=None):
             nest_by_distribution([(None, None)] * len(flat_inputs), context.input_distribution)
         )
         context.invalidate_flat_cache("input_arrays")
-        __transform_to_original_format(context)
+        _transform_to_original_format(context)
     elif context.manual_input_binaries:
         # Manual inputs
-        __use_manual_input(context)
+        _use_manual_input(context)
         # Try to convert to original format if golden needs original input arrays
-        __transform_to_original_format(context)
+        _transform_to_original_format(context)
     else:
         # Automatic random input
-        __realtime_random_input(context)
-        __override_inputs_from_attributes(context)
+        _realtime_random_input(context)
+        _override_inputs_from_attributes(context)
 
         input_func = get_plugin_function(context.op_name, "input", "kernel", switches.plugin_path)
         if input_func:
             input_arrays = list(context.input_arrays)
-            kwargs = __collect_dynamic_kwargs(context)
+            kwargs = _collect_dynamic_kwargs(context)
             input_arrays = input_func(*input_arrays, **kwargs)
             # flatten (flat or nested) → validate → nest
             flat = deep_flatten(input_arrays)
@@ -295,10 +295,10 @@ def gen_input(context: TestcaseKernel, stored_inputs=None):
                     f"Input plugin returned {len(flat)} arrays, expected {len(context.flat_input_shapes)}"
                 )
             context.input_arrays = tuple(nest_by_distribution(flat, context.input_distribution))
-            __transform_to_original_format(context)
+            _transform_to_original_format(context)
 
 
-def __collect_dynamic_kwargs(context: TestcaseKernel):
+def _collect_dynamic_kwargs(context: TestcaseKernel):
     switches = get_global_storage()
     kwargs = context.attributes.copy()
     # delete internal attributes

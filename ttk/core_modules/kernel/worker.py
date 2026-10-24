@@ -50,7 +50,7 @@ from .result import ComparisonResult, KernelExecuteResult, KernelReturnStructure
 from .testcase import TestcaseKernel
 
 
-def __gen_workspaces(workspaces: Tuple[int], debug_buf_size: int) -> Tuple[numpy.ndarray, ...]:
+def _build_workspace_arrays(workspaces: Tuple[int], debug_buf_size: int) -> Tuple[numpy.ndarray, ...]:
     workspaces = workspaces or ()
     workspace_byte_arrays = []
     for workspace_size in workspaces:
@@ -95,7 +95,7 @@ def early_end(context, print_content):
             setattr(compare_result, f"{typ}_precision", value)
     return_structure = KernelReturnStructure()
     return_structure.construct(context, compare_result, print_content)
-    __profiling_end_print(context, compare_result, print_content)
+    _profiling_end_print(context, compare_result, print_content)
     return return_structure
 
 
@@ -109,7 +109,7 @@ def _dump_only_end(context: TestcaseKernel):
     )
     return_structure = KernelReturnStructure()
     return_structure.construct(context, compare_result, "PASS")
-    __profiling_end_print(context, compare_result, "PASS")
+    _profiling_end_print(context, compare_result, "PASS")
     return return_structure
 
 
@@ -125,7 +125,7 @@ def compile_fail_end(context: TestcaseKernel):
     )
     return_structure = KernelReturnStructure()
     return_structure.construct(context, compare_result, passed)
-    __profiling_end_print(context, compare_result, passed)
+    _profiling_end_print(context, compare_result, passed)
     return return_structure
 
 
@@ -135,7 +135,7 @@ def compile_only_end(context: TestcaseKernel):
     compare_result = ComparisonResult("COMPILE_ONLY")
     return_structure = KernelReturnStructure()
     return_structure.construct(context, compare_result, "COMPILE_ONLY")
-    __compile_only_end_print(context)
+    _compile_only_end_print(context)
     return return_structure
 
 
@@ -217,10 +217,10 @@ def _create_dump_store(context: TestcaseKernel):
 
 def _check_preconditions(context: TestcaseKernel, switches, process_ctx):
     process_ctx.notify_status("OnParseParameters")
-    __apply_force_overrides(context)
+    _apply_force_overrides(context)
     if context.is_valid:
-        __parse_dynamic_tiling_data(context)
-        __parse_binary_tiling_data(context)
+        _parse_dynamic_tiling_data(context)
+        _parse_binary_tiling_data(context)
     if not context.is_valid:
         return early_end(context, context.fail_reason)
     if switches.compile_only:
@@ -249,8 +249,8 @@ def _resolve_manual_stores(context: TestcaseKernel, switches, process_ctx, dump_
             context,
             "kernel",
             switches,
-            before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
-            require_goldens=switches.golden_mode != "XPU",
+            notify_before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
+            require_goldens=False,
         )
     except Exception as exc:
         logging.exception("Manual Kernel data loading failure")
@@ -267,7 +267,8 @@ def _manual_data_dump(context: TestcaseKernel, switches, dump_store, prepared_in
     if dump_store is None:
         return None
     if not switches.no_prof and switches.golden_mode == "XPU":
-        # golden 由三方执行产出，CPU 侧无可落盘真值
+        # XPU：golden 由三方产出（设备后回填），无可落盘真值。
+        # NPU 不跳过：golden 已在 _prepare_golden 内生成，首跑落盘后 replay 复用。
         logging.warning(
             "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
             context.testcase_name,
@@ -331,8 +332,9 @@ def _resolve_tolerance(context: TestcaseKernel):
         need_3party = any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为比对标准名，非口令
         # cross_check（三方）与 mixed/mix_tolerance（单标杆，2.3 更高精度标杆）均要求 golden
         # 升精度；golden_mode=XPU 与 Promote 互斥（golden 由三方执行产出）；
+        # NPU 同样互斥（golden 在 NPU 原生 dtype 上执行，无 CPU 抬精度语义）；
         # Disable 是显式豁免（golden 不生成），升精度无从谈起，不得覆盖
-        if _needs_promote_golden(standards) and switches.golden_mode not in ("XPU", "Disable"):
+        if _needs_promote_golden(standards) and switches.golden_mode not in ("XPU", "Disable", "NPU"):
             context.golden_mode_override = "Promote"
         return SimpleNamespace(
             tolerance=tolerance,
@@ -346,7 +348,9 @@ def _resolve_tolerance(context: TestcaseKernel):
         return None, early_end(context, "TOLERANCE_INVALID")
 
 
-def _generate_golden(context: TestcaseKernel, manual_case, tol_state):
+def _prepare_golden(
+    context: TestcaseKernel, manual_case, tol_state, dev_id=0, device_grant_events=None, device_granted_indices=None
+):
     from ..common.comparison.resolve import resolve_tolerance as _resolve_tolerance
 
     switches = get_global_storage()
@@ -366,12 +370,20 @@ def _generate_golden(context: TestcaseKernel, manual_case, tol_state):
             logging.exception("Manual Kernel golden loading failure")
             return early_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
     try:
-        if manual_case is None:
-            if switches.golden_mode == "XPU":
-                # golden 由三方执行产出（本侧参照不生成）；采集后回填
-                context.golden_arrays = ["GOLDEN_FAILURE"]
-            else:
-                gen_output(context)
+        # 统一编排：load 层与 golden_mode 解耦——有数据集就装载（stored_goldens
+        # 无 golden 文件时为 None），mode 语义（XPU 占位/NPU 设备生成/Enable
+        # 现算）全部收敛在 gen_output 内裁决。NPU 模式下自起设备锁、DUT 前
+        # 直接经 dev_id 生成（锁段与 DUT 串行错开）。
+        process_ctx.notify_status("OnGenGolden")
+        if switches.golden_mode == "NPU":
+            with DeviceLock(
+                process_ctx,
+                dev_id,
+                use_device=switches.mode.has_device(),
+                grant_event=(device_grant_events or {}).get(dev_id),
+                granted_idx=(device_granted_indices or {}).get(dev_id),
+            ):
+                gen_output(context, stored_goldens=stored_goldens, dev_id=dev_id)
         else:
             gen_output(context, stored_goldens=stored_goldens)
     except Exception as exc:
@@ -403,6 +415,9 @@ def _generate_golden(context: TestcaseKernel, manual_case, tol_state):
             switches.compare_method,
             input_dtypes=input_dtypes,
         )
+    # golden 调试 dump（须先于 golden-XPU 回填）；no-prof 豁免在 DataDumper。
+    process_ctx.notify_status("OnDumpGoldenDataIfRequired")
+    _dump_golden(context)
     return None
 
 
@@ -419,7 +434,7 @@ def _write_manual_dump(context: TestcaseKernel, dump_store, prepared_inputs):
     return None
 
 
-def _dispatch_xpu(context: TestcaseKernel, need_3party, golden_is_xpu, manual_case=None):
+def _dispatch_xpu(context: TestcaseKernel, need_3party, manual_case=None):
     """kernel 三方采集统一入口（dispatch/collect 两段式）。
 
     分流：manual 源 / golden-XPU / 自动降级 / 总闸关闭 → ready（内联同步完成，
@@ -441,6 +456,7 @@ def _dispatch_xpu(context: TestcaseKernel, need_3party, golden_is_xpu, manual_ca
 
     switches = get_global_storage()
     process_ctx = process_context()
+    golden_is_xpu = switches.golden_mode == "XPU"
     need_data = need_3party or golden_is_xpu
 
     manual = load_manual_third_parties(context, manual_case) if need_data else None
@@ -490,31 +506,22 @@ def _collect_xpu_remote(context: TestcaseKernel, mode, deadline_s=None, inputs=N
 def _gen_workspaces(context: TestcaseKernel):
     process_ctx = process_context()
     process_ctx.notify_status("OnGenWorkspace")
-    context.dyn_workspace_arrays = __gen_workspaces(
+    context.dyn_workspace_arrays = _build_workspace_arrays(
         context.dyn_compile_result.workspaces, context.dyn_compile_result.debug_buf_size
     )
-    context.cst_workspace_arrays = __gen_workspaces(
+    context.cst_workspace_arrays = _build_workspace_arrays(
         context.cst_compile_result.workspaces, context.cst_compile_result.debug_buf_size
     )
-    context.bin_workspace_arrays = __gen_workspaces(
+    context.bin_workspace_arrays = _build_workspace_arrays(
         context.bin_compile_result.workspaces, context.bin_compile_result.debug_buf_size
     )
-
-
-def _dump_prepared_data(context: TestcaseKernel):
-    """落盘 input（含 tiling_data）与 golden；须在 golden-XPU 回填 golden_arrays 之前调用。"""
-    process_ctx = process_context()
-    process_ctx.notify_status("OnDumpInputDataIfRequired")
-    __dump_input(context)
-    process_ctx.notify_status("OnDumpGoldenDataIfRequired")
-    __dump_golden(context)
 
 
 def _assemble_xpu_golden(context: TestcaseKernel, third_parties, golden_is_xpu: bool):
     """golden-XPU 装配：三方输出即 golden；无输出 → 整例 FAIL（GOLDEN_FAILURE）。
 
-    非 golden-XPU（flag False）直接放行；须在 _dump_prepared_data 之后、
-    _device_profiling 之前调用（FAIL 不空跑设备）。
+    非 golden-XPU（flag False）直接放行；须在 _device_profiling 之前调用
+    （FAIL 不空跑设备；golden 落盘已在 golden 准备段完成）。
     """
     if not golden_is_xpu:
         return None
@@ -526,15 +533,26 @@ def _assemble_xpu_golden(context: TestcaseKernel, third_parties, golden_is_xpu: 
         compare_result = ComparisonResult(None).set("GOLDEN_FAILURE", "GOLDEN_FAILURE", "GOLDEN_FAILURE", "FAIL")
         return_structure = KernelReturnStructure()
         return_structure.construct(context, compare_result, "GOLDEN_FAILURE")
-        __profiling_end_print(context, compare_result, "GOLDEN_FAILURE")
+        _profiling_end_print(context, compare_result, "GOLDEN_FAILURE")
         return return_structure
     context.golden_arrays = list(third_parties)
+    # golden 性能回填：三方执行即 golden 真值，device_us 进 golden_* 列
+    # （manual 回放无 perf 位 → None → "----"，性能指标只能来自在线执行）
+    from ..common.golden import xpu_golden_perf
+
+    context.golden_perf = xpu_golden_perf(getattr(context, "xpu_results", None))
+    context.golden_source = "xpu"
     return None
 
 
 def _device_profiling(context: TestcaseKernel, dev_id, device_grant_events, device_granted_indices):
     switches = get_global_storage()
     process_ctx = process_context()
+    # 设备段自含准备：workspace 按编译结果生成（aclnn 对应 execute_on_device 内 GetWorkspaceSize）
+    _gen_workspaces(context)
+    # 输入调试 dump（aclnn 同位置；no-prof 不达本段）
+    process_ctx.notify_status("OnDumpInputDataIfRequired")
+    _dump_input(context)
     process_ctx.notify_status("OnAcquireLock")
     device_id = [dev_id]
     use_device = switches.mode.has_device()
@@ -547,7 +565,7 @@ def _device_profiling(context: TestcaseKernel, dev_id, device_grant_events, devi
     ):
         context.device_id = device_id[0]
         process_ctx.notify_status("OnProfilingPrint")
-        __profiling_print(context)
+        _profiling_print(context)
         process_ctx.notify_status("OnDynProfiling")
         if switches.backend == "npusim":
             from ..common.simulator import run_kernel_sim
@@ -567,9 +585,9 @@ def _compare_and_finalize(context: TestcaseKernel, standards, third_parties, pre
     process_ctx.notify_status("PostProfiling")
     passed = handle_profiling_result(context)
     process_ctx.notify_status("OnDumpOutputDataIfRequired")
-    __dump_output(context)
+    _dump_output(context)
     process_ctx.notify_status("OnComparison")
-    __adapt_output_shape_unknown(context)
+    _adapt_output_shape_unknown(context)
     goldens = context.golden_arrays
     dyn_outputs = context.dyn_prof_result.output_bytes
     cst_outputs = context.cst_prof_result.output_bytes
@@ -600,7 +618,7 @@ def _compare_and_finalize(context: TestcaseKernel, standards, third_parties, pre
         custom_compare=custom_compare,
     )
     if compare_result.passed != "PASS" and switches.dump_config.dump_on_fail:
-        __dump_on_fail(context)
+        _dump_on_fail(context)
     process_ctx.notify_status("OnReturning")
     return_structure = KernelReturnStructure()
     return_structure.construct(context, compare_result, passed)
@@ -611,7 +629,7 @@ def _compare_and_finalize(context: TestcaseKernel, standards, third_parties, pre
         return_structure.batch_summary = assemble_batch_summary(
             context.dyn_prof_result.output_bytes, context, context.batch_consistency_id
         )
-    __profiling_end_print(context, compare_result, passed)
+    _profiling_end_print(context, compare_result, passed)
     return return_structure
 
 
@@ -634,11 +652,6 @@ def _run_profile(
     # --seed 用例级播种先于一切数据生成（输入/golden/workspace），与派发解耦
     reseed_per_testcase(context, switches)
 
-    # dump 方向：--no-prof 落盘（bridge 仅在写方向激活时设置 manual_data_dirs）
-    dump_store, early_result = _open_dump_only_store(context, switches)
-    if early_result is not None:
-        return early_result
-
     early_result = _check_preconditions(context, switches, process_ctx)
     if early_result is not None:
         return early_result
@@ -646,6 +659,11 @@ def _run_profile(
     # host 内存闸门：入口位（校验/编译早退之后的首个重负载前）——manual 落盘
     # 加载、输入生成、golden、设备执行全在闸门之后
     gate_host_memory(switches.no_memory_check, process_ctx)
+
+    # dump 方向：--no-prof 落盘（bridge 仅在写方向激活时设置 manual_data_dirs）
+    dump_store, early_result = _open_dump_only_store(context, switches)
+    if early_result is not None:
+        return early_result
 
     manual_case, dump_store, early_result = _resolve_manual_stores(context, switches, process_ctx, dump_store)
     if early_result is not None:
@@ -655,12 +673,11 @@ def _run_profile(
     if early_result is not None:
         return early_result
 
-    process_ctx.notify_status("OnGenGolden")
     tol_state, early_result = _resolve_tolerance(context)
     if early_result is not None:
         return early_result
 
-    early_result = _generate_golden(context, manual_case, tol_state)
+    early_result = _prepare_golden(context, manual_case, tol_state, dev_id, device_grant_events, device_granted_indices)
     if early_result is not None:
         return early_result
 
@@ -669,16 +686,14 @@ def _run_profile(
         return early_result
 
     golden_is_xpu = switches.golden_mode == "XPU"
-    xpu = _dispatch_xpu(context, tol_state.need_3party, golden_is_xpu, manual_case)  # 三方 dispatch
-    _gen_workspaces(context)
-    _dump_prepared_data(context)
+    xpu = _dispatch_xpu(context, tol_state.need_3party, manual_case)  # 三方 dispatch
     if golden_is_xpu:
         # golden-XPU：三方即 golden，设备前收割（FAIL 不空跑设备 + golden 落盘契约）
         early_result = _xpu_promote_golden(context, xpu)
         if early_result is not None:
             return early_result
     _device_profiling(context, dev_id, device_grant_events, device_granted_indices)
-    third_parties = _collect_xpu(context, switches, xpu)
+    third_parties, _xpu_results = _collect_xpu(context, switches, xpu)
     return _compare_and_finalize(
         context, tol_state.standards, third_parties, tol_state.pre_compare, tol_state.custom_compare
     )
@@ -702,10 +717,10 @@ def _collect_xpu(context: TestcaseKernel, switches, xpu):
     from ..common.xpu import dump_xpu_slot_files
 
     dump_xpu_slot_files(context, switches, third_parties, provider)
-    return third_parties
+    return third_parties, xpu_results
 
 
-def __profiling_end_print(context: TestcaseKernel, compare_result: ComparisonResult, passed: str):
+def _profiling_end_print(context: TestcaseKernel, compare_result: ComparisonResult, passed: str):
     c = compare_result
     memory_oob = (
         "PASS"
@@ -722,8 +737,8 @@ def __profiling_end_print(context: TestcaseKernel, compare_result: ComparisonRes
     logging.info("\n" + render_table(lines))
 
 
-def __compile_only_end_print(context: TestcaseKernel):
-    def __normalize(compile_time, tiling_time, tiling_key, block_dim, local_memory, kernel_name):
+def _compile_only_end_print(context: TestcaseKernel):
+    def _normalize(compile_time, tiling_time, tiling_key, block_dim, local_memory, kernel_name):
         if isinstance(tiling_time, (tuple, list)):
             tiling_time = numpy.median(tiling_time[1:]) if len(tiling_time) > 1 else tiling_time[0]
         return (
@@ -741,7 +756,7 @@ def __compile_only_end_print(context: TestcaseKernel):
         ("COMPILE", "Compile/s", "Tiling/s", "TilingKey", "BlockDim", "SimtUB/B", "KernelName"),
         (
             "DYN",
-            *__normalize(
+            *_normalize(
                 dc.compile_time,
                 dc.tiling_result.tiling_time,
                 dc.tiling_key,
@@ -752,13 +767,11 @@ def __compile_only_end_print(context: TestcaseKernel):
         ),
         (
             "CST",
-            *__normalize(
-                cc.compile_time, "\\\\\\\\\\\\", "\\\\\\\\\\\\", cc.block_dim, cc.simt_ub_size, cc.kernel_name
-            ),
+            *_normalize(cc.compile_time, "\\\\\\\\\\\\", "\\\\\\\\\\\\", cc.block_dim, cc.simt_ub_size, cc.kernel_name),
         ),
         (
             "BIN",
-            *__normalize(
+            *_normalize(
                 bc.compile_time,
                 bc.tiling_result.tiling_time,
                 bc.tiling_key,
@@ -771,7 +784,7 @@ def __compile_only_end_print(context: TestcaseKernel):
     logging.info("\n" + render_table(lines))
 
 
-def __parse_binary_tiling_data(context: TestcaseKernel):
+def _parse_binary_tiling_data(context: TestcaseKernel):
     # noinspection PyBroadException
     try:
         context.bin_tiling_data_bytes, context.bin_tuple_tiling_data = parse_tiling_data(
@@ -787,7 +800,7 @@ def __parse_binary_tiling_data(context: TestcaseKernel):
         context.bin_compile_result.compile_result = "TILING_PARSE_FAILURE"
 
 
-def __parse_dynamic_tiling_data(context: TestcaseKernel):
+def _parse_dynamic_tiling_data(context: TestcaseKernel):
     # noinspection PyBroadException
     try:
         context.dyn_tiling_data_bytes, context.dyn_tuple_tiling_data = parse_tiling_data(
@@ -803,44 +816,44 @@ def __parse_dynamic_tiling_data(context: TestcaseKernel):
         context.dyn_compile_result.compile_result = "TILING_PARSE_FAILURE"
 
 
-def __apply_force_overrides(context: TestcaseKernel):
+def _apply_force_overrides(context: TestcaseKernel):
     switches = get_global_storage()
 
-    def __apply_manual_block_dim(container):
+    def _apply_manual_block_dim(container):
         if container:
             context.dyn_compile_result.block_dim = get(container, 0) or context.dyn_compile_result.block_dim
             context.cst_compile_result.block_dim = get(container, 1) or context.cst_compile_result.block_dim
             context.bin_compile_result.block_dim = get(container, 2) or context.bin_compile_result.block_dim
 
-    def __clear_atomic_if_not_none(idx, if_none):
+    def _clear_atomic_if_not_none(idx, if_none):
         if switches.force_clear_atomic[idx] is not None:
             return switches.force_clear_atomic[idx]
         return if_none
 
-    def __set_manual_simt_share_memory_size(idx: int, mode: str):
+    def _set_manual_simt_share_memory_size(idx: int, mode: str):
         if switches.force_simt_ub_size[idx] is not None:
             compile_result = getattr(context, f"{mode}_compile_result")
             compile_result.simt_ub_size = switches.force_simt_ub_size[idx]
 
     # command line should have the higher priority
-    __apply_manual_block_dim(switches.force_block_dim)
-    context.dyn_clear_atomic = __clear_atomic_if_not_none(0, context.dyn_clear_atomic)
-    context.cst_clear_atomic = __clear_atomic_if_not_none(1, context.cst_clear_atomic)
-    context.bin_clear_atomic = __clear_atomic_if_not_none(2, context.bin_clear_atomic)
-    __set_manual_simt_share_memory_size(0, "dyn")
-    __set_manual_simt_share_memory_size(1, "cst")
-    __set_manual_simt_share_memory_size(2, "bin")
+    _apply_manual_block_dim(switches.force_block_dim)
+    context.dyn_clear_atomic = _clear_atomic_if_not_none(0, context.dyn_clear_atomic)
+    context.cst_clear_atomic = _clear_atomic_if_not_none(1, context.cst_clear_atomic)
+    context.bin_clear_atomic = _clear_atomic_if_not_none(2, context.bin_clear_atomic)
+    _set_manual_simt_share_memory_size(0, "dyn")
+    _set_manual_simt_share_memory_size(1, "cst")
+    _set_manual_simt_share_memory_size(2, "bin")
 
 
-def __print_get_shape(golden):
+def _print_get_shape(golden):
     return golden.shape if hasattr(golden, "shape") else golden
 
 
-def __print_get_dtype(golden):
+def _print_get_dtype(golden):
     return golden.dtype if hasattr(golden, "dtype") else golden
 
 
-def __profiling_print(context: TestcaseKernel):
+def _profiling_print(context: TestcaseKernel):
     if not (context.input_arrays or context.output_arrays):
         raise TypeError("Input or Output Data is not available, please check your custom function")
     flat_input_arrays = tuple(deep_flatten(context.input_arrays)) if context.input_arrays else ()
@@ -880,8 +893,8 @@ def __profiling_print(context: TestcaseKernel):
         f"Clear Atomic: {context.bin_clear_atomic}\n"
         f"Simt UB: {context.bin_compile_result.simt_ub_size} Bytes\n"
         "////////////////////////////\n"
-        f"Golden Shape: {tuple(__print_get_shape(ga) for ga in context.golden_arrays)}\n"
-        f"Golden Dtype: {tuple(str(__print_get_dtype(ga)) for ga in context.golden_arrays)}\n"
+        f"Golden Shape: {tuple(_print_get_shape(ga) for ga in context.golden_arrays)}\n"
+        f"Golden Dtype: {tuple(str(_print_get_dtype(ga)) for ga in context.golden_arrays)}\n"
         f"Output Shape: {context.output_shapes}\n"
         f"Output Dtype: {context.output_dtypes}\n"
         f"Input Data Range: {context.actual_input_data_ranges}\n"
@@ -895,33 +908,33 @@ def __profiling_print(context: TestcaseKernel):
     )
 
 
-def __make_dumper(context: TestcaseKernel) -> "DataDumper":
+def _make_dumper(context: TestcaseKernel) -> "DataDumper":
     return DataDumper(get_global_storage(), context.dump_file_prefix or context.testcase_name)
 
 
-def __dump_input(context: TestcaseKernel) -> None:
+def _dump_input(context: TestcaseKernel) -> None:
     # 门控在此而非全交给 dumper：tiling_data 两条目不走 dump_input 开关，须随 input 槽一并门控
-    dumper = __make_dumper(context)
+    dumper = _make_dumper(context)
     if dumper.cfg.dump_input:
         dumper.dump_inputs(tuple(deep_flatten(context.input_arrays or ())), segment="dyn")
         dumper.dump_named("tiling_data_dyn", context.dyn_tiling_data_bytes)
         dumper.dump_named("tiling_data_bin", context.bin_tiling_data_bytes)
 
 
-def __dump_output(context: TestcaseKernel) -> None:
-    dumper = __make_dumper(context)
+def _dump_output(context: TestcaseKernel) -> None:
+    dumper = _make_dumper(context)
     output_dtypes = resolve_numpy_dtypes(context.flat_output_dtypes)
     for typ in ("dyn", "cst", "bin"):
         output_bytes = getattr(context, f"{typ}_prof_result").output_bytes
         dumper.dump_outputs(output_bytes, dtypes=output_dtypes, segment=typ)
 
 
-def __dump_golden(context: TestcaseKernel) -> None:
-    __make_dumper(context).dump_goldens(context.golden_arrays)
+def _dump_golden(context: TestcaseKernel) -> None:
+    _make_dumper(context).dump_goldens(context.golden_arrays)
 
 
-def __dump_on_fail(context: TestcaseKernel) -> None:
-    dumper = __make_dumper(context)
+def _dump_on_fail(context: TestcaseKernel) -> None:
+    dumper = _make_dumper(context)
     inputs = tuple(deep_flatten(context.input_arrays or ()))
     outputs = {typ: getattr(context, f"{typ}_prof_result").output_bytes for typ in ("dyn", "cst", "bin")}
     dumper.dump_on_fail(
@@ -936,7 +949,7 @@ def __dump_on_fail(context: TestcaseKernel) -> None:
         dumper.dump_named("tiling_data_bin", context.bin_tiling_data_bytes)
 
 
-def __adapt_output_shape_unknown(context: TestcaseKernel):
+def _adapt_output_shape_unknown(context: TestcaseKernel):
     """
     Detect and transfer npu output shape tensor from uint32 to uint64 encoding.
     """

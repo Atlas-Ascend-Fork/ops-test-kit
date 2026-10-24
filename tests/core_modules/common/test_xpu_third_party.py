@@ -312,10 +312,12 @@ class TestKernelDispatchOverlap:
         monkeypatch.setattr(
             kernel_worker,
             "get_global_storage",
-            lambda: SimpleNamespace(proc_timeout=10, xpu_perf=False, dump_config=SimpleNamespace(dump_xpu=False)),
+            lambda: SimpleNamespace(
+                proc_timeout=10, xpu_perf=False, golden_mode="Enable", dump_config=SimpleNamespace(dump_xpu=False)
+            ),
         )
 
-        xpu = kernel_worker._dispatch_xpu(case, need_3party=True, golden_is_xpu=False, manual_case=None)
+        xpu = kernel_worker._dispatch_xpu(case, need_3party=True, manual_case=None)
 
         assert xpu.pending  # background 形态
         # 收割上界随 deadline 预算联动（proc_timeout=10 → budget=310）
@@ -357,10 +359,10 @@ class TestKernelDispatchOverlap:
         monkeypatch.setattr(
             kernel_worker,
             "get_global_storage",
-            lambda: SimpleNamespace(xpu_perf=False, dump_config=SimpleNamespace(dump_xpu=False)),
+            lambda: SimpleNamespace(xpu_perf=False, golden_mode="XPU", dump_config=SimpleNamespace(dump_xpu=False)),
         )
 
-        xpu = kernel_worker._dispatch_xpu(case, need_3party=False, golden_is_xpu=True, manual_case=None)
+        xpu = kernel_worker._dispatch_xpu(case, need_3party=False, manual_case=None)
 
         assert not xpu.pending  # ready——dispatch 点即完成
         assert recorder == [DATA]  # 同步已执行，且 DATA 位来自 need_data（含 golden_is_xpu）

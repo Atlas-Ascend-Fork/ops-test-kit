@@ -98,10 +98,11 @@ def _derive_provider_from_api(api: Optional[str], fallback: str) -> str:
     """Derive provider from API module prefix ('torch.add' → 'torch').
 
     Known frameworks (torch/tf/tensorflow/numpy/np) are normalized:
-    tensorflow→tf, np→numpy. Unknown prefixes pass through verbatim —
+    tensorflow→tf, np→numpy, npu→torch (torch_npu 生态走 torch provider
+    设备分支)。Unknown prefixes pass through verbatim —
     resolve_providers filters what the server doesn't detect.
     """
     if not api or "." not in api:
         return fallback
     prefix = api.split(".", 1)[0]
-    return {"tensorflow": "tf", "np": "numpy"}.get(prefix, prefix)
+    return {"tensorflow": "tf", "np": "numpy", "npu": "torch"}.get(prefix, prefix)

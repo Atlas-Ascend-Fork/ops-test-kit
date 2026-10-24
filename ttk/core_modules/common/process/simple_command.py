@@ -494,6 +494,15 @@ class SimpleCommandProcess:
     _device_grant_events: Dict[int, Any] = {}
     _device_granted_indices: Dict[int, Any] = {}
 
+    @classmethod
+    def device_grants(cls) -> tuple:
+        """设备授权原语对（{dev_id: Event} / {dev_id: Value('i', -1)}）。
+
+        主进程建池时创建，四通路 build_tasks 统一经此取用并透传 worker →
+        DeviceLock（跨进程设备互斥与授权）。
+        """
+        return cls._device_grant_events, cls._device_granted_indices
+
     # 引导载荷（keeper 快照等，主进程建池前注入）
     _bootstrap_keeper_state: Optional[dict] = None
 

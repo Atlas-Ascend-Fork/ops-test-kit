@@ -34,7 +34,15 @@ from ...utilities import (
 )
 from ...utilities.container import deep_flatten, nest_by_distribution
 from ...utilities.file_utils import load_array
-from ..common.invoke import Invoke, golden_flatten, golden_mode, instantiate_and_call
+from ..common.invoke import (
+    Invoke,
+    accepts_device,
+    class_accepts_device,
+    golden_flatten,
+    golden_mode,
+    instantiate_and_call,
+    resolve_callable_str,
+)
 from ..common.invoke import _framework_of as framework_of
 from ..common.plugin import SpecResolver
 from ..common.testcase.batch import batch_relation_kwargs
@@ -72,16 +80,39 @@ def _promote_tensor(t, tgt_dt):
     return t.to(tgt_dt)
 
 
+def _golden_value_to_device(value, device):
+    """输入上板：torch 张量 → .to(device)（拷贝，与被测数据隔离），嵌套
+    Sequence 递归，其余原样。
+
+    仅在 gen_npu 内使用：此时 dtype 均为 torch 原生（is_torch_dtype_support
+    已判定），不做 numpy 转换。
+    """
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, (list, tuple)):
+        return type(value)(_golden_value_to_device(v, device) for v in value)
+    return value
+
+
 class GoldenGenerator:
     def __init__(self, context: TestcaseAclnn):
         self._ctx = context
         self._switch = get_global_storage()
 
-    def gen(self):
+    def gen(self, dev_id=None):
         if golden_mode(self._ctx, self._switch) == "Disable":
             golden_arrays = ("SUPPRESSED",)
         elif self._ctx.manual_golden_binaries:
             golden_arrays = self._load_golden_from_file()
+        elif golden_mode(self._ctx, self._switch) == "NPU":
+            if dev_id is None:
+                # 无锁上下文（延迟形态）：golden_tensors 留空，由调用方后续回填
+                golden_arrays = []
+            else:
+                self.gen_npu(dev_id)
+                return
         else:
             golden_arrays = self._generate_golden()
 
@@ -114,21 +145,30 @@ class GoldenGenerator:
             goldens.append(load_array(fp, get(dtypes, flat_idx), view_shape))
         return goldens
 
-    def _call_torch_api(self, gf):
-        """ACLNN torch API golden:packaged tensors + torch-convention kwargs → gf(*tensors, **kwargs)。
+    def _call_torch_api(self, gf, device=None):
+        """ACLNN torch API golden：按 C 形参序打包张量 + torch 惯例 kwargs 调用。
 
-        torch 标量重载（如 _foreach_* 的 scalar 分支）要求 0-dim 张量，而 ACLNN 侧
-        "scalar" aclTensor 槽常被声明为 (1,)。命中该类报错时，把 1 元素张量数值
-        等价地 reshape 成 0-dim 重试一次（仅此一类报错触发，广播语义不变）。"""
+        device 非 None 时输入张量上板（_golden_value_to_device，拷贝语义）；
+        声明 device 形参或 **kwargs 的 golden 额外收到 device 字符串（原生
+        torch 函数不声明、不注入，避免非法关键字）；返回值统一回转 numpy。
+        torch 标量重载（如 _foreach_* 的 scalar 分支）要求 0-dim 张量，而
+        ACLNN 侧 "scalar" aclTensor 槽常被声明为 (1,)。命中该类报错时，把
+        1 元素张量数值等价地 reshape 成 0-dim 重试一次（仅此一类报错触发，
+        广播语义不变）。"""
+        import torch
+
         tensors = self._package_golden_tensors()
         kwargs = self._package_golden_torch_kwargs()
+        if device is not None:
+            # 输入张量上板；device 串留给声明它的 golden 创建新张量用
+            tensors = [_golden_value_to_device(t, device) for t in tensors]
+            if accepts_device(gf):
+                kwargs["device"] = device
         try:
-            return gf(*tensors, **kwargs)
+            raw = gf(*tensors, **kwargs)
         except RuntimeError as err:
             if "expected to be 0 dim" not in str(err):
                 raise
-            import torch
-
             changed = False
 
             def _as_scalar(t):
@@ -143,9 +183,17 @@ class GoldenGenerator:
             adapted = tuple(_as_scalar(t) for t in tensors)
             if not changed:
                 raise
-            return gf(*adapted, **kwargs)
+            raw = gf(*adapted, **kwargs)
+        if device is not None:
+            return [r.detach().cpu().numpy() if isinstance(r, torch.Tensor) else r for r in golden_flatten(raw)]
+        return raw
 
-    def _call_custom_golden(self, gf):
+    def _call_custom_golden(self, gf, device=None):
+        """aclnn 自定义 golden：按 param-plan 参数序调用。
+
+        device 非 None 时：输入张量上板（_golden_value_to_device，拷贝语义）、
+        注入 device 字符串（accepts_device 声明才给）、返回值回转 numpy；
+        CPU 时注入 "cpu"、返回原样。"""
         plan = self._ctx.get_param_plan()
         args, extra_attrs = plan.build_args(self._ctx.tensors, self._ctx.scalars, self._ctx.attributes)
         kwargs = {
@@ -158,8 +206,17 @@ class GoldenGenerator:
         }
         kwargs.update(batch_relation_kwargs(self._ctx))
         kwargs.update(extra_attrs)
+        if device is not None:
+            # 输入上板；device 串留给 golden 创建新张量用
+            args = [_golden_value_to_device(a, device) for a in args]
+        if accepts_device(gf):
+            kwargs["device"] = device or "cpu"
         results = gf(*args, **kwargs)
-        return results
+        if device is None:
+            return results
+        import torch
+
+        return [r.detach().cpu().numpy() if isinstance(r, torch.Tensor) else r for r in golden_flatten(results)]
 
     def _named_values(self):
         """Build a name→value pool (input tensors + scalars + attrs) for class-form bind_by_name.
@@ -204,28 +261,79 @@ class GoldenGenerator:
         pool.update(self._ctx.attributes or {})
         return pool
 
-    def _invoke_class(self, cls):
+    def _invoke_class(self, cls, device=None):
         # Promote-context wrap is now applied at the outer _invoke_golden dispatch.
-        return instantiate_and_call(cls, self._named_values())
+        pool = self._named_values()
+        if device is not None:
+            import torch
 
-    def _invoke_golden(self, golden_func):
-        """通路执行闭包（str 已由 Invoke.golden 解析）：Promote 包裹 + class/torch/custom 分发。
+            pool = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in pool.items()}
+        if class_accepts_device(cls):
+            pool["device"] = device or "cpu"
+        results = instantiate_and_call(cls, pool)
+        if device is None:
+            return results
+        import torch
 
-        Promote-context wrap around the ENTIRE dispatch (class / torch / custom)
-        — custom goldens also need promoted bfloat16/float16 inputs.
+        return [r.detach().cpu().numpy() if isinstance(r, torch.Tensor) else r for r in golden_flatten(results)]
+
+    def _invoke_golden(self, golden_func, device=None):
+        """golden 执行分发（str 已由 Invoke.golden 解析）：Promote 包裹 +
+        class/torch/custom 三分支。device 非 None 时在 NPU 上执行（torch 载体
+        和自定义 golden 的输入由框架上板），返回值回转 numpy；device 为 None
+        时在 CPU 上执行。
         """
         with self._golden_mode():
             if isinstance(golden_func, type):
-                return self._invoke_class(golden_func)
+                return self._invoke_class(golden_func, device=device)
             if framework_of(golden_func) == "torch":
-                return self._call_torch_api(golden_func)
-            return self._call_custom_golden(golden_func)
+                return self._call_torch_api(golden_func, device=device)
+            return self._call_custom_golden(golden_func, device=device)
 
     def _generate_golden(self):
         golden_func = self._import_golden_funcs()
         if golden_func is None:
             logging.warning(f"Golden data generation method for [{self._ctx.api_name}] is not registered!")
         return golden_flatten(Invoke.golden(self._ctx, golden_func, self._switch, self._invoke_golden))
+
+    def gen_npu(self, dev_id):
+        """golden-mode NPU：golden 在设备上执行并采集性能（经 Invoke.golden，
+        含采集窗与 CPU 回落），回写 ctx.golden_tensors / ctx.golden_perf /
+        ctx.golden_source；golden dump 由 worker 在本方法返回后执行。
+        """
+        golden_func = self._import_golden_funcs()
+        if isinstance(golden_func, str):
+            # ACLNN_GOLDEN 映射值为点路径字符串，先解析为 callable
+            golden_func = resolve_callable_str(golden_func)
+        if golden_func is not None and self._ctx.is_torch_dtype_support():
+            # torch_npu 注册 "npu" 设备类型并设定当前设备（.to("npu:X") 依赖；
+            # aclnn worker 走 C API，不 import torch_npu 则设备串无法解析）
+            import torch_npu
+
+            torch_npu.npu.set_device(dev_id)
+            # 回落 CPU 时 _invoke_golden 返回值未展平（裸 Tensor/嵌套），
+            # 与 _generate_golden 同款在此统一 flatten
+            results = golden_flatten(
+                Invoke.golden(
+                    self._ctx,
+                    golden_func,
+                    self._switch,
+                    invoke=self._invoke_golden,
+                    npu_invoke=lambda: self._invoke_golden(golden_func, device=f"npu:{dev_id}"),
+                    dev_id=dev_id,
+                )
+            )
+        else:
+            carrier = type(golden_func).__name__ if golden_func is not None else None
+            logging.warning(
+                "[%s] golden-mode NPU: golden %s cannot run in the device closure (non-torch dtype); "
+                "CPU golden used, device perf unavailable",
+                self._ctx.api_name,
+                carrier,
+            )
+            results = self._generate_golden()
+            self._ctx.golden_source = "cpu"
+        self._ctx.golden_tensors = results[: len(self._ctx.output_tensor_indexes)]
 
     def _import_golden_funcs(self):
         """resolve 链：spec/插件 golden → ACLNN_GOLDEN 映射 → torch 同名自动导入。"""

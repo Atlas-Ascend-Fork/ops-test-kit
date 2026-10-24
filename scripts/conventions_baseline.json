@@ -128,7 +128,8 @@
       "C901": 1
     },
     "ttk/core_modules/common/invoke.py": {
-      "C901": 2
+      "C901": 2,
+      "PLR0913": 2
     },
     "ttk/core_modules/common/plugin/spec_loader.py": {
       "C901": 1
@@ -183,7 +184,7 @@
       "PLR0913": 1
     },
     "ttk/core_modules/framework_api/compare.py": {
-      "PLR0913": 3
+      "PLR0913": 5
     },
     "ttk/core_modules/framework_api/execute.py": {
       "C901": 1,
@@ -192,7 +193,7 @@
     },
     "ttk/core_modules/framework_api/golden.py": {
       "C901": 1,
-      "PLR0913": 1
+      "PLR0913": 6
     },
     "ttk/core_modules/framework_api/input_generate.py": {
       "C901": 1,
@@ -258,7 +259,8 @@
       "C901": 1
     },
     "ttk/core_modules/geir/worker.py": {
-      "PLR0913": 1
+      "PLR0913": 1,
+      "C901": 1
     },
     "ttk/core_modules/kernel/compare.py": {
       "C901": 1,
@@ -311,7 +313,7 @@
       "PLR0913": 1
     },
     "ttk/core_modules/kernel/worker.py": {
-      "PLR0913": 1
+      "PLR0913": 2
     },
     "ttk/remote/client.py": {
       "PLR0913": 2
@@ -343,6 +345,12 @@
     },
     "ttk/utilities/string.py": {
       "C901": 1
+    },
+    "ttk/core_modules/common/npu_golden.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/common/golden/npu_golden.py": {
+      "PLR0913": 1
     }
   },
   "underscore": {

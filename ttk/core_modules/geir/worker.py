@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""geir/worker.py — GEIR worker 入口 run + 模式展开 + 逐模式 _geir_run 编排。
+"""geir/worker.py — GEIR worker 入口 run + 模式展开 + 逐模式 _run_profile 编排。
 
 本文件只保留编排：图执行段见 execute.py（输入 bin / 轮循环 /
 pipe 协议 / dl=1 MD5 / 轮间清），比对与 dump 见 compare.py。
@@ -22,6 +22,7 @@ __all__ = ["run"]
 import gc
 import logging
 import os
+from types import SimpleNamespace
 
 from ttk.core_modules.kernel.golden import gen_output
 from ttk.core_modules.kernel.input_generate import gen_input
@@ -76,7 +77,7 @@ def run(
     """GEIR worker 入口（原 geir_profile_process 改名；Task.func 同批切换）。
 
     模式展开：cst/dyn 开关 × geir_binary → {const, dynamic, const_binary,
-    dynamic_binary}，逐模式 _geir_run 结果写同一 GeirReturnStructure 的
+    dynamic_binary}，逐模式 _run_profile 结果写同一 GeirReturnStructure 的
     cst_/dyn_ 槽。
     """
     switches = get_global_storage()
@@ -110,15 +111,15 @@ def run(
             grant_event=device_grant_events.get(dev_id),
             granted_idx=device_granted_indices.get(dev_id),
         ):
-            manual_case, stored_goldens, dump_store, early = _manual_data_stage(testcase, switches, process_ctx)
+            manual_case, stored_goldens, dump_store, early = _resolve_manual_stores(testcase, switches, process_ctx)
             if early is not None:
                 result = early
             elif switches.no_prof:
-                result = _no_prof_dump(testcase, switches, process_ctx, dump_store)
+                result = _manual_data_dump(testcase, switches, process_ctx, dump_store)
             else:
                 result = None
                 for mode in _expand_modes(switches):
-                    mode_result = _geir_run(
+                    mode_result = _run_profile(
                         testcase, dev_id, switches, process_ctx, mode, manual_case, stored_goldens, dump_store
                     )
                     result = _merge_mode_result(result, mode_result, mode)
@@ -139,7 +140,7 @@ def run(
 
     process_ctx.notify_status("OnReturning")
     _mark_off_modes(result, switches)
-    _geir_profiling_end_print(result)
+    _profiling_end_print(result)
     gc.collect()
     return result
 
@@ -197,6 +198,11 @@ def _absorb_fields(result, mode_result):
         result.xpu_metrics.update(mode_result.xpu_metrics)
     if mode_result.precision_metrics:
         result.precision_metrics.update(mode_result.precision_metrics)
+    # golden-mode NPU：golden 逐模式重生成——非 None 覆盖（末模式值生效，与
+    # perf/metrics 的覆盖哲学一致；golden 语义不随模式变化，仅 perf 微差）
+    for name in ("golden_device_perf_us", "golden_kernel_count", "golden_kernel_details", "golden_source"):
+        if getattr(mode_result, name) is not None:
+            setattr(result, name, getattr(mode_result, name))
     if mode_result.passed and not result.passed:
         result.precision = mode_result.precision
         result.passed = True
@@ -204,7 +210,7 @@ def _absorb_fields(result, mode_result):
         result.log = mode_result.log
 
 
-def _geir_profiling_end_print(result):
+def _profiling_end_print(result):
     """结果后屏显：kernel 同款 render_table（MODE × Performance/Comparison）。"""
     switches = get_global_storage()
     mode_suffix = "_BIN" if getattr(switches, "geir_binary", False) else ""
@@ -245,7 +251,7 @@ def _manual_data_failure(status: str, exc: Exception) -> GeirReturnStructure:
     return result
 
 
-def _manual_data_stage(testcase, switches, process_ctx):
+def _resolve_manual_stores(testcase, switches, process_ctx):
     """manual-data 来源裁决（与 kernel/aclnn/e2e worker 同构）。
 
     返回 (manual_case, stored_goldens, dump_store, early_result)；
@@ -269,7 +275,7 @@ def _manual_data_stage(testcase, switches, process_ctx):
             testcase,
             "geir",
             switches,
-            before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
+            notify_before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
             require_goldens=False,
         )
     except Exception as exc:
@@ -299,7 +305,7 @@ def _manual_data_stage(testcase, switches, process_ctx):
     return manual_case, stored_goldens, None, None
 
 
-def _no_prof_dump(testcase, switches, process_ctx, dump_store) -> GeirReturnStructure:
+def _manual_data_dump(testcase, switches, process_ctx, dump_store) -> GeirReturnStructure:
     """--no-prof：输入 → 快照 → 判据/golden（Promote 遵从）→ store 落盘。
 
     数据集（输入+golden）与图模式（const/dynamic × binary）无关，单遍落盘；
@@ -310,15 +316,16 @@ def _no_prof_dump(testcase, switches, process_ctx, dump_store) -> GeirReturnStru
         gen_input(testcase)
         _reconcile_inputs(testcase)
         input_snapshot = snapshot_manual_values(list(_iter_flat_values(testcase.input_arrays or ())), "input")
-        _, _, golden_is_xpu, _ = _resolve_stage(testcase, switches)
+        tol_state = _resolve_tolerance(testcase, switches)
         write_goldens = switches.dump_config.dump_golden
-        if golden_is_xpu:
+        if tol_state.golden_is_xpu:
             # 对齐 kernel：三方 golden 无可落盘——占位后由 dump_manual_dataset
-            # 的占位串过滤仅落 input（no-prof + XPU 合法组合）
+            # 的占位串过滤仅落 input（no-prof + XPU 合法组合）。NPU 不在此路径
+            # （no-prof × dump_golden 已被 bridge 拒绝）
             testcase.golden_arrays = ["GOLDEN_FAILURE"]
         elif write_goldens:
             process_ctx.notify_status("OnGenerateGolden")
-            _golden_stage(testcase, golden_is_xpu)
+            _prepare_golden(testcase, tol_state.golden_is_xpu)
         if dump_store is None:
             raise ValueError("no manual-data output directory configured")
         process_ctx.notify_status("OnWriteManualData")
@@ -351,7 +358,7 @@ def _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_sna
     logging.info("[%s] manual GEIR data dumped (first run): %s", testcase.testcase_name, case_dir)
 
 
-def _geir_run(
+def _run_profile(
     testcase, dev_id, switches, process_ctx, mode="const", manual_case=None, stored_goldens=None, dump_store=None
 ):
     """单模式编排（输入/golden/判据/三方/图编译/图执行/比对/打包，图编译嵌在图执行前）。
@@ -374,14 +381,18 @@ def _geir_run(
         input_snapshot = snapshot_manual_values(list(_iter_flat_values(testcase.input_arrays or ())), "input")
 
     process_ctx.notify_status("OnResolveTolerance")
-    standards, need_3party, golden_is_xpu, pre_compare = _resolve_stage(testcase, switches)  # 判据解析
+    tol_state = _resolve_tolerance(testcase, switches)  # 判据解析
 
     process_ctx.notify_status("OnGenerateGolden")
-    _golden_stage(testcase, golden_is_xpu, stored_goldens)  # golden 生成
+    _prepare_golden(
+        testcase, tol_state.golden_is_xpu, stored_goldens, golden_is_npu=tol_state.golden_is_npu, dev_id=dev_id
+    )  # golden 生成
 
     if dump_store is not None:
-        if golden_is_xpu:
-            # 对齐 kernel full-flow + XPU：三方 golden 无可落盘，warning 跳过
+        if tol_state.golden_is_xpu:
+            # 对齐 kernel full-flow + XPU：三方 golden 无可落盘，warning 跳过。
+            # NPU 不跳过：golden 已在 _prepare_golden 内生成（自起锁段），首跑
+            # 落盘后 replay 可直接复用。
             logging.warning(
                 "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
                 testcase.testcase_name,
@@ -389,15 +400,13 @@ def _geir_run(
         else:
             _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_snapshot)
 
-    xpu = _dispatch_xpu(testcase, switches, process_ctx, manual_case, need_3party)  # 三方 dispatch
-    if golden_is_xpu:
+    xpu = _dispatch_xpu(testcase, switches, process_ctx, manual_case, tol_state.need_3party)  # 三方 dispatch
+    if tol_state.golden_is_xpu:
         # golden-XPU：三方即 golden，设备前收割（_xpu_golden_missing 提前失败省编译执行）
-        third_parties, _results, _provider = xpu.collect()
-        early = _xpu_golden_missing(testcase, third_parties)
+        early = _xpu_promote_golden(testcase, xpu)
         if early is not None:
             xpu.discard()
             return early
-        testcase.golden_arrays = list(third_parties)
 
     process_ctx.notify_status("OnGeirCompile")
     compiler, binary, config_path = _compile_stage(testcase, switches, mode)  # 图编译
@@ -411,13 +420,23 @@ def _geir_run(
         prof_path=_prof_path(switches, testcase, mode),
         input_prefix=input_prefix,
     )
-    exec_result = execute_graph(testcase, dev_id, switches, plan, pre_compare)  # 图执行（XPU 并行中）
+    exec_result = execute_graph(testcase, dev_id, switches, plan, tol_state.pre_compare)  # 图执行（XPU 并行中）
 
     third_parties, xpu_results = _collect_xpu(testcase, switches, xpu)
+    if tol_state.golden_is_xpu:
+        # golden 性能回填：三方执行即 golden 真值，device_us 进 golden_* 列
+        from ..common.golden import xpu_golden_perf
+
+        testcase.golden_perf = xpu_golden_perf(xpu_results)
+        testcase.golden_source = "xpu"
 
     process_ctx.notify_status("OnGeirCompare")
     inputs = CompareInputs(
-        tuple(exec_result.outputs), tuple(testcase.golden_arrays), standards, third_parties, pre_compare
+        tuple(exec_result.outputs),
+        tuple(testcase.golden_arrays),
+        tol_state.standards,
+        third_parties,
+        tol_state.pre_compare,
     )
     # store 已落输入/golden 时跳过常规数据 dump（输出仍落——来自执行，store 表达不了）
     compared = compare_case(
@@ -432,16 +451,24 @@ def _geir_run(
         batch_summary = assemble_batch_summary(list(exec_result.outputs), testcase, testcase.batch_consistency_id)
 
     result = _pack_result(mode, exec_result, compared, xpu_results, testcase)  # 结果打包
+    if tol_state.golden_is_npu:
+        from ..common.golden import golden_perf_columns
+
+        for key, value in golden_perf_columns(
+            getattr(testcase, "golden_perf", None), getattr(testcase, "golden_source", None)
+        ).items():
+            setattr(result, key, value)
     result.batch_summary = batch_summary
     return result
 
 
-def _resolve_stage(testcase, switches) -> tuple:
+def _resolve_tolerance(testcase, switches) -> SimpleNamespace:
     """判据解析（提前到 golden 前；SpecResolver 直用，无吞错包装）。
 
     唯一目的：判据要求升精度时设 golden_mode_override 让 golden 走 Promote
     高精度真值（与 kernel/worker.py 的 tolerance 前置形态对齐）。
     pre_compare 一并 resolve（双消费点：比对段一次 + dl≥1 逐轮规范化）。
+    返回 SimpleNamespace(standards/need_3party/golden_is_xpu/golden_is_npu/pre_compare)。
     """
     resolver = SpecResolver(testcase.op_name, "geir", getattr(switches, "plugin_path", None))
     standards = resolve_tolerance(
@@ -452,15 +479,28 @@ def _resolve_stage(testcase, switches) -> tuple:
         switches.compare_method,
         input_dtypes=testcase.flat_input_dtypes,
     )
-    need_3party_outputs = any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为比对标准名，非口令
+    need_3party = any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为比对标准名，非口令
     # golden-mode XPU：三方输出升格为 golden 位——与 Promote 互斥，
     # golden 函数旁路不生成，三方执行后回填；失败整例 FAIL。
     golden_is_xpu = switches.golden_mode == "XPU"
+    # golden-mode NPU：golden 在设备上执行（torch 载体 + 采集窗）——与 Promote 互斥。
+    golden_is_npu = switches.golden_mode == "NPU"
     # cross_check 三方 / mixed·mix_tolerance 单标杆均升精度；Disable 是显式
     # 豁免（golden 不生成），升精度无从谈起，不得覆盖（与 kernel/worker.py 对齐）
-    if needs_promote_golden(standards) and not golden_is_xpu and switches.golden_mode != "Disable":
+    if (
+        needs_promote_golden(standards)
+        and not golden_is_xpu
+        and not golden_is_npu
+        and switches.golden_mode != "Disable"
+    ):
         testcase.golden_mode_override = "Promote"
-    return standards, need_3party_outputs, golden_is_xpu, resolver.resolve_pre_compare()
+    return SimpleNamespace(
+        standards=standards,
+        need_3party=need_3party,
+        golden_is_xpu=golden_is_xpu,
+        golden_is_npu=golden_is_npu,
+        pre_compare=resolver.resolve_pre_compare(),
+    )
 
 
 def _reconcile_inputs(testcase) -> None:
@@ -535,14 +575,17 @@ def _iter_flat_values(values):
             yield value
 
 
-def _golden_stage(testcase, golden_is_xpu, stored_goldens=None) -> None:
+def _prepare_golden(testcase, golden_is_xpu, stored_goldens=None, golden_is_npu=False, dev_id=0) -> None:
     """golden 生成（复用 kernel/golden.py；GEIR 逐模式重生成——已扩展过的输出
     元数据不重复增长，_output_meta_count 判定，66c6491）。
 
     stored_goldens（manual-data 复跑装载）先切齐声明输出槽数再传入：存储集
     含 shape-unknown 元数据槽，而元数据 golden 由 gen_output 依各 data golden
     的 shape 重算追加——首模式（flat 未扩展）与后续模式（flat 已扩展）切齐后
-    两侧槽数一致，不因逐模式重入而重复追加。"""
+    两侧槽数一致，不因逐模式重入而重复追加。
+
+    golden_is_npu：GEIR 的 DeviceLock 包裹全程（含本阶段），golden 在锁内
+    直接生成——gen_output 传 dev_id 内联生成（与 kernel 同款单步编排）。"""
     if golden_is_xpu:
         # golden 由三方采集产出（本侧参照不生成）；回填在 collect 之后
         testcase.golden_arrays = ["GOLDEN_FAILURE"]
@@ -551,7 +594,7 @@ def _golden_stage(testcase, golden_is_xpu, stored_goldens=None) -> None:
             declared = len(testcase.flat_output_shapes) - testcase.shape_unknown_slot_count
             stored_goldens = list(stored_goldens[:declared])
         try:
-            gen_output(testcase, stored_goldens=stored_goldens)
+            gen_output(testcase, stored_goldens=stored_goldens, dev_id=dev_id if golden_is_npu else None)
         finally:
             if hasattr(testcase, "golden_mode_override"):
                 del testcase.golden_mode_override
@@ -628,6 +671,17 @@ def _proto_input_names(testcase) -> list:
     except Exception as exc:
         logging.debugc("[GEIR/%s] proto input_names unavailable, fallback to []: %s", testcase.op_name, exc)
         return []
+
+
+def _xpu_promote_golden(testcase, xpu):
+    """golden-XPU 装配（设备前收割，对齐 kernel/aclnn/e2e）：三方即 golden，
+    缺失经 _xpu_golden_missing 提前失败省编译执行。返回非 None = early。"""
+    third_parties, _results, _provider = xpu.collect()
+    early = _xpu_golden_missing(testcase, third_parties)
+    if early is not None:
+        return early
+    testcase.golden_arrays = list(third_parties)
+    return None
 
 
 def _xpu_golden_missing(testcase, third_parties):

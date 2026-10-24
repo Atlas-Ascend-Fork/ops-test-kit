@@ -124,7 +124,9 @@ def test_manual_xpu_bypasses_xpu_dispatch(tmp_path, monkeypatch, need_3party, go
 
     process_context = SimpleNamespace(notify_status=lambda *_: None)
     monkeypatch.setattr(profiling, "process_context", lambda: process_context)
-    monkeypatch.setattr(profiling, "get_global_storage", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        profiling, "get_global_storage", lambda: SimpleNamespace(golden_mode="XPU" if golden_is_xpu else "Enable")
+    )
     monkeypatch.setattr(
         profiling,
         "_do_xpu_profiling",
@@ -132,7 +134,7 @@ def test_manual_xpu_bypasses_xpu_dispatch(tmp_path, monkeypatch, need_3party, go
     )
 
     # dispatch/collect 两段式：manual 源 → ready 句柄，collect 即取（远端零调用）
-    xpu = profiling._dispatch_xpu(case, need_3party=need_3party, golden_is_xpu=golden_is_xpu, manual_case=manual_case)
+    xpu = profiling._dispatch_xpu(case, need_3party=need_3party, manual_case=manual_case)
     assert not xpu.pending  # ready 形态
     third_parties, xpu_results, provider = xpu.collect()
 

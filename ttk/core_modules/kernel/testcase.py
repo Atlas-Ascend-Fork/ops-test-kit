@@ -87,12 +87,6 @@ class TestcaseKernel(TestcaseBase):
         # special
         "output_inplace_indexes",
         "output_shape_unknown_indexes",
-        # shape-unknown 输出（输出 shape 依赖输入值、无法静态推导）的 shape
-        # 编码槽数：CSV 未声明，golden 期经 append_output_metadata 并入输出
-        # 字段。注意 ≠ len(output_shape_unknown_indexes)：全部 unknown 输出
-        # 拼接为 1 个 uint64 槽，当前恒为 0/1。读侧：golden 复跑防重复扩展
-        # （GEIR 双模式）与 manual-data 槽位协议
-        "_shape_unknown_slot_count",
         # specify dump file prefix
         "dump_file_prefix",
         # manual configurations
@@ -142,7 +136,16 @@ class TestcaseKernel(TestcaseBase):
         # XPU third-party
         "xpu_results",
         "golden_mode_override",
+        # golden-mode NPU（设备阶段执行 + 采集）
+        "golden_perf",
+        "golden_source",
         # private
+        # shape-unknown 输出（输出 shape 依赖输入值、无法静态推导）的 shape
+        # 编码槽数：CSV 未声明，golden 期经 append_output_metadata 并入输出
+        # 字段。注意 ≠ len(output_shape_unknown_indexes)：全部 unknown 输出
+        # 拼接为 1 个 uint64 槽，当前恒为 0/1。读侧：golden 复跑防重复扩展
+        # （GEIR 双模式）与 manual-data 槽位协议
+        "_shape_unknown_slot_count",
         "_computed_list_distribution",
         "_input_distribution",
         "_output_distribution",
@@ -1546,17 +1549,16 @@ class TestcaseKernel(TestcaseBase):
         self.manual_golden_binaries = None
         self.manual_xpu_binaries = None
         # End of testcase valid configurations
-        # input_arrays/original_input_arrays 槽表基底私有态
-        self._input_tensor_slots = None
-        self._input_slots_from_declaration = False
-        self._input_arrays_written = False
-        self._ori_arrays_written = False
-
         self.golden_arrays = None
         self.output_arrays = None
         self.dyn_workspace_arrays: Tuple[numpy.ndarray, ...] = ()
         self.cst_workspace_arrays: Tuple[numpy.ndarray, ...] = ()
         self.bin_workspace_arrays: Tuple[numpy.ndarray, ...] = ()
+        # input_arrays/original_input_arrays 槽表基底私有态
+        self._input_tensor_slots = None
+        self._input_slots_from_declaration = False
+        self._input_arrays_written = False
+        self._ori_arrays_written = False
 
     def _init_compile_and_tiling_fields(self):
         """Initialize DYN runtime, compilation results, tiling and prof outputs."""
@@ -1617,6 +1619,9 @@ class TestcaseKernel(TestcaseBase):
         self._dyn_input_ranges_cache: Optional[tuple] = None
         self._dyn_output_ranges_cache: Optional[tuple] = None
         self.xpu_results: dict = {}
+        # golden-mode NPU：设备阶段 NPU golden 的性能与来源（result 侧抄写）
+        self.golden_perf = None
+        self.golden_source = None
 
     # ========== actual_input_data_ranges override ==========
 

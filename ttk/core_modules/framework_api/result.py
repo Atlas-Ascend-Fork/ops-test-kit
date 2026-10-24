@@ -51,6 +51,10 @@ class FrameworkApiReturnStructure(ReturnStructureBase):
         "deterministic_status",
         "xpu_metrics",
         "npu_memory",
+        "golden_device_perf_us",
+        "golden_kernel_count",
+        "golden_kernel_details",
+        "golden_source",
     )
 
     # 专属列 = __slots__ 去公共槽（COMMON_SLOTS 由基类声明）派生——单源维护，
@@ -84,6 +88,10 @@ class FrameworkApiReturnStructure(ReturnStructureBase):
         self.precision_metrics = {}
         self.xpu_metrics = {}
         self.npu_memory = None
+        self.golden_device_perf_us = None
+        self.golden_kernel_count = None
+        self.golden_kernel_details = None
+        self.golden_source = None
         # dl=3 batch 一致性：worker 切片哈希摘要（随 pipe 回传主进程，非 CSV 列——
         # cleanup 组装比对消费）
         self.batch_summary = None
@@ -142,3 +150,34 @@ class FrameworkApiReturnStructure(ReturnStructureBase):
         if metrics:
             mode_key = "eager" if mode is None else f"graph_{self._MODE_PREFIX[mode]}"
             self.precision_metrics[mode_key] = metrics
+
+    def set_golden_perf(self, profile_result, source=None):
+        """golden 执行侧的性能回写（golden-mode NPU 采集窗产物）。
+
+        列口径与 construct 的 perf 段同款（result.py 原 114-123 逻辑）：
+        elapsed<=0 → device_perf "----"，kernel_details 空不写 kernel 列
+        （golden 侧不回写 host/cpu 时间——该口径对真值侧无参考意义）。
+        source 标识 golden 来源（"npu"/"xpu"/...），供报告与告警判别。
+        """
+        self.golden_source = source
+        if profile_result is None or profile_result.elapsed_us <= 0:
+            self.golden_device_perf_us = "----"
+            return
+        self.golden_device_perf_us = f"{profile_result.elapsed_us:.3f}"
+        kd = profile_result.kernel_details
+        if kd and kd.kernels:
+            self.golden_kernel_count = str(len(kd.kernels))
+            self.golden_kernel_details = json.dumps(
+                [
+                    {
+                        "name": k.name,
+                        "total": round(k.device_us, 3),
+                        "avg": round(k.avg_us, 3),
+                        "max": round(k.max_us, 3),
+                        "min": round(k.min_us, 3),
+                        "calls": k.calls,
+                    }
+                    for k in kd.kernels
+                ],
+                ensure_ascii=False,
+            )

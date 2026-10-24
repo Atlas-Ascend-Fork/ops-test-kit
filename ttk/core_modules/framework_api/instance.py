@@ -52,6 +52,14 @@ class FrameworkApiInstance(InstanceBase):
             # 探测失败回落 CPU 后把运行定格为 CPU：设备池 id 是 CPU 槽位而非
             # NPU id（DSMI 健康过滤按 force_cpu 跳过），worker 也免于二次探测。
             switches.force_cpu = True
+        if switches.golden_mode == "NPU" and not switches.no_prof and not self.backend.has_device():
+            # golden-mode NPU 需要设备执行通道——无卡/强制 CPU 时启动期
+            # fail-fast，避免执行期每用例 UNSUPPORTED 静默 FAIL。
+            raise ValueError(
+                "--golden-mode NPU requires a device-capable backend "
+                "(no NPU device detected or --backend cpu forced); "
+                "use --golden-mode Enable for CPU golden"
+            )
         logging.info(f"Framework API mode: backend={self.backend.device_type()}, framework={framework}")
 
     @staticmethod
@@ -109,8 +117,7 @@ class FrameworkApiInstance(InstanceBase):
         pass
 
     def build_tasks(self, testcases: List[TestcaseE2e]) -> List[Task]:
-        grant_events = SimpleCommandProcess._device_grant_events
-        granted_indices = SimpleCommandProcess._device_granted_indices
+        grant_events, granted_indices = SimpleCommandProcess.device_grants()
         # -t/--ti 圈选时按传入序（getattr 兼容免实例化调用）
         sorted_cases = execution_sorted(getattr(self, "_selection_order_key", None), testcases)
         tasks = []

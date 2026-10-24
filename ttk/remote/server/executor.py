@@ -132,9 +132,9 @@ class _MissingSpecDependency(ImportError):
 _TORCH_DEV_MODULE = None
 
 # third_party key aliases — mirrors client-side aliases (client.py) so spec
-# writers can use "tensorflow"/"np"; two-token dict, duplicated here.
+# writers can use "tensorflow"/"np"/"npu"; duplicated here (separate process).
 # Keep in sync with the client copy.
-_TP_ALIASES = {"tensorflow": "tf", "np": "numpy"}
+_TP_ALIASES = {"tensorflow": "tf", "np": "numpy", "npu": "torch"}
 
 
 def _api_from_kwargs(kwargs):
@@ -935,7 +935,7 @@ def _torch_profiler_pass(
             callable_fn, named, attrs, provider, device_id, use_device, profile=profile, param_order=param_order
         )
 
-    return torch_xpu_profiler_pass(invoke, runtime, device, activities_cfg)
+    return torch_xpu_profiler_pass(invoke, runtime, device, activities_cfg, torch_lib=profile["torch_lib"])
 
 
 def _tf_profiler_pass(callable_fn, named, attrs, provider, device_id, use_device, profile, runtime, param_order=None):

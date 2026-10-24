@@ -29,7 +29,7 @@ HEALTH_BARRIER_TIMEOUT_S = 15.0
 # third_party provider aliases — canonical worker-side copy (spec-layer key
 # normalization in client.py and CLI --provider parsing share it); the server
 # keeps its own in server/executor.py (separate process). Keep in sync.
-_TP_ALIASES = {"tensorflow": "tf", "np": "numpy"}
+_TP_ALIASES = {"tensorflow": "tf", "np": "numpy", "npu": "torch"}
 
 
 def _parse_provider_filter(raw: Optional[str]) -> Optional[List[str]]:

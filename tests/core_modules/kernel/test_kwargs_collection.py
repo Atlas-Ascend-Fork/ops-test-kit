@@ -9,8 +9,8 @@
 # ----------------------------------------------------------------------------
 """
 Tests for kwargs collection in golden/input generation:
-- output_generation.__collect_dynamic_golden_kwargs
-- input_generation.__collect_dynamic_kwargs
+- output_generation._collect_dynamic_golden_kwargs
+- input_generation._collect_dynamic_kwargs
 
 Verifies that kwargs use nested fields directly after normalize.
 """
@@ -25,8 +25,8 @@ from ttk.core_modules.kernel import golden as _out_gen_mod
 from ttk.core_modules.kernel import input_generate as _in_gen_mod
 from ttk.core_modules.kernel.testcase import TestcaseKernel
 
-_collect_golden_kwargs = getattr(_out_gen_mod, "__collect_dynamic_golden_kwargs")
-_collect_input_kwargs = getattr(_in_gen_mod, "__collect_dynamic_kwargs")
+_collect_golden_kwargs = _out_gen_mod._collect_dynamic_golden_kwargs
+_collect_input_kwargs = _in_gen_mod._collect_dynamic_kwargs
 
 
 def _make_testcase(
@@ -98,7 +98,7 @@ def _mock_env(monkeypatch):
 
 
 # =====================================================================
-# Tests for output_generation.__collect_dynamic_golden_kwargs
+# Tests for output_generation._collect_dynamic_golden_kwargs
 # =====================================================================
 
 
@@ -149,7 +149,7 @@ class TestGoldenKwargsNonTensorList:
 
 
 # =====================================================================
-# Tests for input_generation.__collect_dynamic_kwargs
+# Tests for input_generation._collect_dynamic_kwargs
 # =====================================================================
 
 

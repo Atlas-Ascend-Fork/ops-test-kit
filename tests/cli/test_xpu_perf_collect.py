@@ -211,7 +211,7 @@ def test_profile_process_gate_open_and_shut(monkeypatch):
 
     - gate OPEN（xpu_perf=True）：_do_xpu_profiling 被调用 1 次，短路抛 _XpuCalled。
     - gate SHUT（xpu_perf=False）：_do_xpu_profiling 调用 0 次，run
-      越过 gate 到 __gen_workspaces，因 context 无 dyn_compile_result 抛 AttributeError。
+      越过 gate 到 _build_workspace_arrays，因 context 无 dyn_compile_result 抛 AttributeError。
 
     若 gate 被回退为 is_remote_configured()（无条件开启），SHUT 分支会失败。
     """
@@ -244,11 +244,13 @@ def test_profile_process_gate_open_and_shut(monkeypatch):
             notify_status=lambda _s: None,
         ),
     )
-    monkeypatch.setattr(prof, "__apply_force_overrides", lambda _ctx: None)
-    monkeypatch.setattr(prof, "__parse_dynamic_tiling_data", lambda _ctx: None)
-    monkeypatch.setattr(prof, "__parse_binary_tiling_data", lambda _ctx: None)
+    monkeypatch.setattr(prof, "_apply_force_overrides", lambda _ctx: None)
+    monkeypatch.setattr(prof, "_parse_dynamic_tiling_data", lambda _ctx: None)
+    monkeypatch.setattr(prof, "_parse_binary_tiling_data", lambda _ctx: None)
     monkeypatch.setattr(prof, "gen_input", lambda _ctx: None)
-    monkeypatch.setattr(prof, "gen_output", lambda _ctx: None)
+    monkeypatch.setattr(prof, "gen_output", lambda _ctx, stored_goldens=None, dev_id=None: None)
+    monkeypatch.setattr(prof, "_dump_input", lambda _ctx: None)
+    monkeypatch.setattr(prof, "_dump_golden", lambda _ctx: None)
     # resolve 路径：tolerance None → resolve 返回 [] → need_3party=False
     monkeypatch.setattr(prof, "SpecResolver", _SpecResolverStub(lambda *_a, **_k: None))
     import ttk.core_modules.common.comparison.resolve as resolve_mod
@@ -276,7 +278,7 @@ def test_profile_process_gate_open_and_shut(monkeypatch):
     assert len(xpu_calls) == 1, "gate open must invoke _do_xpu_profiling"
 
     # --- gate SHUT：xpu_perf=False, need_3party=False → _xpu_mode 返回 0 ---
-    # _do_xpu_profiling 不应被调用；run 越过 gate 到 __gen_workspaces，
+    # _do_xpu_profiling 不应被调用；run 越过 gate 到 _build_workspace_arrays，
     # 因 context 无 dyn_compile_result 而抛 AttributeError（证明 gate 未开）。
     xpu_calls.clear()
     sw.xpu_perf = False

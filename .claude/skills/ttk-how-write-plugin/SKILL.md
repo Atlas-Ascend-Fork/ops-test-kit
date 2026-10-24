@@ -66,6 +66,29 @@ class AbsTestSpec:
 
 > E2E 默认由框架在 CPU 跑同 API 作 Golden；如需控制输入范围用 CSV 的 `input_data_ranges` 字段。
 
+## NPU Golden（`--golden-mode NPU`）
+
+golden 在 NPU 上执行并采集性能（msprof）。**device 契约**：声明 `device` 命名参数或 `**kwargs` 的 golden 会收到设备字符串（如 `"npu:0"`），自行 `.to(device)` 上板；框架负责注册 npu 设备类型（golden 只 import torch 也能 `.to(device)`）。
+
+| 流程 | NPU 模式下 golden 收到 | 上板方式 |
+|------|----------------------|---------|
+| Kernel / GEIR | **numpy.ndarray** + device 字符串 | golden 自行转（如 `torch.as_tensor(x).to(device)`） |
+| ACLNN / E2E | **torch.Tensor（已在设备上）** + device 字符串 | 框架已 `.to(device)`，golden 直接算；device 串留给创建新张量 |
+
+- 字符串形式（`golden = "torch.abs"`）：框架直接转张量上板，无需声明 device
+- class 形与函数形同契约（kernel 为 numpy 池 + device 注入，aclnn/e2e 为设备张量池）
+- numpy 实现的 golden 无法上板：CPU 现算，结果列 `golden_source="cpu"`、性能 `"----"`
+- 执行/采集失败自动回落 CPU golden（屏显 ERROR + 根因），精度不受影响
+- 结果列：`golden_source`（npu/cpu）、`golden_device_perf_us`、`golden_kernel_count/details`
+
+```python
+class AddTestSpec:
+    def golden(x1, x2, device=None, **kwargs):   # 声明 device 才收到
+        import torch
+        t = torch.as_tensor(x1).to(device) + torch.as_tensor(x2).to(device)
+        return [t]                                # torch 张量返回，框架转回 numpy
+```
+
 ## 资产属性
 
 所有属性可选，按需声明：

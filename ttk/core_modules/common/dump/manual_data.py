@@ -144,14 +144,15 @@ class ManualDataCase:
 
         Raw ``bin`` payloads do not carry shape metadata, so non-None bin Golden
         filenames encode the storage shape (``_shape_<dims>``; legacy files may
-        use ``__shape_``). When present, that self-describing shape is the
-        reshape truth; the device output shape is only cross-checked against it.
-        Files without a shape segment fall back to reader-side shapes. E2E
-        passes the executed device outputs (``device_outputs``) as shape truth,
-        while ACLNN passes declared output shapes and the CSV output dtypes.
-        A cache may carry additional operator-specific Goldens; those are
-        restored from their own file metadata and left for a custom compare
-        hook to interpret.
+        use ``__shape_``). The self-describing shape is the reshape truth and
+        is NOT cross-checked against reader-side shapes (written from the same
+        array, trustworthy; byte-size/dtype checks in ``_load_array`` catch
+        corruption). Files without a shape segment fall back to reader-side
+        shapes. E2E passes the executed device outputs (``device_outputs``) as
+        shape truth, while ACLNN passes declared output shapes and the CSV
+        output dtypes. A cache may carry additional operator-specific Goldens;
+        those are restored from their own file metadata and left for a custom
+        compare hook to interpret.
         """
         expected_shapes, storage_shapes = self._resolve_golden_shapes(device_outputs, shapes, dtypes)
         return [
@@ -222,22 +223,19 @@ class ManualDataCase:
         return expected_shapes, storage_shapes
 
     def _load_golden_entry(self, entry, expected_shape, storage_shape):
-        """单槽 golden 装载：None 标记 → shape 交叉核对 → 还原 shape 决议 → 装载。"""
+        """单槽 golden 装载：None 标记 → 按 saved shape 段还原 → 装载。
+
+        saved shape（文件名自描述，与 payload 同源写出）是唯一权威，不与
+        reader 侧预期（声明/设备输出）做相等性复核；数据损坏由 _load_array
+        的字节数预检与 dtype 复核兜底。reader 侧 shape 仅作无 saved 段文件
+        （legacy/npy/pt）的 fallback。读侧声明 None（未声明/动态输出槽）不
+        压制真实 golden 文件——「可选输出抑制」只由 none 标记文件表达。
+        """
         # A None golden suppresses comparison for an optional output. The
         # device API may still materialize that output during replay.
         if entry.dtype == _NONE_DTYPE:
             return _load_none(entry, "golden")
-        if expected_shape is None:
-            return _load_none(entry, "golden")
         logging.info("Reading manual golden file: %s ...", entry.path)
-        if (
-            entry.saved_shape is not None
-            and expected_shape is not _UNKNOWN_SHAPE
-            and tuple(expected_shape) != entry.saved_shape
-        ):
-            raise ManualDataError(
-                f"golden[{entry.index}] saved shape {entry.saved_shape} != device output shape {tuple(expected_shape)}"
-            )
         if entry.saved_shape is not None:
             # logical scalar（"scalar" 段）的物理落地是 (1,) 连续数组
             resolved_storage_shape = entry.saved_shape or (1,)
@@ -296,7 +294,11 @@ def _all_roots_empty(directories) -> bool:
 
 
 def load_manual_data_case(
-    testcase, case_type: str, switches, before_load: Optional[Callable[[], None]] = None, require_goldens: bool = True
+    testcase,
+    case_type: str,
+    switches,
+    notify_before_load: Optional[Callable[[], None]] = None,
+    require_goldens: bool = True,
 ) -> Optional[ManualDataCase]:
     """Load a manual-data case from the CLI directory list.
 
@@ -309,8 +311,12 @@ def load_manual_data_case(
     directories = resolve_manual_data_directories(switches, required=False)
     if not directories or _all_roots_empty(directories):
         return None
-    if getattr(switches, "golden_mode", "Enable") != "Enable":
-        raise ManualDataError("manual-data loading requires --golden-mode Enable")
+    # 回放 = 复用已存 golden，仅禁止 Disable：golden 生成侧的 SUPPRESSED 分支
+    # 覆盖不到 manual 装载路径（装载先于 Disable 判断），放行会让回放真值参与
+    # 比对、违背 SKIP 语义。XPU（三方回填真值，装载输入即可）/ NPU（已存真值
+    # 优先于设备重算）/ Promote（Enable 的现算变体）均放行。
+    if getattr(switches, "golden_mode", "Enable") == "Disable":
+        raise ManualDataError("manual-data loading cannot be combined with --golden-mode Disable")
     if getattr(switches, "validate_only", False):
         raise ManualDataError("manual-data loading cannot be combined with --validate")
     if case_type == "kernel" and getattr(switches, "compile_only", False):
@@ -318,8 +324,8 @@ def load_manual_data_case(
     if case_type == "e2e" and getattr(switches, "force_cpu", False):
         raise ManualDataError("manual-data loading is the device stage and cannot use --cpu")
     store = ManualDataStore(directories)
-    if before_load is not None:
-        before_load()
+    if notify_before_load is not None:
+        notify_before_load()
     return store.load_case(testcase, case_type, require_goldens=require_goldens)
 
 

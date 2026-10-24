@@ -52,7 +52,7 @@ class TestKernelRealtimeRandomInput:
         format=ND 时 input/original 两份同引用）。"""
         batch = _batch_fields([(0, 2, 1)], [101])
         context = _kernel_case(((4, 3),), batch=batch)
-        getattr(kernel_input_generate, "__realtime_random_input")(context)
+        kernel_input_generate._realtime_random_input(context)
         arr = context.input_arrays[0]
         # 复算期望：seed(42+0) 背景 + seed(101) 区段
         numpy.random.seed(42)
@@ -74,13 +74,13 @@ class TestKernelRealtimeRandomInput:
         batch = _batch_fields([(0, 2, 1)], [101])
         big = _kernel_case(((4, 3),), batch=batch)
         small = _kernel_case(((2, 3),), batch=batch)
-        getattr(kernel_input_generate, "__realtime_random_input")(big)
-        getattr(kernel_input_generate, "__realtime_random_input")(small)
+        kernel_input_generate._realtime_random_input(big)
+        kernel_input_generate._realtime_random_input(small)
         numpy.testing.assert_array_equal(big.input_arrays[0][:2], small.input_arrays[0])
 
     def test_no_relation_no_seeding(self, patched_switches):
         """无 batch 字段：不播种（全局流连续），行为与迁移前一致。"""
         context = _kernel_case(((4, 3),))
-        getattr(kernel_input_generate, "__realtime_random_input")(context)
+        kernel_input_generate._realtime_random_input(context)
         assert context.input_arrays[0].shape == (4, 3)
         assert not has_complete_batch_relation(context)

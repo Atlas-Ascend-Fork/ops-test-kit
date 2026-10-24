@@ -46,11 +46,11 @@ def comparing(
     custom_compare=None,
 ) -> ComparisonResult:
     # outputs may hold sentinels (DYN_OFF/None) of different length than dtypes;
-    # __outputs_to_numpy_arrays + compare() skip sentinels — no length assert.
+    # _outputs_to_numpy_arrays + compare() skip sentinels — no length assert.
     output_shapes = getattr(testcase, "flat_output_shapes", None) if testcase is not None else None
-    __outputs_to_numpy_arrays(dyn_outputs, output_dtypes, output_shapes, goldens)
-    __outputs_to_numpy_arrays(cst_outputs, output_dtypes, output_shapes, goldens)
-    __outputs_to_numpy_arrays(bin_outputs, output_dtypes, output_shapes, goldens)
+    _outputs_to_numpy_arrays(dyn_outputs, output_dtypes, output_shapes, goldens)
+    _outputs_to_numpy_arrays(cst_outputs, output_dtypes, output_shapes, goldens)
+    _outputs_to_numpy_arrays(bin_outputs, output_dtypes, output_shapes, goldens)
     try:
         logging_data = "\n"
         _std_tokens = sorted({str(s.token) for s in standards}) if standards else []
@@ -104,7 +104,7 @@ def _compare_mode(testcase, outputs, goldens, output_dtypes, standards, third_pa
     )
 
 
-def __outputs_to_numpy_arrays(outputs, output_dtypes, output_shapes=None, goldens=None):
+def _outputs_to_numpy_arrays(outputs, output_dtypes, output_shapes=None, goldens=None):
     output_dtypes = resolve_numpy_dtypes(output_dtypes)
     for idx, output in enumerate(outputs):
         if isinstance(output, (str, type(None))):
@@ -120,12 +120,12 @@ def __outputs_to_numpy_arrays(outputs, output_dtypes, output_shapes=None, golden
             outputs[idx] = numpy.frombuffer(output, "uint8")
         else:
             outputs[idx] = numpy.frombuffer(output, output_dtype)
-        __restore_output_shape(
+        _restore_output_shape(
             outputs, idx, get(output_shapes, idx) if output_shapes else None, get(goldens, idx) if goldens else None
         )
 
 
-def __restore_output_shape(outputs, idx, declared_shape, golden):
+def _restore_output_shape(outputs, idx, declared_shape, golden):
     """数据源头形状还原（flat 输入 → 源头嵌套）。
 
     frombuffer/unpack 产出恒为 1-D；钩子作者（pre_compare / Spec.compare）按真实

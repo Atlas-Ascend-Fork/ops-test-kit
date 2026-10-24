@@ -273,7 +273,7 @@ def test_manual_xpu_short_circuits_remote_collect(tmp_path, monkeypatch):
 
     monkeypatch.setattr("ttk.core_modules.common.xpu.collect_third_party", _no_remote)
 
-    xpu = aclnn_worker._dispatch_xpu(_mx_case(path), _mx_switches(), _mx_process_ctx(recorder), True, False)
+    xpu = aclnn_worker._dispatch_xpu(_mx_case(path), _mx_switches(), _mx_process_ctx(recorder), True)
     assert not xpu.pending  # manual 源 → ready
     third_parties, xpu_results, provider = xpu.collect()
 
@@ -299,7 +299,7 @@ def test_golden_xpu_mode_also_short_circuits(tmp_path, monkeypatch, via_slots):
     golden_switches = SimpleNamespace(dump_config=SimpleNamespace(dump_xpu=False), xpu_perf=False, golden_mode="XPU")
     manual_case = _mx_slot_case((str(path),)) if via_slots else None
     xpu = aclnn_worker._dispatch_xpu(
-        _mx_case(None if via_slots else path), golden_switches, _mx_process_ctx(recorder), False, True, manual_case
+        _mx_case(None if via_slots else path), golden_switches, _mx_process_ctx(recorder), False, manual_case
     )
     third_parties, xpu_results, _provider = xpu.collect()
 
@@ -334,7 +334,7 @@ def test_undeclared_goes_remote(tmp_path, monkeypatch, caplog, miss_third_party)
     monkeypatch.setattr("ttk.core_modules.common.xpu.xpu_overlap_enabled", lambda: False)  # 本用例钉同步路径
 
     caplog.set_level(logging.WARNING)
-    xpu = aclnn_worker._dispatch_xpu(case, _mx_switches(), _mx_process_ctx(recorder), True, False)
+    xpu = aclnn_worker._dispatch_xpu(case, _mx_switches(), _mx_process_ctx(recorder), True)
     third_parties, xpu_results, provider = xpu.collect()
 
     assert recorder == ["OnXpuProfiling", "remote"]

@@ -117,7 +117,7 @@ python3 -m ttk e2e    --backend npusim -i cases.csv -t add_f32_alpha
 |------|------|------|
 | `--compare` | `close`/`stat_rel_err`/`mixed`/`cosine`/`binary`/`requant`/`cross_check` | Spec.tolerance 路由（需 `--plugin`）；无声明时按输出 dtype 默认（浮点 `mixed`、整型/布尔 `binary_equal` 等） |
 | `--seed` | 随机种子。取相同值时，同一个用例每次执行生成的输入数据完全一致 | 随机 |
-| `--golden-mode` | `Enable`/`Disable`/`Promote`/`XPU` | `Enable` |
+| `--golden-mode` | `Enable`/`Disable`/`Promote`/`XPU`/`NPU` | `Enable` |
 | `--input-dist` | `uniform`/`normal` | `uniform` |
 | `--provider` | 指定待测三方 provider（如 `torch,tf`），只收窄分发范围（作用于所有三方/XPU 采集路径，不覆盖 yaml 配置） | 自动 |
 

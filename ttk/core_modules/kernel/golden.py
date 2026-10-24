@@ -38,7 +38,9 @@ from ...utilities import (
 )
 from ..common.invoke import (
     Invoke,
+    accepts_device,
     accepts_var_keyword,
+    class_accepts_device,
     golden_flatten,
     golden_mode,
     instantiate_and_call,
@@ -71,7 +73,7 @@ KERNEL_GOLDEN: dict = {
 }
 
 
-def __promote_dtype(context: TestcaseKernel):
+def _promote_dtype(context: TestcaseKernel):
     need_promote = [d in DTYPE_PROMOTE_MAP for d in context.flat_input_dtypes]
     if not any(need_promote):
         yield
@@ -142,22 +144,22 @@ def __promote_dtype(context: TestcaseKernel):
 
 
 @contextlib.contextmanager
-def __golden_mode(mode: str, context: TestcaseKernel):
+def _golden_mode(mode: str, context: TestcaseKernel):
     if mode != "Promote":
         yield
     else:
-        yield from __promote_dtype(context)
+        yield from _promote_dtype(context)
 
 
-def __call_numpy_api(context: TestcaseKernel, golden_func, golden_parameters, output_dtypes: list):
+def _call_numpy_api(context: TestcaseKernel, golden_func, golden_parameters, output_dtypes: list):
     """KERNEL numpy API golden computation."""
-    kwargs = __correct_kwargs_for_golden(context, golden_parameters)
+    kwargs = _correct_kwargs_for_golden(context, golden_parameters)
     # auto convert to fp32 and invoke numpy function for bfloat16.
     # otherwise numpy function will consider data as float16 to compute which is wrong.
-    # NOTE: this bf16→fp32 branch is ORTHOGONAL to __golden_mode/Promote — numpy
+    # NOTE: this bf16→fp32 branch is ORTHOGONAL to _golden_mode/Promote — numpy
     # cannot compute bfloat16 natively, so we lift to fp32 even when golden_mode
     # != Promote. The Promote-context wrap is applied once at the outer
-    # __invoke_golden dispatch (covers custom/class/torch/tf too).
+    # _invoke_golden dispatch (covers custom/class/torch/tf too).
     if any("bfloat16" in str(arr.dtype) for arr in context.flat_input_arrays):
         input_arrays = [
             arr if "bfloat16" not in str(arr.dtype) else arr.astype("float32") for arr in context.flat_input_arrays
@@ -177,17 +179,30 @@ def __call_numpy_api(context: TestcaseKernel, golden_func, golden_parameters, ou
     return results
 
 
-def __call_custom_golden_func(context: TestcaseKernel, golden_func, golden_parameters):
+def _call_custom_golden(context: TestcaseKernel, func, device="cpu", golden_parameters=None):
+    """自定义 golden 调用闭包（CPU/NPU 单实现，差异仅 device 字符串与数据形态）。
+
+    CPU：context.input_arrays 直喂（零拷贝）、返回原样（numpy 契约）；
+    NPU：numpy 入参副本（隔离 DUT backing storage）+ device 注入——golden
+    自行转换（.to(device)），torch 张量返回统一回转 numpy。kwargs 两形态
+    一致：全量元信息 + device 注入（accepts_device 声明才给）+ 按签名裁剪。
     """
-    customized & decouple function like:
-    def xx_xx(input0, input1, *, attr0, attr1, **kargs):
-        return output0, output1
-    """
-    kwargs = __collect_dynamic_golden_kwargs(context)
+    if device == "cpu":
+        t = context.input_arrays
+    else:
+        t = [
+            None if a is None else (a.copy() if isinstance(a, numpy.ndarray) else a) for a in context.flat_input_arrays
+        ]
+        t = nest_by_distribution(t, context.input_distribution)
+    kwargs = _collect_dynamic_golden_kwargs(context)
+    if accepts_device(func):
+        kwargs["device"] = device
     if golden_parameters and not accepts_var_keyword(golden_parameters):
         kwargs = {k: v for k, v in kwargs.items() if k in golden_parameters}
-    results = golden_func(*context.input_arrays, **kwargs)
-    return results
+    results = golden_flatten(func(*t, **kwargs), deep=True)
+    if device == "cpu":
+        return results
+    return [_np_of(r) for r in results]
 
 
 def _torch_attrs_by_schema(func, attrs: dict) -> dict:
@@ -206,7 +221,7 @@ def _torch_attrs_by_schema(func, attrs: dict) -> dict:
     return out
 
 
-def __call_torch_api(context: TestcaseKernel, func):
+def _call_torch_api(context: TestcaseKernel, func):
     from ...utilities import numpy_to_torch_tensor, torch_to_numpy_tensor
 
     t = [numpy_to_torch_tensor(a) if a is not None else None for a in context.flat_input_arrays]
@@ -216,7 +231,7 @@ def __call_torch_api(context: TestcaseKernel, func):
     return [torch_to_numpy_tensor(r) if hasattr(r, "numpy") else r for r in results]
 
 
-def __call_tf_api(context: TestcaseKernel, func):
+def _call_tf_api(context: TestcaseKernel, func):
     from ...utilities import normalize_from_tf_dtype, normalize_to_tf_dtype
 
     tf_in = [normalize_to_tf_dtype(a) if a is not None else None for a in context.flat_input_arrays]
@@ -229,17 +244,102 @@ def __call_tf_api(context: TestcaseKernel, func):
     return out
 
 
-def __invoke_class(context: TestcaseKernel, cls):
+_npu_tf_opened_device = None
+
+
+def _call_tf_api_npu(context: TestcaseKernel, func, dev_id: int):
+    """tf 原生 golden 的 NPU 执行（作为 Invoke.golden 的 npu_invoke 传入）。
+
+    dtype 归一化/输出回转与 CPU _call_tf_api 一致；差异在设备侧：
+    npu_device.open(dev_id).as_default() 后创建的张量即在 NPU 默认设备上，
+    golden 的 GE 任务进同一 msprof 采集窗。npu_device 仅支持单设备，跨
+    dev_id 重开直接报错。attrs 暂不传。
+    """
+    global _npu_tf_opened_device
+
+    import npu_device
+
+    from ...utilities import normalize_from_tf_dtype, normalize_to_tf_dtype
+
+    if _npu_tf_opened_device is None:
+        npu_device.open(dev_id).as_default()
+        _npu_tf_opened_device = dev_id
+    elif _npu_tf_opened_device != dev_id:
+        raise RuntimeError(
+            f"npu_device only supports one device; already opened {_npu_tf_opened_device}, cannot open {dev_id}"
+        )
+    import tensorflow as tf
+
+    tf_in = [
+        None if a is None else tf.convert_to_tensor(normalize_to_tf_dtype(a.copy())) for a in context.flat_input_arrays
+    ]
+    tf_in = nest_by_distribution(tf_in, context.input_distribution)
+    results = golden_flatten(func(*tf_in), deep=True)
+    out = []
+    for r in results:
+        n = r.numpy() if hasattr(r, "numpy") else r
+        out.append(normalize_from_tf_dtype(n))
+    return out
+
+
+def _call_torch_api_npu(context: TestcaseKernel, func, dev_id: int):
+    """torch golden 的 NPU 执行（作为 Invoke.golden 的 npu_invoke 传入）。
+
+    初始化设备（torch_npu + set_device）→ 输入拷贝上板 → 调用 golden →
+    深展平 → numpy 列表。采集窗/回落/性能由 Invoke.golden 处理。
+    """
+    import torch_npu
+
+    from ...utilities import numpy_to_torch_tensor
+
+    torch_npu.npu.set_device(dev_id)
+    t = []
+    for a in context.flat_input_arrays:
+        if a is None:
+            t.append(None)
+            continue
+        t.append(numpy_to_torch_tensor(a.copy()).npu(dev_id))
+    t = nest_by_distribution(t, context.input_distribution)
+    kwargs = _torch_attrs_by_schema(func, context.attributes)
+    if accepts_device(func):
+        kwargs["device"] = f"npu:{dev_id}"
+    raw = golden_flatten(func(*t, **kwargs), deep=True)
+    return [_np_of(r) for r in raw]
+
+
+def _np_of(value):
+    """torch（含 NPU）/tf 张量 → numpy；非张量原样。"""
+    if not hasattr(value, "numpy"):
+        return value
+    if hasattr(value, "detach"):  # torch 张量（CPU/NPU）
+        from ...utilities import torch_to_numpy_tensor
+
+        return torch_to_numpy_tensor(value.detach().cpu())
+    return value.numpy()  # tf 张量
+
+
+def _invoke_class(context: TestcaseKernel, cls, device="cpu"):
+    """class 形 golden：按名池绑定 __init__/__call__（与函数形同款契约）。
+
+    池值保持 numpy（kernel 输入契约）；device != "cpu" 时注入 device 字符串
+    （class_accepts_device 声明才给），golden 自行转 tensor 上板（.to(device)，
+    torch_npu 已由 generate_npu_golden 初始化）；返回值 torch 张量统一回转
+    numpy，CPU 时返回原样。"""
     op_info = OpInfoKeeper().info_of(context.op_name)
     inputs_named = {}
     if op_info:
         for inp, arr in zip(op_info["inputs"], context.flat_input_arrays):
             inputs_named[inp["name"]] = arr
     pool = {**inputs_named, **(context.attributes or {})}  # attributes 正常为 dict,or {} 防 None
-    return instantiate_and_call(cls, pool)
+    if class_accepts_device(cls):
+        pool["device"] = device
+    results = instantiate_and_call(cls, pool)
+    if device == "cpu":
+        return results
+    return [_np_of(r) for r in golden_flatten(results, deep=True)]
 
 
-def __invoke_golden(context: TestcaseKernel, golden_func, output_dtypes):
+def _invoke_golden(context: TestcaseKernel, golden_func, output_dtypes):
     """通路执行闭包（str 已由 Invoke.golden 解析）：Promote 包裹 + class/numpy/torch/tf/custom 分发。
 
     Single Promote-context wrap around the ENTIRE dispatch (class / numpy /
@@ -247,21 +347,21 @@ def __invoke_golden(context: TestcaseKernel, golden_func, output_dtypes):
     were guarded, so under golden_mode=Promote the custom / torch / tf goldens
     ran on un-promoted bfloat16/float16 inputs (inaccurate "true value").
     """
-    with __golden_mode(golden_mode(context, get_global_storage()), context):
+    with _golden_mode(golden_mode(context, get_global_storage()), context):
         if isinstance(golden_func, type):
-            return __invoke_class(context, golden_func)
+            return _invoke_class(context, golden_func)
         fw = framework_of(golden_func)
         if fw == "numpy":
             params = sig_params(golden_func)
-            return __call_numpy_api(context, golden_func, params, output_dtypes)
+            return _call_numpy_api(context, golden_func, params, output_dtypes)
         if fw == "torch":
-            return __call_torch_api(context, golden_func)
+            return _call_torch_api(context, golden_func)
         if fw == "tf":
-            return __call_tf_api(context, golden_func)
-        return __call_custom_golden_func(context, golden_func, sig_params(golden_func))
+            return _call_tf_api(context, golden_func)
+        return _call_custom_golden(context, golden_func, "cpu", sig_params(golden_func))
 
 
-def __builtin_golden_fallback(op_name):
+def _builtin_golden_fallback(op_name):
     """kernel 回退链：KERNEL_GOLDEN 映射 → numpy 同名属性（SpecResolver fallback 注入）。"""
     golden_func = KERNEL_GOLDEN.get(op_name)
     if golden_func is not None:
@@ -271,41 +371,160 @@ def __builtin_golden_fallback(op_name):
     return None
 
 
-def __generate_golden(context: TestcaseKernel, output_dtypes: list) -> list:
+def _init_npu_device(dev_id: int):
+    """torch_npu 注册 "npu" 设备类型并设定当前设备（.to("npu:X") 依赖；
+    worker 进程默认不 import torch_npu）。"""
+    import torch_npu
+
+    torch_npu.npu.set_device(dev_id)
+
+
+def generate_npu_golden(context: TestcaseKernel, dev_id: int):
+    """golden-mode NPU 生成：有 golden 时经 Invoke.golden 在设备上执行并采集
+    性能——torch 原生（golden="torch.add" 形态）由框架转张量上板；tf 原生经
+    npu_device 放置；class 形与自定义函数收 numpy 入参 + device 字符串自行
+    上板（框架先注册 npu 设备类型，golden 仅 import torch 也可 .to(device)）；
+    numpy 载体在 CPU 现算（source="cpu"、不采性能）。
+
+    返回 (flat_results, perf_or_None, source)。无 golden 时 CPU 生成。
+    """
+    switches = get_global_storage()
+    output_dtypes = resolve_numpy_dtypes(context.flat_output_dtypes)
+    golden_func = SpecResolver(context.op_name, "kernel", switches.plugin_path).resolve_golden(
+        lambda: _builtin_golden_fallback(context.op_name)
+    )
+    if golden_func is not None:
+        if isinstance(golden_func, type):
+            _init_npu_device(dev_id)
+            npu_invoke = lambda: _invoke_class(context, golden_func, f"npu:{dev_id}")  # noqa: E731
+        else:
+            fw = framework_of(golden_func)
+            if fw == "numpy":
+                # numpy golden 无法在设备上执行：CPU 现算（Enable 同路径），
+                # source="cpu"、不采性能
+                logging.warning(
+                    "[%s] golden-mode NPU: numpy golden cannot run on device; CPU golden used, device perf unavailable",
+                    context.op_name,
+                )
+                return (
+                    golden_flatten(
+                        Invoke.golden(
+                            context,
+                            golden_func,
+                            switches,
+                            lambda func: _invoke_golden(context, func, output_dtypes),
+                        ),
+                        deep=True,
+                    ),
+                    None,
+                    "cpu",
+                )
+            if fw == "torch":
+                npu_invoke = lambda: _call_torch_api_npu(context, golden_func, dev_id)  # noqa: E731
+            elif fw == "tf":
+                npu_invoke = lambda: _call_tf_api_npu(context, golden_func, dev_id)  # noqa: E731
+            else:
+                _init_npu_device(dev_id)
+                npu_invoke = lambda: _call_custom_golden(context, golden_func, f"npu:{dev_id}", sig_params(golden_func))  # noqa: E731
+        # NPU 闭包已展平；回落 CPU 的 _invoke_golden 返回值未展平（裸数组/
+        # 嵌套），与 _generate_golden 同款在此统一 flatten
+        results = golden_flatten(
+            Invoke.golden(
+                context,
+                golden_func,
+                switches,
+                invoke=lambda func: _invoke_golden(context, func, output_dtypes),
+                npu_invoke=npu_invoke,
+                dev_id=dev_id,
+            ),
+            deep=True,
+        )
+        return results, getattr(context, "golden_perf", None), getattr(context, "golden_source", None)
+    logging.warning(
+        "[%s] golden-mode NPU: no golden resolved; CPU golden used, device perf unavailable",
+        context.op_name,
+    )
+    return (
+        golden_flatten(
+            Invoke.golden(context, golden_func, switches, lambda func: _invoke_golden(context, func, output_dtypes)),
+            deep=True,
+        ),
+        None,
+        "cpu",
+    )
+
+
+def finalize_npu_golden(context: TestcaseKernel, golden_arrays: list) -> list:
+    """NPU golden 产出后收尾：截齐声明输出数 + 归一化（dtype 打包/溢出语义，
+    与 CPU 路径一致）→ 回写 context.golden_arrays。"""
+    output_dtypes = resolve_numpy_dtypes(context.flat_output_dtypes)
+    if len(golden_arrays) > len(context.flat_output_shapes):
+        golden_arrays = golden_arrays[: len(context.flat_output_shapes)]
+    _normalize_goldens(golden_arrays, output_dtypes)
+    context.golden_arrays = golden_arrays
+    return golden_arrays
+
+
+def _generate_golden(context: TestcaseKernel, output_dtypes: list) -> list:
     switches = get_global_storage()
     golden_func = SpecResolver(context.op_name, "kernel", switches.plugin_path).resolve_golden(
-        lambda: __builtin_golden_fallback(context.op_name)
+        lambda: _builtin_golden_fallback(context.op_name)
     )
     if golden_func is None:
         logging.warning(f"Golden function for operator {context.op_name} is not provided!")
     return golden_flatten(
-        Invoke.golden(context, golden_func, switches, lambda func: __invoke_golden(context, func, output_dtypes)),
+        Invoke.golden(context, golden_func, switches, lambda func: _invoke_golden(context, func, output_dtypes)),
         deep=True,
     )
 
 
-def __load_golden_from_file(fp: str, dtype: str, shape: Optional[Union[list, tuple]]):
+def _load_golden_from_file(fp: str, dtype: str, shape: Optional[Union[list, tuple]]):
     if shape is None:
         return None
     return load_array(fp, dtype, shape)
 
 
-def gen_output(context: TestcaseKernel, stored_goldens=None):
+def gen_output(context: TestcaseKernel, stored_goldens=None, dev_id: Optional[int] = None):
     # Enable tensorflow numpy bfloat16 support
+    switches = get_global_storage()
     output_dtypes = resolve_numpy_dtypes(context.flat_output_dtypes)
+    if stored_goldens is not None:
+        # manual-data 复跑装载优先（golden-mode 无关）——有已存真值就用，不因
+        # 模式差异跳过装载（XPU 下后续由三方回填覆盖，语义在比对层收敛）
+        golden_arrays = list(stored_goldens)
+    elif golden_mode(context, switches) == "XPU":
+        # XPU：真值来自三方（xpu_* 槽位/远端），本侧参照不生成——占位后由
+        # _assemble_xpu_golden 回填；缺三方输出 → GOLDEN_FAILURE 整例 FAIL。
+        golden_arrays = ["GOLDEN_FAILURE"]
+    elif golden_mode(context, switches) == "NPU" and not context.manual_golden_binaries:
+        # golden-mode NPU：dev_id 非 None 在锁内直接生成（golden 决定输出缓冲分配），
+        # dev_id=None 延迟到设备阶段（按声明 shape 留空）。manual_golden_binaries
+        # 显式文件优先于 NPU 重算（回落 _select_golden_source 装载）。
+        if context.output_shape_unknown_indexes:
+            raise RuntimeError(
+                f"golden-mode NPU does not support shape-unknown outputs ({context.op_name}): "
+                "output buffers are allocated from declared shapes before the device phase"
+            )
+        if dev_id is None:
+            golden_arrays = []
+        else:
+            golden_arrays, perf, source = generate_npu_golden(context, dev_id)
+            context.golden_perf = perf
+            context.golden_source = source
+    else:
+        golden_arrays = _select_golden_source(context, output_dtypes, stored_goldens)
     # Remember: golden_arrays is always flatten.
-    golden_arrays = __select_golden_source(context, output_dtypes, stored_goldens)
     if len(golden_arrays) > len(context.flat_output_shapes):
         golden_arrays = golden_arrays[: len(context.flat_output_shapes)]
-    __normalize_goldens(golden_arrays, output_dtypes)
-    output_arrays = __alloc_output_buffers(context, golden_arrays, output_dtypes)
+    _normalize_goldens(golden_arrays, output_dtypes)
+    output_arrays = _alloc_output_buffers(context, golden_arrays, output_dtypes)
     n_shape_slots = context.shape_unknown_slot_count
-    __append_out_shape_unknown_golden(context, golden_arrays, output_arrays, extend_fields=not n_shape_slots)
+    _append_out_shape_unknown_golden(context, golden_arrays, output_arrays, extend_fields=not n_shape_slots)
     context.golden_arrays = golden_arrays
     context.output_arrays = tuple(output_arrays)
 
 
-def __select_golden_source(context: TestcaseKernel, output_dtypes: list, stored_goldens) -> list:
+def _select_golden_source(context: TestcaseKernel, output_dtypes: list, stored_goldens) -> list:
     """golden 来源四选一：manual-data 复跑装载 > Disable 占位 > 手工 bin > 现算。"""
     switches = get_global_storage()
     if stored_goldens is not None:
@@ -316,13 +535,13 @@ def __select_golden_source(context: TestcaseKernel, output_dtypes: list, stored_
         flat_binaries = context.flat_manual_golden_binaries
         flat_shapes = context.flat_output_shapes
         return [
-            __load_golden_from_file(get(flat_binaries, i), get(output_dtypes, i), get(flat_shapes, i))
+            _load_golden_from_file(get(flat_binaries, i), get(output_dtypes, i), get(flat_shapes, i))
             for i in range(len(flat_shapes))
         ]
-    return __generate_golden(context, output_dtypes)
+    return _generate_golden(context, output_dtypes)
 
 
-def __alloc_output_buffers(context: TestcaseKernel, golden_arrays: list, output_dtypes: list) -> list:
+def _alloc_output_buffers(context: TestcaseKernel, golden_arrays: list, output_dtypes: list) -> list:
     """被测 kernel 输出缓冲构造：dtype 打包调整（complex32/uint1）→ golden shape
     采纳（不一致警告后替换）→ inplace 位走索引、其余 numpy.ones 实配。
 
@@ -333,7 +552,7 @@ def __alloc_output_buffers(context: TestcaseKernel, golden_arrays: list, output_
     # Regenerating golden on a testcase whose output fields were already
     # extended (GEIR regenerates per mode: const/dynamic) must walk only the
     # declared outputs — shape slots carry no independent golden and would
-    # trip __output_shape_needs_golden.
+    # trip _output_shape_needs_golden.
     n_shape_slots = context.shape_unknown_slot_count
     declared_shapes = context.flat_output_shapes[: len(context.flat_output_shapes) - n_shape_slots]
     for idx, output_shape in enumerate(declared_shapes):
@@ -352,7 +571,7 @@ def __alloc_output_buffers(context: TestcaseKernel, golden_arrays: list, output_
         golden_shape = None
         if idx < len(golden_arrays) and isinstance(golden_arrays[idx], numpy.ndarray):
             golden_shape = golden_arrays[idx].shape
-            golden_arrays[idx] = __nan_to_num(golden_arrays[idx], context.op_name, out_dtype)
+            golden_arrays[idx] = _nan_to_num(golden_arrays[idx], context.op_name, out_dtype)
         # Enable inplace
         if idx < len(context.output_inplace_indexes) and context.output_inplace_indexes[idx] is not None:
             output_arrays.append(context.output_inplace_indexes[idx])
@@ -364,7 +583,7 @@ def __alloc_output_buffers(context: TestcaseKernel, golden_arrays: list, output_
                     )
                 alloc_shape = golden_shape
             else:
-                __output_shape_needs_golden(context, idx)
+                _output_shape_needs_golden(context, idx)
             output_arrays.append(numpy.ones(alloc_shape, dtype=out_dtype))
     return output_arrays
 
@@ -400,7 +619,7 @@ def _apply_overflow_semantics(golden: numpy.ndarray, npu_dtype: str, dr: tuple):
         golden[golden >= hi] = numpy.inf
 
 
-def __normalize_goldens(golden_arrays: List[Union[str, numpy.ndarray]], output_dtypes: list):
+def _normalize_goldens(golden_arrays: List[Union[str, numpy.ndarray]], output_dtypes: list):
     # golden is rebound after view/concat conversions and written back to
     # golden_arrays — iterate by index so the rebinding stays explicit.
     for idx in range(len(golden_arrays)):
@@ -462,13 +681,13 @@ SATURATING_SOC = {
 }
 
 
-def __soc_saturates(short_soc: str, dtype_name: str) -> bool:
+def _soc_saturates(short_soc: str, dtype_name: str) -> bool:
     """饱和语义下 (SoC, dtype) 硬件是否饱和；未收录 SoC 恒 INF/NAN（新芯片默认）。"""
     exceptions = SATURATING_SOC.get(short_soc)
     return exceptions is not None and dtype_name not in exceptions
 
 
-def __nan_to_num(golden_array: numpy.ndarray, op: str, npu_dtype):
+def _nan_to_num(golden_array: numpy.ndarray, op: str, npu_dtype):
     DMA_COPY_OPS = (
         "as_strided",
         "batch_to_space",
@@ -521,7 +740,7 @@ def __nan_to_num(golden_array: numpy.ndarray, op: str, npu_dtype):
     if op in DMA_COPY_OPS or (op.endswith("_d") and op[:-2] in DMA_COPY_OPS):
         return golden_array
     npu_dtype = numpy.dtype(npu_dtype).name
-    if not __soc_saturates(get_global_storage().short_soc_version, npu_dtype):
+    if not _soc_saturates(get_global_storage().short_soc_version, npu_dtype):
         # 恒产出 INF/NAN：310P 全 dtype / 新 SoC fp32 / 未收录芯片（新芯片默认）
         return golden_array
     if npu_dtype == "bfloat16":
@@ -537,7 +756,7 @@ def __nan_to_num(golden_array: numpy.ndarray, op: str, npu_dtype):
     return golden_array
 
 
-def __correct_kwargs_for_golden(context: TestcaseKernel, golden_parameters: list):
+def _correct_kwargs_for_golden(context: TestcaseKernel, golden_parameters: list):
     attributes = context.attributes.copy()
     # Remove input names — already passed positionally via *context.input_arrays
     op_info = OpInfoKeeper().info_of(context.op_name)
@@ -550,7 +769,7 @@ def __correct_kwargs_for_golden(context: TestcaseKernel, golden_parameters: list
     return attributes
 
 
-def __collect_dynamic_golden_kwargs(context: TestcaseKernel):
+def _collect_dynamic_golden_kwargs(context: TestcaseKernel):
     switches = get_global_storage()
     kwargs = context.attributes.copy()
     # delete internal attributes
@@ -584,7 +803,7 @@ def __collect_dynamic_golden_kwargs(context: TestcaseKernel):
             # 收到 fp32 完全无法区分，作者只能猜，猜错就会写出把框架抬上去的精度又砍回来
             # 的代码(如硬编码 astype(float32))，或反过来在原生场景下算出算子不会产出的
             # 中间量。
-            # 【实现逻辑】mode 在 __invoke_golden 里已解析好(逐用例 override 优先于全局
+            # 【实现逻辑】mode 在 _invoke_golden 里已解析好(逐用例 override 优先于全局
             # --golden-mode)，这里原样透出，不新增任何判定。
             # 【实现效果】golden 可按 kwargs['golden_mode'] 明确分支：Promote 下透传不做
             # 任何 cast，其余情形自行处理低精度类型。未使用该键的存量 golden 不受影响——
@@ -599,7 +818,7 @@ class GoldenShapeRequiredError(RuntimeError):
     """shape-unknown 输出缺 golden：输出 buffer 分配依赖 golden 现算 shape。"""
 
 
-def __output_shape_needs_golden(context: TestcaseKernel, output_idx: int):
+def _output_shape_needs_golden(context: TestcaseKernel, output_idx: int):
     if context.output_shape_unknown_indexes:
         raise GoldenShapeRequiredError(
             f"Golden must be supplied for {output_idx}th (count from 0) "
@@ -608,7 +827,7 @@ def __output_shape_needs_golden(context: TestcaseKernel, output_idx: int):
         )
 
 
-def __append_out_shape_unknown_golden(
+def _append_out_shape_unknown_golden(
     context: TestcaseKernel, golden_arrays: list, output_arrays: list, extend_fields: bool = True
 ):
     """append output shape tensor to golden & output_arrays

@@ -111,7 +111,7 @@ def test_geir_no_prof_dumps_and_skips_compile_execute(monkeypatch, tmp_path):
         assert stored_inputs is None
         context.input_arrays = (original_input, None)
 
-    def generate_output(context, stored_goldens=None):
+    def generate_output(context, stored_goldens=None, dev_id=None):
         context.golden_arrays = [golden]
         context.output_arrays = (np.ones(2, np.float32),)
 
@@ -152,8 +152,10 @@ def test_geir_no_prof_xpu_golden_writes_input_only(monkeypatch, tmp_path):
     monkeypatch.setattr(geir_worker, "gen_input", generate_input)
     monkeypatch.setattr(
         geir_worker,
-        "_resolve_stage",
-        lambda *a: (None, False, True, None),
+        "_resolve_tolerance",
+        lambda *a: SimpleNamespace(
+            standards=None, need_3party=False, golden_is_xpu=True, golden_is_npu=False, pre_compare=None
+        ),
     )
 
     result = geir_worker.run(case, {}, {}, 0)
@@ -180,7 +182,7 @@ def test_geir_replay_restores_stored_inputs_and_golden(monkeypatch, tmp_path):
         seen["stored_inputs"] = stored_inputs
         context.input_arrays = tuple(stored_inputs)
 
-    def generate_output(context, stored_goldens=None):
+    def generate_output(context, stored_goldens=None, dev_id=None):
         seen["stored_goldens"] = stored_goldens
         assert stored_goldens is not None
         context.golden_arrays = list(stored_goldens)
@@ -220,7 +222,7 @@ def test_geir_first_run_on_empty_dirs_dumps_dataset(monkeypatch, tmp_path):
         assert stored_inputs is None
         context.input_arrays = (original_input, None)
 
-    def generate_output(context, stored_goldens=None):
+    def generate_output(context, stored_goldens=None, dev_id=None):
         assert stored_goldens is None
         context.golden_arrays = [golden]
         context.output_arrays = (np.ones(2, np.float32),)
@@ -250,7 +252,7 @@ def test_geir_shape_unknown_stored_golden_no_double_append(monkeypatch, tmp_path
     """shape-unknown 复跑：stored golden 切齐声明槽——逐模式重入不重复追加元数据槽。
 
     落盘侧数据集含 uint64 元数据 golden 槽；复跑侧 const 模式（flat 未
-    扩展）与 dynamic 模式（flat 已扩展）经 _golden_stage 切齐后槽数一致。
+    扩展）与 dynamic 模式（flat 已扩展）经 _prepare_golden 切齐后槽数一致。
     """
     dump_case = _geir_case("shape_unknown_geir")
     dump_case.output_shape_unknown_indexes = (0,)
@@ -288,13 +290,13 @@ def test_geir_shape_unknown_stored_golden_no_double_append(monkeypatch, tmp_path
     monkeypatch.setattr(output_generation, "get_global_storage", lambda: switches)
 
     # 首模式（flat 未扩展）
-    geir_worker._golden_stage(replay_case, golden_is_xpu=False, stored_goldens=stored_goldens)
+    geir_worker._prepare_golden(replay_case, golden_is_xpu=False, stored_goldens=stored_goldens)
     first_pass = list(replay_case.golden_arrays)
     assert len(first_pass) == 2
     np.testing.assert_array_equal(first_pass[0], data_golden)
 
     # 后续模式（flat 已扩展）：不重复追加元数据槽
-    geir_worker._golden_stage(replay_case, golden_is_xpu=False, stored_goldens=stored_goldens)
+    geir_worker._prepare_golden(replay_case, golden_is_xpu=False, stored_goldens=stored_goldens)
     assert len(replay_case.golden_arrays) == 2
     np.testing.assert_array_equal(replay_case.golden_arrays[0], data_golden)
     meta = replay_case.golden_arrays[1]

@@ -13,8 +13,11 @@
 
 覆盖内容：
 - generate_golden: 优先级链路（golden_api → 自定义插件 → CPU 回退）。
+- exec_backend 设备选择：None = CPU 生成；NPU 后端 = 插件收 device 串、
+  golden_api 与同 API 在 NPU 上执行。
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -124,7 +127,7 @@ class TestGenerateGolden:
         raw = [np.array([1.0], dtype=np.float32)]
 
         with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get, patch(
-            "ttk.core_modules.framework_api.golden._run_api_on_cpu"
+            "ttk.core_modules.framework_api.golden._run_api"
         ) as mock_cpu:
             mock_get.return_value = None
             mock_cpu.side_effect = RuntimeError("no CPU impl")
@@ -132,8 +135,8 @@ class TestGenerateGolden:
                 generate_golden(case, raw)
 
     def test_priority3_npu_only_fast_fail(self):
-        """优先级 3：npu_device 自定义算子无 CPU kernel → is_npu_only 快速失败，
-        不再白跑 resolve → 构造 CPU 输入 → 调用失败的整链。"""
+        """优先级 3：npu_device 自定义算子无 CPU kernel → is_npu_only 直接
+        返回 UNSUPPORTED，不执行后续链路。"""
         case = _make_testcase(
             "npu_device.compat.v1.tbe.npu_vector_ops.lamb_apply_optimizer_assign",
             ((3,),),
@@ -142,7 +145,7 @@ class TestGenerateGolden:
         raw = [np.array([1.0, 2.0, 3.0], dtype=np.float32)]
 
         with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get, patch(
-            "ttk.core_modules.framework_api.golden._run_api_on_cpu"
+            "ttk.core_modules.framework_api.golden._run_api"
         ) as mock_cpu:
             mock_get.return_value = None
             result = generate_golden(case, raw)
@@ -159,7 +162,7 @@ class TestGenerateGolden:
         )
         raw = [np.array([1.0, 2.0, 3.0], dtype=np.float32)]
 
-        with patch("ttk.core_modules.framework_api.golden._run_api_on_cpu") as mock_cpu:
+        with patch("ttk.core_modules.framework_api.golden._run_api") as mock_cpu:
             result = generate_golden(case, raw)
             assert result == ["UNSUPPORTED"]
             mock_cpu.assert_not_called()
@@ -243,3 +246,100 @@ class TestGenerateGolden:
         )
         assert proc.returncode == 0, f"mutable-ref reset failed:\n{proc.stderr[-2000:]}"
         assert "RESET_OK" in proc.stdout
+
+
+class TestExecBackendRouting:
+    """exec_backend 决定设备：None = CPU 生成；NPU 后端 = 插件收 device 串、
+    golden_api 与同 API 在 NPU 上执行。"""
+
+    def test_npu_mode_without_exec_backend_runs_cpu_fallback(self):
+        """golden_mode=NPU 且未传 exec_backend → 同 API 在 CPU 上生成。"""
+        _register("torch.relu", [ParamInfo(name="input", type="Tensor")])
+        case = _make_testcase("torch.relu", ((4,),), ("float32",))
+        raw = [np.array([-1.0, 0.0, 1.0, 2.0], dtype=np.float32)]
+        switches = SimpleNamespace(golden_mode="NPU")
+
+        with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get:
+            mock_get.return_value = None
+            result = generate_golden(case, raw, None, switches, "npu")
+            assert len(result) == 1
+            np.testing.assert_array_almost_equal(result[0], [0.0, 0.0, 1.0, 2.0])
+
+    def test_exec_backend_routes_same_api_with_numpy_inputs(self):
+        """exec_backend 为 NPU 后端且无插件/golden_api → 同 API 经 _run_api
+        上板：to_device 收 numpy 数组（内部 from_numpy 后上板），不做先转
+        torch 再传入的双重转换。"""
+        from contextlib import nullcontext
+
+        received = {}
+
+        class _FakeNpuBackend:
+            def is_npu(self):
+                return True
+
+            def set_device(self, dev_id):
+                received["set_device"] = dev_id
+
+            def device_scope(self, dev_id):
+                return nullcontext()
+
+            def to_device(self, tensor, dev_id=0, preserve_stride=False):
+                received["input_type"] = type(tensor).__name__
+                return tensor
+
+        _register("torch.relu", [ParamInfo(name="input", type="Tensor")])
+        case = _make_testcase("torch.relu", ((2, 3),), ("float32",))
+        raw = [np.ones((2, 3), dtype=np.float32)]
+        switches = SimpleNamespace(golden_mode="NPU")
+
+        with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get, patch(
+            "ttk.core_modules.framework_api.golden._exec_and_convert", return_value=[np.ones(2)]
+        ):
+            mock_get.return_value = None
+            result = generate_golden(case, raw, None, switches, "npu", exec_backend=_FakeNpuBackend(), dev_id=5)
+
+        assert received["input_type"] == "ndarray", "to_device must receive numpy arrays"
+        assert received["set_device"] == 5
+        assert len(result) == 1
+
+    def test_exec_backend_gives_plugin_device_string(self):
+        """exec_backend 为 NPU 后端 → 插件收 device="npu:{dev_id}"；未传 → None。"""
+        _register("torch.relu", [ParamInfo(name="input", type="Tensor")])
+        case = _make_testcase("torch.relu", ((3,),), ("float32",))
+        raw = [np.array([1.0, 2.0, 3.0], dtype=np.float32)]
+        switches = SimpleNamespace(golden_mode="NPU")
+        fake_backend = SimpleNamespace(is_npu=lambda: True)
+
+        with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get, patch(
+            "ttk.core_modules.framework_api.golden._call_plugin_with_plan"
+        ) as mock_plan:
+            mock_get.return_value = object()
+            mock_plan.return_value = [np.array([9.0])]
+
+            generate_golden(case, raw, None, switches, "npu", exec_backend=fake_backend, dev_id=2)
+            assert mock_plan.call_args.kwargs["device"] == "npu:2"
+
+            generate_golden(case, raw, None, switches, "npu")
+            assert mock_plan.call_args.kwargs["device"] is None
+
+    def test_exec_backend_routes_golden_api_to_npu(self):
+        """exec_backend 为 NPU 后端且声明 golden_api → 以 golden_api 为目标经
+        _run_api 在 NPU 上执行（api_info 绑定、backend/dev_id 透传），跳过
+        is_npu_only / is_dtype_support 检查（NPU-only 的 API 在 NPU 上可执行）。"""
+        npu_only_api = "npu_device.compat.v1.tbe.npu_vector_ops.fake_op"
+        _register(npu_only_api, [ParamInfo(name="input", type="Tensor")])
+        case = _make_testcase("torch.base_api", ((3,),), ("float32",), golden_api=npu_only_api)
+        raw = [np.array([1.0, 2.0, 3.0], dtype=np.float32)]
+        switches = SimpleNamespace(golden_mode="NPU")
+        fake_backend = SimpleNamespace(is_npu=lambda: True)
+
+        with patch("ttk.core_modules.framework_api.golden._run_api") as mock_npu:
+            mock_npu.return_value = [np.array([1.0, 1.0, 1.0])]
+            result = generate_golden(case, raw, None, switches, "npu", exec_backend=fake_backend, dev_id=1)
+
+            mock_npu.assert_called_once()
+            assert mock_npu.call_args[0][0] == npu_only_api, "must target the golden_api, not the DUT api"
+            assert mock_npu.call_args[0][3] is fake_backend, "exec_backend must be passed through"
+            assert mock_npu.call_args[0][4] == 1, "dev_id must be passed through"
+            assert mock_npu.call_args.kwargs["api_info"] is not None, "golden_api overload info must be bound"
+            np.testing.assert_array_equal(result[0], [1.0, 1.0, 1.0])

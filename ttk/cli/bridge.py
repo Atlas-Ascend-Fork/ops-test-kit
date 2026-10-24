@@ -402,6 +402,11 @@ def _configure_manual_data_dump(sw, command, directories):
         )
     if cfg.dump_golden and sw.golden_mode == "Disable":
         raise ValueError("--no-prof golden output requires CPU golden generation; --golden-mode Disable is invalid")
+    if cfg.dump_golden and sw.golden_mode == "NPU":
+        raise ValueError(
+            "--no-prof cannot be combined with --golden-mode NPU "
+            "(NPU golden requires device execution; --no-prof must run without device)"
+        )
     if len(directories) > 1:
         raise ValueError("--no-prof writes one dataset; specify at most one --manual-data-dirs path")
     sw.manual_data_dirs = directories or (_default_manual_data_dir(sw),)

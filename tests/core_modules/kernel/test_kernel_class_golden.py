@@ -14,7 +14,7 @@ Integration coverage for the KERNEL **class-form** golden dispatch.
 The partial-split (``_NegScale``) and no-custom-``__init__`` (``_Double``)
 shapes are covered by ``test_aclnn_class_golden.py`` (same pattern, ACLNN
 path). This file keeps only the KERNEL-specific **dispatch routing** guard:
-a class is ``Callable`` but MUST route to ``__invoke_class`` (not the
+a class is ``Callable`` but MUST route to ``_invoke_class`` (not the
 custom-callable branch that would do ``golden_func(*input_arrays)``).
 """
 
@@ -27,7 +27,7 @@ from ttk.core_modules.kernel import golden as _mod
 from ttk.core_modules.kernel.testcase import TestcaseKernel
 
 # Access module-level private functions via getattr to dodge class-style name mangling.
-_generate_golden = getattr(_mod, "__generate_golden")
+_generate_golden = _mod._generate_golden
 
 
 # --------------------------------------------------------------------------- #
@@ -98,12 +98,12 @@ def _mock_env(monkeypatch):
 @patch("ttk.core_modules.kernel.golden.get_global_storage")
 @patch("ttk.core_modules.common.plugin.resolver.get_plugin_function")
 class TestKernelClassGoldenDispatch:
-    """class-form golden (isinstance(golden_func, type)) → __invoke_class end-to-end."""
+    """class-form golden (isinstance(golden_func, type)) → _invoke_class end-to-end."""
 
     def test_dispatch_routes_class_to_invoke_class_not_callable_path(self, mock_get_plugin, mock_sw, mock_op_info):
-        """A class is a ``Callable`` but MUST route to ``__invoke_class`` (not the custom-callable
+        """A class is a ``Callable`` but MUST route to ``_invoke_class`` (not the custom-callable
         path that would do ``golden_func(*input_arrays)``). Guards the ``isinstance(type)`` check
-        ordering in ``__invoke_golden``: if a class leaked to the custom branch it would be called
+        ordering in ``_invoke_golden``: if a class leaked to the custom branch it would be called
         as ``_NegScale(array)`` → TypeError → ``['GOLDEN_FAILURE']``."""
         mock_get_plugin.return_value = _NegScale
         mock_sw.return_value = _mock_switches()
@@ -125,6 +125,6 @@ class TestKernelClassGoldenDispatch:
         # If mis-routed to the custom-callable branch, golden[0] would be the
         # string "GOLDEN_FAILURE"; the class path yields a numeric ndarray.
         assert isinstance(golden[0], np.ndarray), (
-            f"class golden must hit __invoke_class, not the custom-callable branch: {golden[0]!r}"
+            f"class golden must hit _invoke_class, not the custom-callable branch: {golden[0]!r}"
         )
         np.testing.assert_array_equal(golden[0], np.array([5.0, 10.0, 15.0], dtype="float32"))

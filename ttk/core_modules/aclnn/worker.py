@@ -26,6 +26,7 @@ __all__ = ["run"]
 # Standard Packages
 import logging
 import os
+from types import SimpleNamespace
 
 # Third-Party Packages
 from ttk.switches import get_global_storage
@@ -38,8 +39,7 @@ from ...utilities import (
 )
 from ...utilities.dtypes import DTYPE_MAP
 from ..common.comparison.batch_consistency import assemble_batch_summary
-from ..common.comparison.resolve import needs_promote_golden
-from ..common.comparison.resolve import resolve_tolerance as _resolve_tolerance
+from ..common.comparison.resolve import needs_promote_golden, resolve_tolerance
 from ..common.dump import (
     DataDumper,
     dump_manual_dataset,
@@ -128,7 +128,7 @@ def _profiling_print(context: TestcaseAclnn, dev_id: int):
     )
 
 
-def prof_end(context, print_content):
+def early_end(context, print_content):
     compare_result = ApiComparisonResult(print_content)
     return_structure = AclnnReturnStructure()
     return_structure.construct(context, compare_result)
@@ -299,17 +299,19 @@ def _run_aclnn_npu_preprocess(context, switches, process_ctx, dev_id):
     return None
 
 
-def _resolve_case_standards(context, switches):
+def _resolve_tolerance(context, switches):
     """Tolerance standards for the case, anchored on CSV-declared output dtypes.
 
     The anchor never depends on execution results, so resolution can run
     before device execution. cross_check standards additionally request a
-    third-party reference and promote golden input precision.
+    third-party reference and promote golden input precision
+    （golden_mode_override=Promote；XPU golden 三方产出与 NPU golden 设备原生
+    dtype 执行均与 Promote 互斥）。override 由 _prepare_golden 的 finally 回收。
     """
     plugin_path = getattr(switches, "plugin_path", None)
     tolerance = SpecResolver(context.api_name, "aclnn", plugin_path).resolve_tolerance()
     output_dtypes = resolve_numpy_dtypes(context.flat_output_dtypes)
-    standards = _resolve_tolerance(
+    standards = resolve_tolerance(
         tolerance,
         context.flat_precision_tolerances,
         context.flat_absolute_precision,
@@ -317,68 +319,80 @@ def _resolve_case_standards(context, switches):
         switches.compare_method,
     )
     need_3party = any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为精度标准类型名，非凭据
-    return standards, need_3party
+    if needs_promote_golden(standards) and switches.golden_mode not in ("XPU", "NPU"):
+        # cross_check 三方 / mixed·mix_tolerance 单标杆均升精度；XPU golden
+        # 三方产出与 NPU golden（设备原生 dtype 执行）皆与 Promote 互斥。
+        context.golden_mode_override = "Promote"
+    return SimpleNamespace(standards=standards, need_3party=need_3party)
 
 
-def _generate_golden_ahead(context, process_ctx, manual_case, switches) -> bool:
-    """Generate (or statically load) golden before device execution.
+def _prepare_golden(
+    context,
+    process_ctx,
+    manual_case,
+    switches,
+    is_multi_device,
+    device_ids,
+    dev_id,
+    device_grant_events,
+    device_granted_indices,
+):
+    """golden 准备（DUT 前，对齐 kernel 同阶段编排）：回放装载 / XPU 占位 / 现算 /
+    NPU 设备生成（自起设备锁；设备能力由启动预检 + runner 回落兜底）。
 
-    Returns True when manual replay goldens were loaded using the declared
-    output shapes. Dynamic-shape cases — declared shapes unknown or the
-    static load failing — defer the load until execution returned the
-    actual shapes. Golden generation failure degrades to a placeholder
-    that surfaces in the comparison row; execution still runs.
+    Golden generation failure leaves a placeholder and does not block
+    execution; replay load failure → FAIL 行 early_result。Multi-device
+    cases keep golden after execution (see the multi-device branch below).
     """
-    if manual_case is not None and manual_case.has_goldens:
-        try:
-            process_ctx.notify_status("OnLoadManualGolden")
-            context.golden_tensors = load_replay_goldens(
-                manual_case,
-                shapes=context.flat_output_view_shapes,
-                dtypes=context.flat_output_dtypes,
-            )
-            _dump_golden(context)
-            return True
-        except Exception:
-            logging.info(
-                "[%s] static replay golden load failed; deferring to execution-returned shapes",
-                context.testcase_name,
-            )
-            return False
-    if switches.golden_mode == "XPU":
-        # Golden is assembled from the third-party output after execution.
-        return False
-    process_ctx.notify_status("OnGenGolden")
-    # noinspection PyBroadException
     try:
-        GoldenGenerator(context).gen()
-        process_ctx.notify_status("OnDumpGoldenDataIfRequired")
-        _dump_golden(context)
-    except Exception:
-        logging.exception("Golden data generation failure")
-        context.golden_tensors = ["GOLDEN_FAILURE"]
-    return False
-
-
-def _shapes_match(declared, actual) -> bool:
-    """Whether declared output shapes equal the execution-returned shapes.
-
-    Unknown declarations (None entries) or non-shape returns count as a
-    mismatch so the replay golden gets reloaded with actual shapes.
-    """
-    if not isinstance(actual, (list, tuple)) or not isinstance(declared, (list, tuple)):
-        return False
-    if len(actual) != len(declared):
-        return False
-    for d, a in zip(declared, actual):
-        if not isinstance(a, (list, tuple)) or d is None:
-            return False
-        try:
-            if tuple(int(x) for x in a) != tuple(d):
-                return False
-        except (TypeError, ValueError):
-            return False
-    return True
+        if not (is_multi_device and device_ids):
+            if manual_case is not None and manual_case.has_goldens:
+                process_ctx.notify_status("OnLoadManualGolden")
+                context.golden_tensors = load_replay_goldens(
+                    manual_case,
+                    shapes=context.flat_output_view_shapes,
+                    dtypes=context.flat_output_dtypes,
+                )
+                _dump_golden(context)
+            elif switches.golden_mode == "XPU":
+                # Golden is assembled from the third-party output after execution.
+                pass
+            elif switches.golden_mode == "NPU" and not (is_multi_device and device_ids):
+                # 单卡 NPU：自起设备锁、DUT 前一步生成（gen(dev_id) 内联 gen_npu，
+                # 与 kernel gen_output(dev_id) 同款单步编排）
+                with DeviceLock(
+                    process_ctx,
+                    dev_id,
+                    use_device=switches.mode.has_device(),
+                    grant_event=(device_grant_events or {}).get(dev_id),
+                    granted_idx=(device_granted_indices or {}).get(dev_id),
+                ):
+                    process_ctx.notify_status("OnGenGolden")
+                    # noinspection PyBroadException
+                    try:
+                        GoldenGenerator(context).gen(dev_id=dev_id)
+                        process_ctx.notify_status("OnDumpGoldenDataIfRequired")
+                        _dump_golden(context)
+                    except Exception:
+                        logging.exception("Golden data generation failure")
+                        context.golden_tensors = ["GOLDEN_FAILURE"]
+            else:
+                process_ctx.notify_status("OnGenGolden")
+                # noinspection PyBroadException
+                try:
+                    GoldenGenerator(context).gen()
+                    process_ctx.notify_status("OnDumpGoldenDataIfRequired")
+                    _dump_golden(context)
+                except Exception:
+                    logging.exception("Golden data generation failure")
+                    context.golden_tensors = ["GOLDEN_FAILURE"]
+    except Exception as exc:
+        logging.exception("Manual golden loading failure")
+        return early_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
+    finally:
+        if hasattr(context, "golden_mode_override"):
+            del context.golden_mode_override
+    return None
 
 
 def _return_row(context, process_ctx, compare_result):
@@ -409,9 +423,9 @@ def _setup_profiling_env(context: TestcaseAclnn):
 def _check_preconditions(context: TestcaseAclnn, switches, is_multi_device):
     """前置校验：用例合法性 / API 登记 / 动态 shape 约束。返回值非 None = 整行早退。"""
     if not context.is_valid:
-        return prof_end(context, context.fail_reason)
+        return early_end(context, context.fail_reason)
     if not OpApiInfoKeeper().has_api(context.api_name):
-        return prof_end(context, "OP_API_NOT_FOUND")
+        return early_end(context, "OP_API_NOT_FOUND")
     dyn_indexes = context.dyn_input_slot_indexes
     # dump/prepare（--no-prof）方向允许动态槽记录 None（钩子留待 NPU 重放执行）；
     # 执行方向仍要求已注册 npu_preprocess 钩子。
@@ -420,9 +434,9 @@ def _check_preconditions(context: TestcaseAclnn, switches, is_multi_device):
         and not switches.no_prof
         and SpecResolver(context.api_name, "aclnn", switches.plugin_path).resolve_npu_preprocess() is None
     ):
-        return prof_end(context, "DYN_SHAPE_REQUIRES_NPU_PREPROCESS")
+        return early_end(context, "DYN_SHAPE_REQUIRES_NPU_PREPROCESS")
     if dyn_indexes and is_multi_device:
-        return prof_end(context, "MULTI_DEVICE_UNSUPPORTED_FOR_DYN_SHAPE")
+        return early_end(context, "MULTI_DEVICE_UNSUPPORTED_FOR_DYN_SHAPE")
     return None
 
 
@@ -436,7 +450,7 @@ def _open_dump_only_store(context: TestcaseAclnn, switches):
         return manual_data_dump_store(context, switches), None
     except Exception as exc:
         logging.exception("Manual data dump store failure")
-        return None, prof_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
+        return None, early_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
 
 
 def _resolve_manual_stores(context: TestcaseAclnn, switches, process_ctx, dump_store):
@@ -451,12 +465,12 @@ def _resolve_manual_stores(context: TestcaseAclnn, switches, process_ctx, dump_s
             context,
             "aclnn",
             switches,
-            before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
+            notify_before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
             require_goldens=False,
         )
     except Exception as exc:
         logging.exception("Manual data loading failure")
-        return None, dump_store, prof_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
+        return None, dump_store, early_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
     if manual_case is not None or not switches.dump_config.dump_input:
         return manual_case, dump_store, None
     # load 方向目录全空的首跑：正常生成并落盘（后续运行即可加载）
@@ -464,7 +478,7 @@ def _resolve_manual_stores(context: TestcaseAclnn, switches, process_ctx, dump_s
         dump_store = manual_data_dump_store(context, switches)
     except Exception as exc:
         logging.exception("Manual data dump store failure")
-        return None, dump_store, prof_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
+        return None, dump_store, early_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
     return manual_case, dump_store, None
 
 
@@ -491,8 +505,8 @@ def _generate_input(context, process_ctx, manual_case, dump_store, dev_id, is_mu
     except Exception as exc:
         logging.exception("Input data generation failure:")
         if manual_case is not None:
-            return None, None, prof_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
-        return None, None, prof_end(context, "INPUT_GEN_FAILURE")
+            return None, None, early_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
+        return None, None, early_end(context, "INPUT_GEN_FAILURE")
 
     prepared_inputs = None
     prepared_scalars = None
@@ -503,7 +517,7 @@ def _generate_input(context, process_ctx, manual_case, dump_store, dev_id, is_mu
             prepared_scalars = snapshot_manual_values(context.flat_scalars or (), "scalar")
         except Exception as exc:
             logging.exception("Manual data snapshot failure")
-            return None, None, prof_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
+            return None, None, early_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
 
     if dump_store is None:
         process_ctx.notify_status("OnDumpInputDataIfRequired")
@@ -543,7 +557,7 @@ def _device_profiling(
     ):
         preprocess_error = _run_aclnn_npu_preprocess(context, switches, process_ctx, dev_id)
         if preprocess_error:
-            return prof_end(context, preprocess_error)
+            return early_end(context, preprocess_error)
         process_ctx.notify_status("OnProfilingPrint")
         _profiling_print(context, dev_id)
         process_ctx.notify_status("OnProfiling")
@@ -594,34 +608,6 @@ def _multi_device_row_or_none(context, switches, process_ctx, is_multi_device, d
     return None
 
 
-def _reload_replay_golden_if_needed(context, process_ctx, manual_case, golden_loaded):
-    """动态 shape 的 replay golden 二次装载。
-
-    ACLNN C 接口执行期才返回输出 shape；静态装载（声明 shape）与执行返回
-    不一致时，按实际 shape 重载 replay golden。返回值非 None = 提前结束。
-    """
-    if not (
-        manual_case is not None
-        and manual_case.has_goldens
-        and not (
-            golden_loaded and _shapes_match(context.flat_output_view_shapes, context.prof_result.output_view_shapes)
-        )
-    ):
-        return None
-    try:
-        process_ctx.notify_status("OnLoadManualGolden")
-        context.golden_tensors = load_replay_goldens(
-            manual_case,
-            shapes=context.prof_result.output_view_shapes,
-            dtypes=context.flat_output_dtypes,
-        )
-        _dump_golden(context)
-    except Exception as exc:
-        logging.exception("Manual golden loading failure")
-        return prof_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
-    return None
-
-
 def _manual_data_dump(
     context,
     switches,
@@ -637,13 +623,27 @@ def _manual_data_dump(
 
     full-flow 首跑（空目录回落）落当次实际产物（判据要求 Promote 时即升精度
     标杆），文件名 dtype 自描述、回放按其装载；golden 占位串跳过 golden 位；
-    XPU golden 由三方产出整体跳过。no-prof（dump 方向）在此收尾不上板；
-    多卡（输入由 rank 线程生成、golden 延后到执行段）无快照可落，亦不走
-    dump-only 收尾。返回值非 None = 提前结束。
+    XPU golden 由三方产出 full-flow 整体跳过（no-prof 仅落 input，对齐 kernel）。
+    NPU 不跳过：golden 已在 golden 准备段（自起锁段）生成，首跑落盘后 replay
+    可直接复用。no-prof（dump 方向）在此收尾不上板；多卡（输入由 rank 线程
+    生成、golden 延后到执行段）无快照可落，亦不走 dump-only 收尾。返回值
+    非 None = 提前结束。
     """
     no_prof_end = switches.no_prof and not (is_multi_device and device_ids)
     golden_is_xpu = switches.golden_mode == "XPU"
-    if not (dump_store is not None and manual_case is None and not golden_is_xpu and prepared_inputs is not None):
+    if not switches.no_prof and dump_store is not None and manual_case is None and golden_is_xpu:
+        # XPU：golden 由三方产出，无可落盘真值，warning 跳过。
+        # NPU 不跳过：golden 已在 _prepare_golden 内生成，首跑落盘后 replay 复用。
+        logging.warning(
+            "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
+            context.testcase_name,
+        )
+    if not (
+        dump_store is not None
+        and manual_case is None
+        and (not golden_is_xpu or switches.no_prof)
+        and prepared_inputs is not None
+    ):
         return _dump_only_end(context, process_ctx) if no_prof_end else None
     goldens = context.golden_tensors or ()
     try:
@@ -660,7 +660,7 @@ def _manual_data_dump(
         logging.info(f"[{context.testcase_name}] manual data dumped: {case_dir}")
     except Exception as exc:
         logging.exception("Manual data dump failure")
-        return prof_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
+        return early_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
     if no_prof_end:
         return _dump_only_end(context, process_ctx)
     return None
@@ -679,7 +679,7 @@ def _aclnn_xpu_derived(context, inputs=None, need_3party=False):
     }
 
 
-def _dispatch_xpu(context, switches, process_ctx, need_3party, golden_is_xpu, manual_case=None):
+def _dispatch_xpu(context, switches, process_ctx, need_3party, manual_case=None):
     """aclnn 三方采集统一入口（dispatch/collect 两段式）。
 
     aclnn 无执行前三方依赖（golden-XPU 的 golden 回填也在执行后比对前）——
@@ -700,6 +700,7 @@ def _dispatch_xpu(context, switches, process_ctx, need_3party, golden_is_xpu, ma
         xpu_overlap_enabled,
     )
 
+    golden_is_xpu = switches.golden_mode == "XPU"
     need_data = need_3party or golden_is_xpu
     if need_data:
         manual = load_manual_third_parties(context, manual_case)
@@ -766,19 +767,12 @@ def _collect_xpu_remote(context, switches, need_data, derived=None, deadline_s=N
     return third_parties, xpu_results, (priority or "xpu")
 
 
-def _compare_and_finalize(context, switches, process_ctx, standards, third_parties, xpu_results, golden_is_xpu):
-    """XPU golden 装配 → 比对 → dump_on_fail → 结果行（确定性状态 + dl=3 批摘要）。"""
-    if golden_is_xpu:
-        # Third-party output is the golden; a missing one fails the case.
-        if third_parties is None:
-            logging.error(
-                "[%s] golden-mode XPU: no third_party output (no third_party declaration / XPU down); case FAIL",
-                context.testcase_name,
-            )
-            compare_result = ApiComparisonResult(None)
-            compare_result.set("GOLDEN_FAILURE", "FAIL")
-            return _return_row(context, process_ctx, compare_result)
-        context.golden_tensors = list(third_parties)
+def _compare_and_finalize(context, switches, process_ctx, standards, third_parties, xpu_results):
+    """比对 → dump_on_fail → 结果行（确定性状态 + dl=3 批摘要）。
+
+    golden-XPU 的 golden 装配与缺失 FAIL 已在设备前收割（_run_profile 内对齐
+    kernel/geir），此处只用三方输出做 cross_check 比对。
+    """
     context.xpu_metrics = format_xpu_metrics(xpu_results) if xpu_results else {}
     process_ctx.notify_status("OnComparison")
     compare_result = Comparator(context, standards, third_parties).compare()
@@ -798,27 +792,24 @@ def _compare_and_finalize(context, switches, process_ctx, standards, third_parti
     return return_structure
 
 
-def _generate_golden_with_promote(context, switches, process_ctx, manual_case, is_multi_device, device_ids):
-    """容差判据解析 + golden 先行生成（Promote 升精度注入 override，多卡延后）。
+def _xpu_promote_golden(context, xpu, process_ctx):
+    """golden-XPU 装配（设备前收割，对齐 kernel/geir）：三方即 golden，缺失整例 FAIL 提前返回。"""
+    third_parties, xpu_results, _provider = xpu.collect()
+    if third_parties is None:
+        logging.error(
+            "[%s] golden-mode XPU: no third_party output (no third_party declaration / XPU down); case FAIL",
+            context.testcase_name,
+        )
+        compare_result = ApiComparisonResult(None)
+        compare_result.set("GOLDEN_FAILURE", "FAIL")
+        return _return_row(context, process_ctx, compare_result)
+    context.golden_tensors = list(third_parties)
+    # golden 性能回填：三方执行即 golden 真值，device_us 进 golden_* 列
+    from ..common.golden import xpu_golden_perf
 
-    The standards anchor is the CSV-declared output dtype, so resolution
-    costs nothing upfront. Golden generation failure leaves a placeholder
-    and does not block execution. Multi-device cases keep golden after
-    execution (see the multi-device branch below).
-    """
-    standards, need_3party = _resolve_case_standards(context, switches)
-    golden_loaded = False
-    if needs_promote_golden(standards) and switches.golden_mode != "XPU":
-        # cross_check 三方 / mixed·mix_tolerance 单标杆均升精度；XPU golden
-        # mode is mutually exclusive with Promote.
-        context.golden_mode_override = "Promote"
-    try:
-        if not (is_multi_device and device_ids):
-            golden_loaded = _generate_golden_ahead(context, process_ctx, manual_case, switches)
-    finally:
-        if hasattr(context, "golden_mode_override"):
-            del context.golden_mode_override
-    return standards, need_3party, golden_loaded
+    context.golden_perf = xpu_golden_perf(xpu_results)
+    context.golden_source = "xpu"
+    return None
 
 
 def run(
@@ -876,9 +867,26 @@ def _run_profile(
         return early_result
 
     # ═══ Tolerance standards + golden, ahead of device execution ═══
-    standards, need_3party, golden_loaded = _generate_golden_with_promote(
-        context, switches, process_ctx, manual_case, is_multi_device, device_ids
+    tol_state = _resolve_tolerance(context, switches)
+    early_result = _prepare_golden(
+        context,
+        process_ctx,
+        manual_case,
+        switches,
+        is_multi_device,
+        device_ids,
+        dev_id,
+        device_grant_events,
+        device_granted_indices,
     )
+    if early_result is not None:
+        return early_result
+    if switches.golden_mode == "NPU" and is_multi_device and device_ids:
+        logging.warning(
+            "[%s] golden-mode NPU is not supported for multi-device (HCCL) cases; "
+            "golden uses the default per-rank plugin path",
+            context.api_name,
+        )
 
     # ═══ in+golden 落盘（golden 后、设备前）；no-prof 在此收尾 ═══
     early_result = _manual_data_dump(
@@ -897,7 +905,12 @@ def _run_profile(
 
     # ═══ XPU 三方 dispatch（NPU 执行期重叠；golden-XPU/降级形态为内联同步）═══
     golden_is_xpu = switches.golden_mode == "XPU"
-    xpu = _dispatch_xpu(context, switches, process_ctx, need_3party, golden_is_xpu, manual_case)
+    xpu = _dispatch_xpu(context, switches, process_ctx, tol_state.need_3party, manual_case)
+    if golden_is_xpu:
+        # golden-XPU：三方即 golden，设备前收割（FAIL 不空跑设备——对齐 kernel/geir）
+        early_result = _xpu_promote_golden(context, xpu, process_ctx)
+        if early_result is not None:
+            return early_result
 
     # ═══ Device execution under the device lock ═══
     early_result = _device_profiling(
@@ -920,12 +933,6 @@ def _run_profile(
     process_ctx.notify_status("OnDumpOutputDataIfRequired")
     _dump_output(context)
 
-    # ═══ Replay golden reload for dynamic output shapes ═══
-    early_result = _reload_replay_golden_if_needed(context, process_ctx, manual_case, golden_loaded)
-    if early_result is not None:
-        xpu.discard()
-        return early_result
-
     third_parties, xpu_results = _collect_xpu(context, switches, xpu)
 
-    return _compare_and_finalize(context, switches, process_ctx, standards, third_parties, xpu_results, golden_is_xpu)
+    return _compare_and_finalize(context, switches, process_ctx, tol_state.standards, third_parties, xpu_results)

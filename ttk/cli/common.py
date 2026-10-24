@@ -80,7 +80,7 @@ def _add_case_filter_args(parser):
 
 def _add_precision_args(parser):
     group = parser.add_argument_group("precision & data")
-    _GOLDEN_MODE_CHOICES = ("Enable", "Disable", "Promote", "XPU")
+    _GOLDEN_MODE_CHOICES = ("Enable", "Disable", "Promote", "XPU", "NPU")
     _GOLDEN_MODE_ALIASES = {mode.lower(): mode for mode in _GOLDEN_MODE_CHOICES}
 
     def _golden_mode_arg(value: str) -> str:
@@ -122,7 +122,7 @@ def _add_precision_args(parser):
         default="Enable",
         type=_golden_mode_arg,
         choices=list(_GOLDEN_MODE_CHOICES),
-        help="Golden mode: Enable/Disable (no comparison, verdict SKIP)/Promote (CPU high-precision)/XPU (third-party output as golden)",
+        help="Golden mode: Enable/Disable (no comparison, verdict SKIP)/Promote (CPU high-precision)/XPU (third-party output as golden)/NPU (golden generated on NPU, device perf collected)",
     )
     group.add_argument(
         "--input-dist",

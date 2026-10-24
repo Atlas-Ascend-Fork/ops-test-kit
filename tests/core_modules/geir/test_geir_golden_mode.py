@@ -73,7 +73,7 @@ def _enter_common(stack, gen_output_mock):
         mock.patch.object(geir_worker, "gen_output", gen_output_mock),
         mock.patch.object(geir_worker, "SpecResolver", return_value=resolver_stub),
         mock.patch.object(geir_worker, "_geir_param_order", return_value=[]),
-        mock.patch.object(geir_worker, "_geir_profiling_end_print", return_value=None),
+        mock.patch.object(geir_worker, "_profiling_end_print", return_value=None),
         mock.patch("ttk.core_modules.geir.proto_loader.ProtoLoader"),
     ):
         stack.enter_context(p)

@@ -286,8 +286,8 @@ class _ManualCaseStub:
         return list(self._goldens)
 
 
-def test_dynamic_replay_golden_reloaded_with_execution_shapes(monkeypatch):
-    """声明输出 shape 未知（动态）→ 执行后按实际 shape 重装载 replay golden。"""
+def test_dynamic_replay_golden_loaded_statically_once(monkeypatch):
+    """声明输出 shape 未知（动态）→ replay golden 按文件名 shape 段装载一次，无执行后二次重载。"""
     switches = _switches()
     switches.manual_data_dirs = ("replay",)
     _apply_common_stubs(monkeypatch, switches)
@@ -320,9 +320,8 @@ def test_dynamic_replay_golden_reloaded_with_execution_shapes(monkeypatch):
     result = aclnn_worker.run(case, {}, {}, 0)
 
     assert result.precision_status == "PASS"
-    assert len(manual_case.load_calls) == 2
-    assert manual_case.load_calls[0][0] == (None,)  # static load with declared shape
-    assert manual_case.load_calls[1][0] == ((2,),)  # reload with execution shape
+    assert len(manual_case.load_calls) == 1
+    assert manual_case.load_calls[0][0] == (None,)  # 声明 shape 未知；文件自述权威，不再重载
     np.testing.assert_array_equal(compared["golden"][0], golden[0])
 
 

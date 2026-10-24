@@ -26,18 +26,75 @@ E2E 多模式分调），本类做"按配置判断 + 遍历 + 落盘"。
     idx 与 CSV 槽位对齐：None/str 占位槽位跳过不落盘、不移位后续索引
 """
 
-__all__ = ["DataDumper"]
+__all__ = ["DataDumper", "dump_xpu_archive"]
 
 # Standard Packages
+import hashlib
 import logging
 import os
 import re
 from typing import Optional, Sequence, Union
 
+from ....utilities import deep_flatten
 from ....utilities.dtypes import dtype_to_name
 from .config import DumpConfig
 from .formatter import get_formatter
 from .manual_data import _encode_shape, case_directory_name
+
+
+def _safe_dump_token(value, default: str) -> str:
+    """文件名安全化（非法字符替换 + 摘要消歧，与归档契约的 case/provider token 同款）。"""
+    text = str(value or default)
+    token = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+    if token != text:
+        token = f"{token or default}_{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
+    return token or default
+
+
+def _dump_xpu_archive_output(output, target_dir, file_name, file_format):
+    """单个三方输出按格式落盘（归档协议：bin 裸字节 / npy 直存）。"""
+    if file_format == "npy":
+        import numpy
+
+        numpy.save(os.path.join(target_dir, file_name + ".npy"), output)
+    else:
+        with open(os.path.join(target_dir, file_name + ".bin"), "wb") as f:
+            f.write(output.tobytes() if hasattr(output, "tobytes") else bytes(output))
+
+
+def dump_xpu_archive(xpu_results, testcase_name: str, switches) -> None:
+    """--dump xpu 的三方归档落盘：``{case}_xpu_golden_{index}.bin``（上传归档
+    平台契约，可直接作 manual_xpu_binaries 回放）。
+
+    与 DataDumper.dump_xpu（case 目录槽位协议，--manual-data-dirs 回放消费）
+    并列的第二套协议——目录/命名由归档契约定义。实现归属 dump/（单一落盘
+    模块）：remote.client.dump_xpu_outputs 与 common.xpu.dump_manual_xpu_archive
+    均委托本函数。
+    """
+    if not switches.dump_config.dump_xpu or not xpu_results:
+        return
+    dump_path = os.getenv("NPU_DUMP_PATH") or getattr(switches, "root_path", os.getcwd())
+    file_format = getattr(getattr(switches, "dump_config", None), "file_format", "bin")
+    case_token = _safe_dump_token(testcase_name, "testcase")
+
+    def _has_outputs(entry):
+        return isinstance(entry, dict) and entry.get("status") == "PASS" and entry.get("outputs") is not None
+
+    multiple = sum(1 for entry in xpu_results.values() if _has_outputs(entry)) > 1
+
+    for provider, entry in xpu_results.items():
+        if not _has_outputs(entry):
+            continue
+        provider_token = _safe_dump_token(provider, "xpu")
+        target_dir = os.path.join(dump_path, provider_token) if multiple else dump_path
+        os.makedirs(target_dir, exist_ok=True)
+        for index, output in enumerate(deep_flatten(entry["outputs"])):
+            if output is None or isinstance(output, str):
+                continue
+            file_name = f"{case_token}_xpu_golden_{index}"
+            _dump_xpu_archive_output(output, target_dir, file_name, file_format)
+            logging.info("[%s] Dumped XPU output: %s/%s", testcase_name or "testcase", target_dir, file_name)
+
 
 _NONE_DTYPE = "none"
 
@@ -93,6 +150,9 @@ class DataDumper:
         base = os.getenv("NPU_DUMP_PATH") or os.path.join(switches.root_path, "dump")
         self.dump_dir = os.path.join(base, case_directory_name(name_prefix))
         self._dir_created = False
+        # no-prof 只写 manual-data store（可回放数据集），不写调试 dump；
+        # 豁免在 _write 单点（dump_on_fail 的 force=True 路径同样豁免）。
+        self._no_prof = bool(getattr(switches, "no_prof", False))
 
     def _formatter(self):
         return get_formatter(self.cfg.file_format)
@@ -105,6 +165,8 @@ class DataDumper:
     def _write(
         self, role: str, data, idx: Optional[int], dtype, segment: Optional[str], shape_token: Optional[str] = None
     ):
+        if self._no_prof:
+            return
         self._ensure_dir()
         seg = f"_{segment}" if segment else ""
         # tiling_data 等无 dtype/无 idx 的特殊 role：idx=None 直用 {role}{segment}
@@ -143,9 +205,13 @@ class DataDumper:
                 continue
             self._write("output", data, idx, _slot_dtype(dtypes, idx, data), segment)
 
-    def dump_goldens(self, goldens: Sequence, dtypes: Sequence = (), force: bool = False) -> None:
-        """force or cfg.dump_golden → golden_{idx}_{dtype}.{ext}（无 segment；
-        None/str 占位跳过保 idx，同 dump_inputs）。bin 追加 `_shape_<token>`
+    def dump_goldens(
+        self, goldens: Sequence, dtypes: Sequence = (), force: bool = False, provider: Optional[str] = None
+    ) -> None:
+        """force or cfg.dump_golden → golden[_{provider}]_{idx}_{dtype}.{ext}
+        （provider 非 None 时占用 segment 位，如 golden_npu_0_float32——golden
+        来源区分；默认 None 保持 `golden_{idx}_{dtype}` 现状命名，replay 协议
+        依赖）。None/str 占位跳过保 idx，同 dump_inputs。bin 追加 `_shape_<token>`
         段——调试期无需对齐声明槽即可从文件名读出 shape（回放协议本就支持）。"""
         if not (force or self.cfg.dump_golden):
             return
@@ -155,7 +221,7 @@ class DataDumper:
             if data is None or isinstance(data, str):
                 continue
             shape_token = _shape_token(data) if bin_format else None
-            self._write("golden", data, idx, _slot_dtype(dtypes, idx, data), None, shape_token=shape_token)
+            self._write("golden", data, idx, _slot_dtype(dtypes, idx, data), provider, shape_token=shape_token)
 
     def dump_xpu(self, third_parties: dict, force: bool = False) -> None:
         """force or cfg.dump_xpu → xpu_{provider}_{idx}_{dtype}.{ext}

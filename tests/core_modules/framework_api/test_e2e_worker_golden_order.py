@@ -154,10 +154,9 @@ def test_golden_failure_placeholder_does_not_block_execution(monkeypatch):
     case = _e2e_case("golden_failure")
     compared = {}
 
-    from ttk.core_modules.framework_api import compare as e2e_compare
     from ttk.core_modules.framework_api import golden as e2e_golden
 
-    monkeypatch.setattr(e2e_compare, "process_context", _process_context)
+    monkeypatch.setattr(e2e_golden, "process_context", _process_context)
     monkeypatch.setattr(e2e_golden, "generate_golden", MagicMock(side_effect=RuntimeError("golden boom")))
     executed = MagicMock(return_value=(list(result), None, None))
     monkeypatch.setattr(e2e_worker, "_execute_eager", executed)
@@ -266,8 +265,8 @@ def test_dynamic_case_loads_replay_golden_statically(monkeypatch):
     np.testing.assert_array_equal(compared["golden"][0], golden[0])
 
 
-def test_static_load_failure_falls_back_to_execution_references(monkeypatch):
-    """静态装载失败（声明与落盘不符等）→ 执行后按 references 重装载。"""
+def test_static_load_failure_fails_case(monkeypatch):
+    """静态装载失败（数据损坏等）→ 直接 FAIL 行，不再 defer 重试。"""
     switches = _switches()
     switches.manual_data_dirs = ("replay",)
     inputs = [np.ones(2, np.float32), np.zeros(2, np.float32)]
@@ -279,11 +278,8 @@ def test_static_load_failure_falls_back_to_execution_references(monkeypatch):
     _stub_manual_case(monkeypatch, manual_case)
 
     def load_goldens(device_outputs=None, shapes=None, dtypes=None):
-        if shapes is not None:
-            manual_case.load_calls.append(("static", tuple(shapes)))
-            raise RuntimeError("saved shape mismatch")
-        manual_case.load_calls.append(("references", None))
-        return list(golden)
+        manual_case.load_calls.append(("static", tuple(shapes)))
+        raise RuntimeError("corrupt golden payload")
 
     manual_case.load_goldens = load_goldens
     monkeypatch.setattr(
@@ -292,77 +288,20 @@ def test_static_load_failure_falls_back_to_execution_references(monkeypatch):
         MagicMock(side_effect=AssertionError("replay must not generate golden")),
     )
 
+    executed = []
+
     def execute(*_args, **_kwargs):
+        executed.append(True)
         return list(result), None, None
 
     monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
-    compared = {}
-
-    def evaluate(testcase, raw_inputs, result_nps, golden_nps, *_rest):
-        compared["golden"] = golden_nps
-
-    monkeypatch.setattr(e2e_worker, "evaluate_eager_precision", evaluate)
     return_struct = FrameworkApiReturnStructure()
     e2e_worker._run_profile(case, _backend(), {}, {}, 0, switches, return_struct)
 
-    assert [call[0] for call in manual_case.load_calls] == ["static", "references"]
-    np.testing.assert_array_equal(compared["golden"][0], golden[0])
-
-
-def test_deferred_golden_early_return_discards_pending_dispatch(monkeypatch):
-    """deferred 装载失败早退（dispatch 之后、collect 之前）须弃置预派发句柄。"""
-    import threading
-
-    switches = _switches()
-    switches.manual_data_dirs = ("replay",)
-    inputs = [np.ones(2, np.float32), np.zeros(2, np.float32)]
-    result = [np.array([3.0, 4.0], np.float32)]
-    _apply_common_stubs(monkeypatch, switches, inputs, result)
-    case = _e2e_case("deferred_discard", first_view_shape=(-1,))
-    manual_case = _ManualCaseStub([np.array([3.0, 4.0], np.float32)])
-    manual_case.load_goldens = MagicMock(side_effect=RuntimeError("saved golden mismatch"))
-    _stub_manual_case(monkeypatch, manual_case)
-
-    # 动态槽门：NPU 后端 + 已注册 npu_preprocess hook（门语义，非本测试焦点）
-    monkeypatch.setattr(e2e_worker, "resolve_npu_preprocess_hook", lambda *_a, **_k: object())
-
-    # cross_check + 重叠开启 → _dispatch_xpu 预派发 background 句柄
-    monkeypatch.setattr(e2e_worker, "SpecResolver", _FakeSpecResolver)
-    monkeypatch.setattr(
-        e2e_worker,
-        "resolve_tolerance",
-        lambda *a, **k: [SimpleNamespace(token="cross_check")],  # noqa: S106  # token 为精度标准名，非口令
-    )
-    monkeypatch.setattr("ttk.core_modules.common.xpu.xpu_overlap_enabled", lambda: True)
-    monkeypatch.setattr(e2e_worker, "e2e_xpu_inputs", lambda tc, ri: [])
-    monkeypatch.setattr(e2e_worker, "e2e_xpu_input_names", lambda tc: [])
-    monkeypatch.setattr(e2e_worker, "e2e_xpu_input_dtypes", lambda tc: None)
-
-    release = threading.Event()
-
-    def _blocked_remote(**kwargs):
-        release.wait(1.5)  # 短于 discard 的 join 预算：早退点观测到 pending 后线程自然结束
-        return None, None, None
-
-    monkeypatch.setattr("ttk.core_modules.common.xpu.collect_third_party", _blocked_remote)
-    monkeypatch.setattr(e2e_worker, "_execute_eager", lambda *_a, **_k: (list(result), None, None))
-
-    discard_states = []
-    _original_discard = e2e_worker._discard_unconsumed
-
-    def _record_discard(xpu_dispatch):
-        discard_states.append(xpu_dispatch.pending if xpu_dispatch is not None else None)
-        _original_discard(xpu_dispatch)
-
-    monkeypatch.setattr(e2e_worker, "_discard_unconsumed", _record_discard)
-
-    return_struct = FrameworkApiReturnStructure()
-    try:
-        e2e_worker._run_profile(case, _backend(is_npu=True), {}, {}, 0, switches, return_struct)
-    finally:
-        release.set()
-
-    assert discard_states == [True]  # 早退点弃置的是仍在执行的 background 句柄
+    assert return_struct.precision_status == "FAIL"
+    assert str(return_struct.eager_precision).startswith("MANUAL_DATA_READ_FAILURE")
+    assert not executed  # 装载失败早退，不执行设备
+    assert [call[0] for call in manual_case.load_calls] == ["static"]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -457,7 +396,7 @@ def _mx_slot_case(paths):
 def _mx_collect(case, switches, golden_nps=None, ref_nps=None, manual_case=None):
     recorder = []
     process_ctx = SimpleNamespace(notify_status=lambda stage, *_: recorder.append(stage))
-    return_struct = SimpleNamespace(xpu_metrics=None)
+    return_struct = SimpleNamespace(xpu_metrics=None, set_golden_perf=lambda *a, **k: None)
     third, xpu_results, out_golden, early = e2e_worker._collect_xpu(
         case, switches, process_ctx, manual_case, (), ref_nps, golden_nps, None, return_struct
     )

@@ -5,7 +5,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""__promote_dtype must restore the context even when the wrapped block raises.
+"""_promote_dtype must restore the context even when the wrapped block raises.
 
 Regression for: golden_mode=Promote (auto-enabled by the cross_check standard)
 lifts context.input_dtypes fp32->fp64 / fp16->fp32 for the golden computation.
@@ -21,11 +21,11 @@ import pytest
 
 from ttk.core_modules.kernel import golden as output_generation
 
-golden_mode = output_generation.__dict__["__golden_mode"]
+golden_mode = output_generation.__dict__["_golden_mode"]
 
 
 class _Ctx:
-    """Minimal stand-in exposing only what __promote_dtype touches."""
+    """Minimal stand-in exposing only what _promote_dtype touches."""
 
     def __init__(self):
         self.input_dtypes = ("float32", "float32")

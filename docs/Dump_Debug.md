@@ -183,7 +183,7 @@ python3 -m ttk kernel -i cases.csv -t add_01 --dump full --dump-format npy --see
 
 | 约束 | 说明 |
 |------|------|
-| `--manual-data-dirs`（不带 `--no-prof`） | load 方向：搜索已存用例数据；禁止 `--validate`，要求 `--golden-mode Enable`（Disable/Promote/XPU 均被拒绝），E2E 禁止 `--backend cpu`，Kernel 禁止 `--compile-only` |
+| `--manual-data-dirs`（不带 `--no-prof`） | load 方向：搜索已存用例数据；禁止 `--validate`，要求 `--golden-mode Enable`（Disable/Promote/XPU/NPU 均被拒绝），E2E 禁止 `--backend cpu`，Kernel 禁止 `--compile-only` |
 | `--no-prof --dump in[,golden]` | dump 方向：可恢复数据落盘到（显式或默认）manual-data 目录；要求 `--dump-format` 为 bin/npy/pt；Kernel 需精确 `--dump in,golden` |
 | `--dump xpu` | 需要远端 XPU 配置；未配置时自动跳过不报错（`--xpu-perf` 缺配置仍报错） |
 

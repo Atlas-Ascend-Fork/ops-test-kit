@@ -129,6 +129,10 @@ class AclnnReturnStructure(ReturnStructureBase):
         "perf_status",
         "xpu_metrics",
         "npu_memory",
+        "golden_device_perf_us",
+        "golden_kernel_count",
+        "golden_kernel_details",
+        "golden_source",
     )
 
     EXTRA_SLOTS = (
@@ -155,6 +159,11 @@ class AclnnReturnStructure(ReturnStructureBase):
         self.xpu_metrics = {}
         # NPU device workspace memory (MB) from aclnn GetWorkspaceSize.
         self.npu_memory = default_value
+        # golden-mode NPU：golden 执行侧性能（设备阶段采集；CPU/XPU 路径为 None）
+        self.golden_device_perf_us = default_value
+        self.golden_kernel_count = default_value
+        self.golden_kernel_details = default_value
+        self.golden_source = default_value
         # dl=3 batch 一致性：worker 切片哈希摘要（随 pipe 回传主进程，非 CSV 列——
         # cleanup 组装比对消费）
         self.batch_summary = None
@@ -176,6 +185,12 @@ class AclnnReturnStructure(ReturnStructureBase):
         self.op_perf_us = _sum_op_avg_us(op_prof)
         self.perf_status = "PASS" if self.op_perf_us is not None else "UNKNOWN"
         self.npu_memory = getattr(prof_result, "npu_memory", None) if prof_result else None
+        from ..common.golden import golden_perf_columns
+
+        for key, value in golden_perf_columns(
+            getattr(context, "golden_perf", None), getattr(context, "golden_source", None)
+        ).items():
+            setattr(self, key, value)
 
     @classmethod
     def get_titles(cls, **kwargs) -> tuple:

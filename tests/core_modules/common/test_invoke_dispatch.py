@@ -99,6 +99,28 @@ def test_framework_of_namespace_boundaries(module_name, expected):
     assert framework_of(C()) == expected
 
 
+def _with_device_param(x, device_id=None):
+    return x
+
+
+def _var_keyword_device(*args, **kwargs):
+    return kwargs.get("device_id")
+
+
+def _named_only(x, y):
+    return x + y
+
+
+def test_accepts_device_detects_device_param_declaration():
+    """NPU golden 契约：device_id/dev_id/device 命名参数或 **kwargs 声明可上板；
+    无名声明返回 False（torch C builtin 无 signature 同理）。"""
+    from ttk.core_modules.common.invoke import accepts_device
+
+    assert accepts_device(_with_device_param) is True
+    assert accepts_device(_var_keyword_device) is True
+    assert accepts_device(_named_only) is False
+
+
 def test_bind_by_name_partial_split_init_and_call():
     """__init__ 和 __call__ 分阶段绑定：init 从 pool 取 x/axis，call 从 pool 取 y。"""
 

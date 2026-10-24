@@ -23,6 +23,7 @@ from ttk.core_modules.common.device import DSMIInterface, get_npu_hw_info
 from ttk.core_modules.common.process import SimpleCommandProcess, Task
 from ttk.utilities import cpu_count
 
+from ..common.golden import has_npu_device
 from ..common.instance import InstanceBase, register_instance
 from .result import GeirReturnStructure
 from .testcase import GeirTestcase
@@ -47,6 +48,14 @@ class GeirInstance(InstanceBase):
             opp_path = os.getenv("ASCEND_OPP_PATH", "")
             if not opp_path:
                 raise RuntimeError("Install path of opp or compiler is not found. Please check Ascend installation.")
+        # golden-mode NPU 需要设备能力——无卡环境启动期 fail-fast（豁免 no-prof：
+        # 不上板、不生成设备 golden）。
+        if self.switches.golden_mode == "NPU" and not self.switches.no_prof and not has_npu_device():
+            raise ValueError(
+                "--golden-mode NPU requires a device-capable NPU environment "
+                "(torch_npu unavailable or no NPU device detected); "
+                "use --golden-mode Enable for CPU golden"
+            )
 
     def detect_platform(self):
         """SoC 探测：DSMI 首卡 complete_platform（失败回退 Ascend910B），写 TTK_*_SOC_VERSION 环境变量。"""
@@ -76,8 +85,7 @@ class GeirInstance(InstanceBase):
         （compare_log 保留 start_size 机制作增量读兼容，见 common/comparison/compare_log.py）。"""
 
     def build_tasks(self, testcases: List[GeirTestcase]) -> List[Task]:
-        grant_events = SimpleCommandProcess._device_grant_events
-        granted_indices = SimpleCommandProcess._device_granted_indices
+        grant_events, granted_indices = SimpleCommandProcess.device_grants()
         # GEIR mode: gen + compile + profile in one task (like E2E)
         tasks = []
         for testcase in testcases:

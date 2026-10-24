@@ -160,11 +160,191 @@ class TorchProfiler(FrameworkProfiler):
         )
 
 
+def torch_npu_profile_start(outdir: str, warmup_count: int = 0, active_steps: int = 1):
+    """Start a torch_npu.profiler session; returns (prof, start_time_ns).
+
+    E2E TorchNpuProfiler 与 remote server torch pass（torch_lib=npu 分支）
+    共享——单一实现防漂移。schedule: wait=0, warmup=warmup_count,
+    active=active_steps, repeat=1（每轮 prof.step() 推进；prof.stop() 由
+    调用方负责）。导出走 tensorboard_trace_handler(outdir)。
+    """
+    from torch_npu.profiler import (
+        AiCMetrics,
+        ExportType,
+        ProfilerActivity,
+        ProfilerLevel,
+        _ExperimentalConfig,
+        profile,
+        schedule,
+        tensorboard_trace_handler,
+    )
+
+    experimental_config = _ExperimentalConfig(
+        profiler_level=ProfilerLevel.Level1,
+        aic_metrics=AiCMetrics.PipeUtilization,
+        export_type=ExportType.Text,
+    )
+    prof = profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.NPU],
+        record_shapes=True,
+        experimental_config=experimental_config,
+        schedule=schedule(wait=0, warmup=warmup_count, active=active_steps, repeat=1),
+        on_trace_ready=tensorboard_trace_handler(outdir),
+    )
+    start_time_ns = time.time_ns()
+    prof.start()
+    return prof, start_time_ns
+
+
+def find_npu_profile_csv(outdir: str, start_time_ns: int, filename: str, context_name: str = "unknown"):
+    """Only consider CSVs written since start_time_ns, never old traces.
+
+    E2E TorchNpuProfiler 与 remote server torch pass 共享的查找逻辑
+    （mtime ≥ start 过滤，多 trace 子目录取最新 mtime）。
+    """
+    matches = []
+    for root, _, files in os.walk(outdir):
+        if filename in files:
+            path = os.path.join(root, filename)
+            try:
+                if os.stat(path).st_mtime_ns >= start_time_ns:
+                    matches.append(path)
+            except FileNotFoundError:
+                continue  # removed between listdir and stat (concurrent cleanup)
+    if not matches:
+        logging.warning(
+            "NPU profiler has no new %s for %s in %s; historical traces are not reused. "
+            "Check profiler export logs and directory permissions.",
+            filename,
+            context_name,
+            outdir,
+        )
+        return None
+    return max(matches, key=os.path.getmtime)
+
+
+def _kernel_row_value(row, graph=False):
+    """Return (name, duration_us) for a row worth counting, else None.
+
+    两条规则（按采集形态；graph 内不区分 torchair cst/dyn 与 aclgraph）：
+    - eager：空 Step Id 行是 warmup 逃逸（实测偶发），丢弃；不看 Model ID
+      ——eager 算子本在图外、CANN 恒标 UINT32_MAX，按它过滤会全数误丢。
+    - graph：warmup 调用在 schedule 的 warmup step 内执行、不进导出（实测
+      4 次执行只导出 3 行），空 Step Id 行只可能是计时调用的归因缺失（CST
+      首个回放确定性缺失），保留；图外杂活（staging/填充/复位拷贝）CANN
+      标 UINT32_MAX Model ID，丢弃。
+    """
+    if graph:
+        try:
+            model_id = int(row.get("Model ID", ""))
+        except (ValueError, TypeError):
+            return None
+        if not 0 <= model_id < 0xFFFFFFFF:
+            return None
+    elif not row.get("Step Id", "").strip():
+        return None
+    name = row.get("Name", "").strip()
+    try:
+        duration = float(row.get("Duration(us)", 0))
+    except (ValueError, TypeError):
+        return None
+    return (name, duration) if name and duration > 0 else None
+
+
+def parse_kernel_details_csv(csv_path, aclgraph=False, graph=False):
+    """Parse kernel_details.csv for per-kernel device timing.
+
+    过滤规则见 _kernel_row_value（eager 丢空 Step Id / graph 统一丢图外
+    Model ID，aclgraph 归 graph 规则）。ACLGraph timing includes all
+    captured models, but not graph-external input copies.
+
+    E2E TorchNpuProfiler 与 remote server torch pass 共享（单一实现防漂移）。
+    """
+    use_graph = graph or aclgraph
+    kernels_map = {}  # name -> {total_us, calls, max_us, min_us}
+    total_device_us = 0.0
+
+    try:
+        with open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            if use_graph and "Model ID" not in (reader.fieldnames or ()):
+                label = "ACLGraph" if aclgraph else "Graph-mode"
+                logging.warning("%s performance unavailable: Model ID missing in %s", label, csv_path)
+                return [], 0.0
+            for row in reader:
+                value = _kernel_row_value(row, use_graph)
+                if value is None:
+                    continue
+                name, duration = value
+                total_device_us += duration
+                info = kernels_map.get(name)
+                if info is None:
+                    kernels_map[name] = {
+                        "total_us": duration,
+                        "calls": 1,
+                        "max_us": duration,
+                        "min_us": duration,
+                    }
+                else:
+                    info["total_us"] += duration
+                    info["calls"] += 1
+                    info["max_us"] = max(info["max_us"], duration)
+                    info["min_us"] = min(info["min_us"], duration)
+    except Exception as e:
+        logging.warning(f"Failed to parse {csv_path}: {e}")
+
+    if aclgraph:
+        if kernels_map:
+            logging.info(
+                "ACLGraph device performance includes captured graph kernels only; "
+                "graph-external tasks are excluded. Full trace: %s",
+                csv_path,
+            )
+        else:
+            logging.warning(
+                "ACLGraph performance unavailable: no captured graph kernels with valid Step Id/Model ID in %s; "
+                "check graph capture and profiler output",
+                csv_path,
+            )
+    kernels = [
+        KernelInfo(
+            name=name,
+            device_us=info["total_us"],
+            calls=info["calls"],
+            avg_us=info["total_us"] / info["calls"],
+            max_us=info["max_us"],
+            min_us=info["min_us"],
+        )
+        for name, info in kernels_map.items()
+    ]
+    return kernels, total_device_us
+
+
+def parse_operator_cpu_time(csv_path):
+    """Parse operator_details.csv for total CPU time."""
+    total_cpu_us = 0.0
+    try:
+        with open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    cpu_us = float(row.get("Host Self Duration(us)", 0))
+                except (ValueError, TypeError):
+                    continue
+                total_cpu_us += cpu_us
+    except Exception as e:
+        logging.warning(f"Failed to parse {csv_path}: {e}")
+    return total_cpu_us
+
+
 class TorchNpuProfiler(FrameworkProfiler):
     """Profiler for NPU using torch_npu.profiler.
 
     Uses torch_npu.profiler.profile (start/step/stop) and parses the exported
     kernel_details.csv / operator_details.csv for device-side timing.
+    采集/解析内核已提为模块级共享函数（torch_npu_profile_start /
+    find_npu_profile_csv / parse_kernel_details_csv / parse_operator_cpu_time），
+    供 remote server torch pass（torch_lib=npu）复用。
     """
 
     def __init__(self, backend, config):
@@ -180,31 +360,7 @@ class TorchNpuProfiler(FrameworkProfiler):
         self._prof = None
 
     def __enter__(self):
-        from torch_npu.profiler import (
-            AiCMetrics,
-            ExportType,
-            ProfilerActivity,
-            ProfilerLevel,
-            _ExperimentalConfig,
-            profile,
-            schedule,
-            tensorboard_trace_handler,
-        )
-
-        experimental_config = _ExperimentalConfig(
-            profiler_level=ProfilerLevel.Level1,
-            aic_metrics=AiCMetrics.PipeUtilization,
-            export_type=ExportType.Text,
-        )
-        self._prof = profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.NPU],
-            record_shapes=True,
-            experimental_config=experimental_config,
-            schedule=schedule(wait=0, warmup=self._warmup_count, active=1, repeat=1),
-            on_trace_ready=tensorboard_trace_handler(self._outdir),
-        )
-        self._start_time_ns = time.time_ns()
-        self._prof.start()
+        self._prof, self._start_time_ns = torch_npu_profile_start(self._outdir, self._warmup_count)
         return self
 
     def step(self):
@@ -227,15 +383,13 @@ class TorchNpuProfiler(FrameworkProfiler):
         total_cpu_us = 0.0
 
         if kernel_csv:
-            kernels, total_device_us = self._parse_kernel_details(
-                kernel_csv, aclgraph=self._aclgraph, graph=self._graph
-            )
+            kernels, total_device_us = parse_kernel_details_csv(kernel_csv, aclgraph=self._aclgraph, graph=self._graph)
             if not kernels and not self._aclgraph:
                 logging.warning(
                     "NPU performance unavailable: no device kernel records with valid Step Id in %s", kernel_csv
                 )
         if operator_csv:
-            total_cpu_us = self._parse_operator_cpu_time(operator_csv)
+            total_cpu_us = parse_operator_cpu_time(operator_csv)
 
         return ProfileResult(
             elapsed_us=total_device_us / max(repeat_count, 1),
@@ -248,135 +402,17 @@ class TorchNpuProfiler(FrameworkProfiler):
         )
 
     def _find_csv(self, filename):
-        """Only consider CSVs written since this capture started, never old traces."""
-        matches = []
-        for root, _, files in os.walk(self._outdir):
-            if filename in files:
-                path = os.path.join(root, filename)
-                try:
-                    if os.stat(path).st_mtime_ns >= self._start_time_ns:
-                        matches.append(path)
-                except FileNotFoundError:
-                    continue  # removed between listdir and stat (concurrent cleanup)
-        if not matches:
-            logging.warning(
-                "NPU profiler has no new %s for %s in %s; historical traces are not reused. "
-                "Check profiler export logs and directory permissions.",
-                filename,
-                self._testcase_name,
-                self._outdir,
-            )
-            return None
-        return max(matches, key=os.path.getmtime)
+        return find_npu_profile_csv(self._outdir, self._start_time_ns, filename, self._testcase_name)
 
+    # ── 兼容封装：历史调用点/测试直接以类方法消费（语义与模块级共享函数一致）──
     @staticmethod
     def _kernel_row_value(row, graph=False):
-        """Return (name, duration_us) for a row worth counting, else None.
-
-        两条规则（按采集形态；graph 内不区分 torchair cst/dyn 与 aclgraph）：
-        - eager：空 Step Id 行是 warmup 逃逸（实测偶发），丢弃；不看 Model ID
-          ——eager 算子本在图外、CANN 恒标 UINT32_MAX，按它过滤会全数误丢。
-        - graph：warmup 调用在 schedule 的 warmup step 内执行、不进导出（实测
-          4 次执行只导出 3 行），空 Step Id 行只可能是计时调用的归因缺失（CST
-          首个回放确定性缺失），保留；图外杂活（staging/填充/复位拷贝）CANN
-          标 UINT32_MAX Model ID，丢弃。
-        """
-        if graph:
-            try:
-                model_id = int(row.get("Model ID", ""))
-            except (ValueError, TypeError):
-                return None
-            if not 0 <= model_id < 0xFFFFFFFF:
-                return None
-        elif not row.get("Step Id", "").strip():
-            return None
-        name = row.get("Name", "").strip()
-        try:
-            duration = float(row.get("Duration(us)", 0))
-        except (ValueError, TypeError):
-            return None
-        return (name, duration) if name and duration > 0 else None
+        return _kernel_row_value(row, graph)
 
     @classmethod
     def _parse_kernel_details(cls, csv_path, aclgraph=False, graph=False):
-        """Parse kernel_details.csv for per-kernel device timing.
-
-        过滤规则见 _kernel_row_value（eager 丢空 Step Id / graph 统一丢图外
-        Model ID，aclgraph 归 graph 规则）。ACLGraph timing includes all
-        captured models, but not graph-external input copies.
-        """
-        use_graph = graph or aclgraph
-        kernels_map = {}  # name -> {total_us, calls, max_us, min_us}
-        total_device_us = 0.0
-
-        try:
-            with open(csv_path, newline="") as f:
-                reader = csv.DictReader(f)
-                if use_graph and "Model ID" not in (reader.fieldnames or ()):
-                    label = "ACLGraph" if aclgraph else "Graph-mode"
-                    logging.warning("%s performance unavailable: Model ID missing in %s", label, csv_path)
-                    return [], 0.0
-                for row in reader:
-                    value = cls._kernel_row_value(row, use_graph)
-                    if value is None:
-                        continue
-                    name, duration = value
-                    total_device_us += duration
-                    info = kernels_map.get(name)
-                    if info is None:
-                        kernels_map[name] = {
-                            "total_us": duration,
-                            "calls": 1,
-                            "max_us": duration,
-                            "min_us": duration,
-                        }
-                    else:
-                        info["total_us"] += duration
-                        info["calls"] += 1
-                        info["max_us"] = max(info["max_us"], duration)
-                        info["min_us"] = min(info["min_us"], duration)
-        except Exception as e:
-            logging.warning(f"Failed to parse {csv_path}: {e}")
-
-        if aclgraph:
-            if kernels_map:
-                logging.info(
-                    "ACLGraph device performance includes captured graph kernels only; "
-                    "graph-external tasks are excluded. Full trace: %s",
-                    csv_path,
-                )
-            else:
-                logging.warning(
-                    "ACLGraph performance unavailable: no captured graph kernels with valid Step Id/Model ID in %s; "
-                    "check graph capture and profiler output",
-                    csv_path,
-                )
-        kernels = [
-            KernelInfo(
-                name=name,
-                device_us=info["total_us"],
-                calls=info["calls"],
-                avg_us=info["total_us"] / info["calls"],
-                max_us=info["max_us"],
-                min_us=info["min_us"],
-            )
-            for name, info in kernels_map.items()
-        ]
-        return kernels, total_device_us
+        return parse_kernel_details_csv(csv_path, aclgraph=aclgraph, graph=graph)
 
     @staticmethod
     def _parse_operator_cpu_time(csv_path):
-        """Parse operator_details.csv for total CPU time."""
-        total_cpu_us = 0.0
-        try:
-            with open(csv_path, newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    try:
-                        cpu_us = float(row.get("Host Self Duration(us)", 0))
-                    except (ValueError, TypeError):
-                        continue
-                    total_cpu_us += cpu_us
-        except Exception as e:
-            logging.warning(f"Failed to parse {csv_path}: {e}")
-        return total_cpu_us
+        return parse_operator_cpu_time(csv_path)

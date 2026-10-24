@@ -342,6 +342,10 @@ class KernelReturnStructure(ReturnStructureBase):
         "xpu_metrics",
         "precision_metrics",
         "batch_consistency_id",
+        "golden_device_perf_us",
+        "golden_kernel_count",
+        "golden_kernel_details",
+        "golden_source",
     )
 
     # 专属列 = __slots__ 去公共槽（precision_status/deterministic_status/
@@ -432,6 +436,11 @@ class KernelReturnStructure(ReturnStructureBase):
         # 非 CSV 槽（随 pipe 回传，cleanup 组装比对消费）
         self.batch_consistency_id = None
         self.batch_summary = None
+        # golden-mode NPU：golden 执行侧性能（设备阶段采集；CPU/XPU 路径为 None）
+        self.golden_device_perf_us = default_value
+        self.golden_kernel_count = default_value
+        self.golden_kernel_details = default_value
+        self.golden_source = default_value
 
     # noinspection DuplicatedCode
     def construct(self, context: TestcaseKernel, compare_result: "ComparisonResult", passed):
@@ -508,6 +517,12 @@ class KernelReturnStructure(ReturnStructureBase):
 
         self.precision_metrics = compare_result.metrics or {}
         self.batch_consistency_id = getattr(context, "batch_consistency_id", None)
+        from ..common.golden import golden_perf_columns
+
+        for key, value in golden_perf_columns(
+            getattr(context, "golden_perf", None), getattr(context, "golden_source", None)
+        ).items():
+            setattr(self, key, value)
 
     @classmethod
     def get_titles(cls, custom: bool = False) -> Tuple[str]:

@@ -36,6 +36,7 @@ from ..common.comparison.compare_log import (
     read_compare_log_failures,
 )
 from ..common.device import DSMIInterface, get_npu_hw_info, validate_core_limit
+from ..common.golden import has_npu_device
 from ..common.instance import InstanceBase, register_instance
 from ..common.logging import COMPARE_LOG_FILE_NAME, build_single_log_dir
 from ..common.process import ProcessGroup, SimpleCommandProcess, Task, describe_exit
@@ -85,6 +86,20 @@ class KernelInstance(InstanceBase):
         # 限额容器下收紧 CANN 编译内部并行度（make -j）；须在 setup() 拉起任何
         # 子进程之前注入——forkserver 子进程不继承之后才设置的环境变量
         limit_cann_compile_jobs()
+        # golden-mode NPU 需要设备能力（torch_npu 可导入且有设备）——无卡环境
+        # 在启动期 fail-fast，避免执行期每用例静默退化/空 golden。豁免 no-prof
+        # 与 compile-only（不上板、不生成设备 golden，无需设备）。
+        if (
+            self.switches.golden_mode == "NPU"
+            and not self.switches.no_prof
+            and not getattr(self.switches, "compile_only", False)
+            and not has_npu_device()
+        ):
+            raise ValueError(
+                "--golden-mode NPU requires a device-capable NPU environment "
+                "(torch_npu unavailable or no NPU device detected); "
+                "use --golden-mode Enable for CPU golden"
+            )
 
     def detect_device_count(self):
         """Resolve worker count and persist it on ``switches.device_count``.
@@ -260,8 +275,7 @@ class KernelInstance(InstanceBase):
         for case in testcases:
             case.kb_pid = self.kb.get_pid() if self.kb else 0
         grouped_testcases = TestcaseKernel.hash_cases_to_groups(testcases)
-        grant_events = SimpleCommandProcess._device_grant_events
-        granted_indices = SimpleCommandProcess._device_granted_indices
+        grant_events, granted_indices = SimpleCommandProcess.device_grants()
         tasks: List[Task] = []
         for cases in grouped_testcases.values():
             anchor_compile_ids: List[str] = []

@@ -54,9 +54,14 @@ class _Switches:
     """Minimal stand-in for the SWITCHES object."""
 
     def __init__(self, golden_mode=None):
+        from types import SimpleNamespace
+
         self.golden_mode = golden_mode
         self.plugin_path = None
         self.compare_method = None
+        self.root_path = "."
+        self.no_prof = False
+        self.dump_config = SimpleNamespace(dump_golden=False)
 
 
 def _standard(token):
@@ -178,17 +183,22 @@ def test_needs_promote_false_under_xpu():
     assert needs_golden_promote(object(), _Switches(golden_mode="XPU")) is False
 
 
+def test_needs_promote_false_under_npu():
+    """golden_mode=NPU 与 Promote 互斥：golden 在 NPU 原生 dtype 上执行，无 CPU 抬精度语义。"""
+    assert needs_golden_promote(object(), _Switches(golden_mode="NPU")) is False
+
+
 def test_generate_golden_data_xpu_placeholder(monkeypatch):
     """XPU 模式本地不生成 golden：统一返回 GOLDEN_FAILURE 占位（真值由远端三方回路给出）。"""
     from types import SimpleNamespace
 
-    import ttk.core_modules.framework_api.compare as prof
+    import ttk.core_modules.framework_api.golden as prof
 
     monkeypatch.setattr(
         prof, "process_context", lambda: SimpleNamespace(notify_status=lambda *a, **k: None, storage={})
     )
-    testcase = SimpleNamespace(golden_api="", golden_mode_override=None)
-    golden = prof.generate_golden_data(testcase, [], _Switches(golden_mode="XPU"), None, dump=False)
+    testcase = SimpleNamespace(testcase_name="t", golden_api="", golden_mode_override=None)
+    golden = prof.generate_golden_data(testcase, [], _Switches(golden_mode="XPU"), None)
     assert golden == ["GOLDEN_FAILURE"]
 
 
@@ -196,9 +206,8 @@ def test_generate_golden_data_xpu_placeholder(monkeypatch):
 # _generate_golden
 # ----------------------------------------------------------------------------
 def _patch_plain_generator(seen):
-    def _fake_generate(case, raw_inputs, switches, backend, dump=True):
+    def _fake_generate(case, raw_inputs, switches, backend, dev_id=0, return_struct=None):
         seen["mode"] = case.golden_mode_override
-        seen["dump"] = dump
         return ["golden"]
 
     return patch.object(_worker, "generate_golden_data", side_effect=_fake_generate)

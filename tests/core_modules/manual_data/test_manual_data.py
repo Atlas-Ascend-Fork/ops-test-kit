@@ -847,8 +847,8 @@ def test_bin_golden_filename_shape_matches_device_output(tmp_path):
     np.testing.assert_array_equal(restored[0], golden)
 
 
-def test_bin_golden_same_numel_wrong_shape_legacy_suffix_rejected(tmp_path):
-    """存量数据（文件名带 __shape_ 段）同 numel 但设备输出 shape 不符时仍被拒绝。"""
+def test_bin_golden_same_numel_wrong_shape_legacy_suffix_loads_by_filename(tmp_path):
+    """存量数据（文件名带 __shape_ 段）同 numel 但设备输出 shape 不符：文件名 shape 即权威，按存档还原。"""
     case = _e2e_case("same_numel_wrong_shape_legacy")
     store = ManualDataStore(tmp_path)
     case_dir = store.write_case(
@@ -860,12 +860,14 @@ def test_bin_golden_same_numel_wrong_shape_legacy_suffix_rejected(tmp_path):
     (case_dir / "golden_0_float32_shape_2x3.bin").rename(case_dir / "golden_0_float32__shape_2x3.bin")
 
     loaded = store.load_case(case, "e2e")
-    with pytest.raises(ManualDataError, match="saved shape .*device output shape"):
-        loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
+    restored = loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
+
+    assert restored[0].shape == (2, 3)
+    np.testing.assert_array_equal(restored[0], np.arange(6, dtype=np.float32).reshape(2, 3))
 
 
-def test_bin_golden_same_numel_wrong_shape_new_suffix_rejected(tmp_path):
-    """新协议（_shape_ 段）同 numel 但设备输出 shape 不符时被拒绝。"""
+def test_bin_golden_same_numel_wrong_shape_new_suffix_loads_by_filename(tmp_path):
+    """新协议（_shape_ 段）同 numel 但设备输出 shape 不符：文件名 shape 即权威，按存档还原。"""
     case = _e2e_case("same_numel_wrong_shape_new")
     store = ManualDataStore(tmp_path)
     store.write_case(
@@ -876,8 +878,10 @@ def test_bin_golden_same_numel_wrong_shape_new_suffix_rejected(tmp_path):
     )
 
     loaded = store.load_case(case, "e2e")
-    with pytest.raises(ManualDataError, match="saved shape .*device output shape"):
-        loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
+    restored = loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
+
+    assert restored[0].shape == (2, 3)
+    np.testing.assert_array_equal(restored[0], np.arange(6, dtype=np.float32).reshape(2, 3))
 
 
 def test_bin_golden_loads_standalone_from_filename_shape(tmp_path):
@@ -894,6 +898,26 @@ def test_bin_golden_loads_standalone_from_filename_shape(tmp_path):
 
     loaded = store.load_case(case, "e2e")
     restored = loaded.load_goldens()
+
+    assert restored[0].shape == (2, 3)
+    np.testing.assert_array_equal(restored[0], golden)
+
+
+def test_bin_golden_real_file_at_declared_none_slot_loads_by_filename(tmp_path):
+    """读侧声明 None（未声明/动态输出槽）+ 真实 golden 文件：按文件名 shape 装载，
+    不再被 None 压制报错（抑制只由 none 标记文件表达）。"""
+    case = _e2e_case("declared_none_real_file")
+    store = ManualDataStore(tmp_path)
+    golden = np.arange(6, dtype=np.float32).reshape(2, 3)
+    store.write_case(
+        case,
+        "e2e",
+        [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
+        [golden],
+    )
+
+    loaded = store.load_case(case, "e2e")
+    restored = loaded.load_goldens(shapes=[None], dtypes=["float32"])
 
     assert restored[0].shape == (2, 3)
     np.testing.assert_array_equal(restored[0], golden)
@@ -1130,7 +1154,9 @@ def test_dump_and_load_helpers_share_store_policy(tmp_path):
     )
     loaded_status = []
 
-    manual_case = load_manual_data_case(load_case, "e2e", load_switches, before_load=lambda: loaded_status.append(True))
+    manual_case = load_manual_data_case(
+        load_case, "e2e", load_switches, notify_before_load=lambda: loaded_status.append(True)
+    )
 
     assert loaded_status == [True]
     np.testing.assert_array_equal(manual_case.inputs[0], inputs[0])

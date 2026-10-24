@@ -131,7 +131,7 @@ def test_dynamic_storage_is_deferred():
 def test_dynamic_slot_requires_usable_golden_source(
     monkeypatch, golden_mode, golden_api, manual_has_goldens, has_plugin, expected
 ):
-    from ttk.core_modules.framework_api import compare as profiling
+    from ttk.core_modules.framework_api import golden as profiling
 
     case = make_case()
     case.golden_api = golden_api

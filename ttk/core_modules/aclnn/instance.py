@@ -25,6 +25,7 @@ from ..common.comparison.compare_log import (
     read_compare_log_failures,
 )
 from ..common.device import DSMIInterface, get_npu_hw_info
+from ..common.golden import has_npu_device
 from ..common.instance import InstanceBase, execution_sorted, register_instance
 from ..common.logging import COMPARE_LOG_FILE_NAME, build_single_log_dir
 from ..common.process import SimpleCommandProcess, Task
@@ -44,6 +45,14 @@ class AclnnInstance(InstanceBase):
         opp_path = os.getenv("ASCEND_OPP_PATH", "")
         if not opp_path:
             raise RuntimeError("Install path of opp or compiler is not found. Please check Ascend installation.")
+        # golden-mode NPU 需要设备能力——无卡环境启动期 fail-fast（豁免 no-prof：
+        # 不上板、不生成设备 golden）。
+        if self.switches.golden_mode == "NPU" and not self.switches.no_prof and not has_npu_device():
+            raise ValueError(
+                "--golden-mode NPU requires a device-capable NPU environment "
+                "(torch_npu unavailable or no NPU device detected); "
+                "use --golden-mode Enable for CPU golden"
+            )
 
     def detect_device_count(self):
         if self.switches.no_prof and self.switches.manual_data_dirs or self.switches.mode.is_model():
@@ -106,8 +115,7 @@ class AclnnInstance(InstanceBase):
         super().prepare_workers()
 
     def build_tasks(self, testcases: List[TestcaseAclnn]) -> List[Task]:
-        grant_events = SimpleCommandProcess._device_grant_events
-        granted_indices = SimpleCommandProcess._device_granted_indices
+        grant_events, granted_indices = SimpleCommandProcess.device_grants()
         # -t/--ti 圈选时按传入序（getattr 兼容免实例化调用）
         sorted_cases = execution_sorted(getattr(self, "_selection_order_key", None), testcases)
         tasks = []

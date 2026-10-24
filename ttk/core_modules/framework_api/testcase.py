@@ -60,6 +60,8 @@ class TestcaseE2e(ApiTestcaseBase):
         # cross_check 判据下由 profiling 侧临时置 "Promote"（终态回写）；
         # tensors 由 ApiTestcaseBase 以 AoS 槽表属性提供（无独立 slot）
         "golden_mode_override",
+        "golden_perf",
+        "golden_source",
         # === 私有 === #
         "_api_info_cache",
         "_multi_device_thread_contexts",
@@ -130,13 +132,16 @@ class TestcaseE2e(ApiTestcaseBase):
         self.attributes9 = None
         self.golden_api = None
         self.golden_data = None
-        self._api_info_cache = None
         self.device_ids = None
-        self._multi_device_thread_contexts = None
         # cross_check 判据下由 profiling 侧临时置 "Promote",令 golden 抬成高精度真值。
         # 必须在 __slots__ 中声明:该类及其基类均无 __dict__,否则赋值抛 AttributeError,
         # 被调用侧 try/except 咽掉后 Promote 静默空转。范式同 TestcaseKernel / TestcaseAclnn。
         self.golden_mode_override = None
+        self.golden_perf = None
+        self.golden_source = None
+        # === 私有 === #
+        self._api_info_cache = None
+        self._multi_device_thread_contexts = None
 
     @classmethod
     def get_all_visible_headers(cls):

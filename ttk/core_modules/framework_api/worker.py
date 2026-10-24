@@ -61,10 +61,9 @@ from .compare import (
     e2e_xpu_inputs,
     evaluate_eager_precision,
     evaluate_graph_precision,
-    generate_golden_data,
-    has_dynamic_golden_source,
 )
 from .execute import _capture_peak_memory, _execute_eager
+from .golden import generate_golden_data, has_dynamic_golden_source
 from .input_generate import generate_inputs, set_runtime_tensors
 from .result import FrameworkApiReturnStructure
 from .utils import (
@@ -749,9 +748,10 @@ def _needs_golden_promote(testcase, switches):
     golden 生成先于设备执行，此时设备输出尚不存在，锚点不得依赖执行结果；
     声明与实际 dtype 不一致的低频场景由输出校验阶段兜底。
 
-    golden_mode=XPU 与 Promote 互斥（golden 由三方产出，不做 CPU 抬精度）。
+    golden_mode=XPU 与 Promote 互斥（golden 由三方产出，不做 CPU 抬精度）；
+    golden_mode=NPU 同样互斥（golden 在 NPU 原生 dtype 上执行，无 CPU 抬精度语义）。
     """
-    if switches.golden_mode == "XPU":
+    if switches.golden_mode in ("XPU", "NPU"):
         return False
     output_dtypes = resolve_numpy_dtypes(getattr(testcase, "flat_output_dtypes", ()) or ())
     if not output_dtypes:
@@ -778,19 +778,20 @@ def _needs_golden_promote(testcase, switches):
         return False
 
 
-def _generate_golden(testcase, raw_inputs, switches, backend, promote, dump=True):
+def _generate_golden(testcase, raw_inputs, switches, backend, promote, dev_id=0, return_struct=None):
     """生成 golden；promote=True 时临时挂 golden_mode_override=Promote，生成后回写原值。
 
     TestcaseE2e 的 golden_mode_override 为 __slots__ 槽位且 __init__ 预置
-    None，不可 del，用记录回写还原。dump=False 供 no-prof 落盘口径复用
-    （golden dump 文件仅 full-flow 写）。
+    None，不可 del，用记录回写还原。调试 dump 落盘统一由 DataDumper 门控
+    （dump_golden 开关 + no-prof 单点豁免），本层不做分支。dev_id/return_struct
+    供 golden-mode NPU 的执行设备与性能列回写（CPU/XPU 路径忽略）。
     """
     if not promote:
-        return generate_golden_data(testcase, raw_inputs, switches, backend, dump=dump)
+        return generate_golden_data(testcase, raw_inputs, switches, backend, dev_id=dev_id, return_struct=return_struct)
     prev = getattr(testcase, "golden_mode_override", None)
     testcase.golden_mode_override = "Promote"
     try:
-        return generate_golden_data(testcase, raw_inputs, switches, backend, dump=dump)
+        return generate_golden_data(testcase, raw_inputs, switches, backend, dev_id=dev_id, return_struct=return_struct)
     finally:
         testcase.golden_mode_override = prev
 
@@ -852,7 +853,8 @@ def _resolve_manual_stores(testcase, switches, process_ctx, return_struct):
                 testcase,
                 "e2e",
                 switches,
-                before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
+                notify_before_load=lambda: process_ctx.notify_status("OnLoadManualData"),
+                require_goldens=False,
             )
         except Exception as exc:
             logging.exception(f"[{testcase.testcase_name}] Manual data loading failure")
@@ -902,7 +904,7 @@ def _generate_input(testcase, backend, switches, process_ctx, plan, manual_case,
     process_ctx.notify_status("OnGenInput")
     # 输入生成不触设备：TF 侧框架张量在 CPU 作用域物化（golden P2 插件契约
     # 即 CPU nested tensors），设备张量由执行侧在 open 后从 raw_inputs
-    # 重建（见 _execute_phases）。torch 侧张量本就 CPU-born，无此分野。
+    # 重建（见 _device_profiling）。torch 侧张量本就 CPU-born，无此分野。
     try:
         if manual_case is not None:
             raw_inputs = generate_inputs(
@@ -969,26 +971,30 @@ def _resolve_api(testcase, adapter, backend, switches):
     )
 
 
-def _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_inputs):
-    """golden 生成 / 静态 replay 装载——先于 no-prof 收尾与设备执行。
+def _prepare_golden(
+    testcase,
+    backend,
+    switches,
+    process_ctx,
+    manual_case,
+    raw_inputs,
+    dev_id=0,
+    return_struct=None,
+    device_grant_events=None,
+    device_granted_indices=None,
+):
+    """golden 生成 / replay 装载——先于 no-prof 收尾与设备执行。
 
-    no-prof（dump 方向）与 full-flow 共用本步骤：落盘与比对消费同一份产物
-    （判据要求时含 Promote，对齐 kernel 的 tolerance→golden→dump 时序）；
-    dump_golden 关闭时跳过生成。延迟到执行后装载（deferred=True）的情形：
-    golden_mode=XPU（golden 由三方产出，两种模式皆延迟）；静态 replay
-    装载失败（按执行返回 shape 重装载）。动态 shape 用例不特判——动态仅
-    作用于输入槽（-1 输出槽被 DYN_SHAPE_ON_OUTPUT_SLOT 校验拒绝），输出
-    声明仍是静态 shape，replay golden 按文件名 shape 段自描述还原、与 CSV
-    声明核对；声明与实际不符的边缘场景由静态装载失败自动落入 deferred。
-    生成失败 → 占位（GOLDEN_FAILURE/SUPPRESSED）落结果行，不拖累执行与 perf。
+    统一编排（四通路一致）：有已存真值就装载（replay 优先，任何 mode）；
+    无已存真值按模式裁决——XPU 占位（三方设备后回填）、NPU 设备生成
+    （自起设备锁、DUT 前）、Enable 现算。静态装载失败 → FAIL 行。
 
-    返回 SimpleNamespace(promote, nps, deferred)。
+    返回 SimpleNamespace(promote, nps, early)：early=True 表示用例已收尾
+    （装载失败 FAIL 行），_run_profile 应直接返回。
     """
     promote = _needs_golden_promote(testcase, switches)
-    if golden_mode(testcase, switches) == "XPU":
-        return SimpleNamespace(promote=promote, nps=None, deferred=True)
     if switches.no_prof and not switches.dump_config.dump_golden:
-        return SimpleNamespace(promote=promote, nps=None, deferred=False)
+        return SimpleNamespace(promote=promote, nps=None, early=False)
     if manual_case is not None and manual_case.has_goldens:
         try:
             process_ctx.notify_status("OnLoadManualGolden")
@@ -998,18 +1004,46 @@ def _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_i
                 dtypes=testcase.flat_output_dtypes,
             )
             dump_goldens(testcase, nps, switches)
-            return SimpleNamespace(promote=promote, nps=nps, deferred=False)
-        except Exception:
-            logging.info(
-                "[%s] static replay golden load failed; deferring to execution-returned shapes",
-                testcase.testcase_name,
+            return SimpleNamespace(promote=promote, nps=nps, early=False)
+        except Exception as exc:
+            logging.exception(f"[{testcase.testcase_name}] Static replay golden load failed")
+            return_struct.construct(f"MANUAL_DATA_READ_FAILURE: {exc}", "FAIL", None)
+            _profiling_end_print(testcase, return_struct, switches=switches)
+            return SimpleNamespace(promote=promote, nps=None, early=True)
+    mode = golden_mode(testcase, switches)
+    if mode == "XPU":
+        # XPU 真值由三方在设备后回填（_collect_xpu），本侧占位即可——无需延迟
+        return SimpleNamespace(promote=promote, nps=["GOLDEN_FAILURE"], early=False)
+    if mode == "NPU":
+        # 自起设备锁、DUT 前生成（与 kernel gen_output(dev_id)/aclnn gen(dev_id)
+        # 同款单步编排；锁段与 DUT 串行错开）
+        with DeviceLock(
+            process_ctx,
+            dev_id,
+            use_device=backend.has_device(),
+            grant_event=(device_grant_events or {}).get(dev_id),
+            granted_idx=(device_granted_indices or {}).get(dev_id),
+        ):
+            nps = _generate_golden(
+                testcase,
+                raw_inputs,
+                switches,
+                backend,
+                promote,
+                dev_id=dev_id,
+                return_struct=return_struct,
             )
-            return SimpleNamespace(promote=promote, nps=None, deferred=True)
-    return SimpleNamespace(
-        promote=promote,
-        nps=_generate_golden(testcase, raw_inputs, switches, backend, promote, dump=not switches.no_prof),
-        deferred=False,
+        return SimpleNamespace(promote=promote, nps=nps, early=False)
+    nps = _generate_golden(
+        testcase,
+        raw_inputs,
+        switches,
+        backend,
+        promote,
+        dev_id=dev_id,
+        return_struct=return_struct,
     )
+    return SimpleNamespace(promote=promote, nps=nps, early=False)
 
 
 def _attach_plog_errors(err_msg):
@@ -1052,7 +1086,7 @@ def _run_graph_phase(mode_label, graph_fn, *args, **kwargs):
         return [], None, None, _attach_plog_errors(f"Graph {mode_label} execution failed: {exc}")
 
 
-def _execute_phases(
+def _device_profiling(
     testcase,
     backend,
     switches,
@@ -1197,42 +1231,20 @@ def _execute_phases(
     )
 
 
-def _load_deferred_golden(
-    testcase, switches, process_ctx, manual_case, raw_inputs, backend, promote, ref_nps, return_struct
-):
-    """延迟装载：静态 replay 装载失败（声明与执行返回 shape 偏离等）后按执行
-    返回的 device_outputs 重装载；XPU golden 待三方产出后回填。
-
-    返回 (golden_nps, early)。
-    """
-    if manual_case is not None and manual_case.has_goldens:
-        try:
-            process_ctx.notify_status("OnLoadManualGolden")
-            golden_nps = load_replay_goldens(manual_case, device_outputs=ref_nps)
-            dump_goldens(testcase, golden_nps, switches)
-            return golden_nps, False
-        except Exception as exc:
-            logging.exception(f"[{testcase.testcase_name}] Manual golden loading failure")
-            return_struct.construct(f"MANUAL_DATA_READ_FAILURE: {exc}", "FAIL", None)
-            _profiling_end_print(testcase, return_struct, switches=switches)
-            return None, True
-    return _generate_golden(testcase, raw_inputs, switches, backend, promote), False
-
-
 def _manual_data_dump(
     testcase, switches, process_ctx, dump_store, manual_case, prepared_inputs, golden_nps, return_struct
 ):
     """in+golden 落盘（manual-data store）；no-prof（dump 方向）在此收尾。
 
-    full-flow：golden_nps 就绪（非 None）即落——非 deferred 用例在设备执行前
-    调用（执行异常时数据已保全，对齐 kernel 时序）；deferred（动态 shape/XPU）
-    golden 未就绪返回 False，留待装载后再次调用。落当次实际产物（判据要求
-    Promote 时即升精度标杆），文件名 dtype 自描述、回放按其装载；golden
-    缺失（dump_golden 关闭 / 占位串）跳过 golden 位。返回 early。
+    full-flow：golden_nps 就绪（非 None）即落——golden 已在 _prepare_golden
+    内一次解析完成（回放装载 / XPU 占位 / NPU 自锁段生成 / Enable 现算），
+    不存在 deferred 二次落盘。落当次实际产物（判据要求 Promote 时即升精度
+    标杆），文件名 dtype 自描述、回放按其装载；golden 缺失（dump_golden
+    关闭 / 占位串）跳过 golden 位。返回 early。
     """
     if not switches.no_prof and golden_nps is None:
         return False
-    if dump_store is not None and manual_case is None and switches.golden_mode != "XPU":
+    if dump_store is not None and manual_case is None and (switches.golden_mode != "XPU" or switches.no_prof):
         try:
             process_ctx.notify_status("OnWriteManualData")
             case_dir = dump_manual_dataset(dump_store, testcase, "e2e", prepared_inputs, golden_nps or [], switches)
@@ -1242,6 +1254,12 @@ def _manual_data_dump(
             return_struct.construct(f"MANUAL_DATA_PREPARE_FAILURE: {exc}", "FAIL", None)
             _profiling_end_print(testcase, return_struct, switches=switches)
             return True
+    elif not switches.no_prof and dump_store is not None and manual_case is None and switches.golden_mode == "XPU":
+        # 对齐 kernel/aclnn/geir full-flow + XPU：三方 golden 无可落盘，warning 跳过。
+        logging.warning(
+            "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
+            testcase.testcase_name,
+        )
     if switches.no_prof:
         _dump_only_end(testcase, return_struct, golden_nps or [], switches)
         return True
@@ -1268,7 +1286,27 @@ def _dispatch_xpu(testcase, switches, process_ctx, manual_case, raw_inputs):
 
     golden_is_xpu = switches.golden_mode == "XPU"
     if golden_is_xpu:
-        return None
+        if has_manual_xpu_source(testcase, manual_case):
+            return None  # manual 源——_collect_xpu 同步短路（本地文件必然在，无需设备前收割）
+        # golden-XPU：三方即 golden，设备前同步收割（对齐 kernel/aclnn/geir——
+        # FAIL 不空跑设备），经 ready 句柄回传、collect 幂等。
+        process_ctx.notify_status("OnXpuProfiling")
+
+        def _collect_golden():
+            priority, third_parties, xpu_results = collect_third_party(
+                op_name=testcase.api_name,
+                inputs=e2e_xpu_inputs(testcase, raw_inputs),
+                input_names=e2e_xpu_input_names(testcase),
+                op_type=None,
+                attributes=testcase.attributes or {},
+                testcase_name=testcase.testcase_name,
+                switches=switches,
+                need_data=True,
+                input_dtypes=e2e_xpu_input_dtypes(testcase),
+            )
+            return third_parties, xpu_results, (priority or "xpu")
+
+        return XpuDispatch.ready(_collect_golden())
     if has_manual_xpu_source(testcase, manual_case):
         return None  # manual 源——_collect_xpu 同步短路（声明探测，不读文件）
     if not xpu_overlap_enabled():
@@ -1314,6 +1352,28 @@ def _discard_unconsumed(xpu_dispatch):
     """句柄未被消费时弃置——外门未开（golden 全占位串，比对必败）的后台请求止损。"""
     if xpu_dispatch is not None and xpu_dispatch.pending:
         xpu_dispatch.discard()
+
+
+def _xpu_promote_golden(testcase, xpu, switches, process_ctx, return_struct):
+    """golden-XPU 装配（设备前收割，对齐 kernel/aclnn/geir）：三方即 golden，
+    缺失整例 FAIL 提前返回。返回 True = 用例已收尾（结果已写 return_struct）。"""
+    from ..common.golden import xpu_golden_perf
+
+    third_parties, xpu_results, xpu_provider = xpu.collect()
+    from ..common.xpu import dump_xpu_slot_files
+
+    dump_xpu_slot_files(testcase, switches, third_parties, xpu_provider)
+    if third_parties is None:
+        logging.error(
+            "[%s] golden-mode XPU: no third_party output (XPU down / no third_party declaration); case FAIL",
+            testcase.testcase_name,
+        )
+        return_struct.construct("GOLDEN_FAILURE", "FAIL", None)
+        _profiling_end_print(testcase, return_struct, switches=switches)
+        return True
+    return_struct.set_golden_perf(xpu_golden_perf(xpu_results), source="xpu")
+    dump_goldens(testcase, list(third_parties), switches)
+    return False
 
 
 def _cross_check_declared(testcase, switches, ref_nps, golden_nps, golden_is_xpu) -> bool:
@@ -1430,12 +1490,16 @@ def _collect_xpu(
             _profiling_end_print(testcase, return_struct, switches=switches)
             return None, None, None, True
         golden_nps = list(third_parties)
+        # golden 性能回填：三方执行即 golden 真值，device_us 进 golden_* 列
+        from ..common.golden import xpu_golden_perf
+
+        return_struct.set_golden_perf(xpu_golden_perf(xpu_results), source="xpu")
         dump_goldens(testcase, golden_nps, switches)
     return_struct.xpu_metrics = format_xpu_metrics(xpu_results) if xpu_results else {}
     return third_parties, xpu_results, golden_nps, False
 
 
-def _evaluate_precision(
+def _compare_and_finalize(
     testcase, switches, process_ctx, raw_inputs, outputs, golden_nps, third_parties, api, return_struct, backend
 ):
     """比对收尾：eager / graph 各形态 dump + 精度评估 + 终态屏显。"""
@@ -1510,7 +1574,8 @@ def _evaluate_precision(
 
 
 def _run_profile(testcase, backend, device_grant_events, device_granted_indices, dev_id, switches, return_struct):
-    """单卡用例编排：输入 → golden 前置 → 设备执行 → 延迟装载 → 三方 → 比对。
+    """单卡用例编排：输入 → golden 前置 → 设备执行 → 三方 → 比对（对齐 kernel/
+    aclnn/geir 的阶段序）。
 
     步骤函数返回 early=True 表示该用例已收尾（结果已写入 return_struct）。
     """
@@ -1536,7 +1601,20 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
         return
 
     # golden 先于落盘与设备执行（对齐 kernel：tolerance→golden→dump）
-    golden = _prepare_golden(testcase, backend, switches, process_ctx, manual_case, raw_inputs)
+    golden = _prepare_golden(
+        testcase,
+        backend,
+        switches,
+        process_ctx,
+        manual_case,
+        raw_inputs,
+        dev_id,
+        return_struct,
+        device_grant_events,
+        device_granted_indices,
+    )
+    if golden.early:
+        return
 
     if _manual_data_dump(
         testcase, switches, process_ctx, dump_store, manual_case, prepared_inputs, golden.nps, return_struct
@@ -1547,8 +1625,16 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
 
     # XPU 三方 dispatch 前置（NPU 执行期重叠；预解析不命中返回 None 走同步）
     xpu_dispatch = _dispatch_xpu(testcase, switches, process_ctx, manual_case, raw_inputs)
+    # golden-XPU：三方即 golden，设备前收割（FAIL 不空跑设备——对齐 kernel/
+    # aclnn/geir）。manual 源（dispatch None）由执行后 _collect_xpu 装载。
+    if (
+        switches.golden_mode == "XPU"
+        and xpu_dispatch is not None
+        and _xpu_promote_golden(testcase, xpu_dispatch, switches, process_ctx, return_struct)
+    ):
+        return
 
-    outputs = _execute_phases(
+    outputs = _device_profiling(
         testcase,
         backend,
         switches,
@@ -1570,20 +1656,6 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
     ref_nps = outputs.result_nps or outputs.graph_cst_nps or outputs.graph_dyn_nps or outputs.graph_aclgraph_nps
 
     golden_nps = golden.nps
-    if golden.deferred:
-        golden_nps, early = _load_deferred_golden(
-            testcase, switches, process_ctx, manual_case, raw_inputs, backend, golden.promote, ref_nps, return_struct
-        )
-        if early:
-            _discard_unconsumed(xpu_dispatch)
-            return
-        # deferred 装载后补落盘（此处必为 full-flow——no-prof 已在上文收尾）
-        if _manual_data_dump(
-            testcase, switches, process_ctx, dump_store, manual_case, prepared_inputs, golden_nps, return_struct
-        ):
-            _discard_unconsumed(xpu_dispatch)
-            return
-
     third_parties, _, golden_nps, early = _collect_xpu(
         testcase,
         switches,
@@ -1599,7 +1671,7 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
     if early:
         return
 
-    _evaluate_precision(
+    _compare_and_finalize(
         testcase, switches, process_ctx, raw_inputs, outputs, golden_nps, third_parties, api, return_struct, backend
     )
     if deterministic_level == 3:

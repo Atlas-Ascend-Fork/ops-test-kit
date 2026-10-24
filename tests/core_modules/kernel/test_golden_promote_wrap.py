@@ -13,7 +13,7 @@ Regression test for the golden Promote-context wrap lift.
 
 Before the fix, `__golden_mode` (the dtype-promote context for
 `--golden-mode=promote`) only wrapped the numpy/torch **builtin** and **class**
-golden paths inside KERNEL `__invoke_golden`. The custom + torch/tf-adapter
+golden paths inside KERNEL `_invoke_golden`. The custom + torch/tf-adapter
 paths ran UNGUARDED, so under `golden_mode=Promote`, bfloat16/float16 inputs
 were NOT promoted before those goldens ran → inaccurate "true value".
 
@@ -33,7 +33,7 @@ from ttk.core_modules.kernel import golden as _mod
 from ttk.core_modules.kernel.testcase import TestcaseKernel
 from ttk.core_modules.kernel.worker import _resolve_tolerance as resolve_tolerance_routing
 
-_generate_golden = getattr(_mod, "__generate_golden")
+_generate_golden = _mod._generate_golden
 
 
 def _make_custom_golden(seen_dtypes):

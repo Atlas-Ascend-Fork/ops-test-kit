@@ -15,9 +15,9 @@ Bug: In Kernel/GEIR gen_input, the custom ``input`` plugin updated
 (``_xpu_inputs`` in profiling.py), so the third-party provider received
 pre-custom-input random data instead of the plugin's data.
 
-Fix: call ``__transform_to_original_format`` after the plugin returns, same
+Fix: call ``_transform_to_original_format`` after the plugin returns, same
 as the stored_inputs and manual_input_binaries branches already do.
-Additionally, ``__transform_to_original_format`` no longer short-circuits on
+Additionally, ``_transform_to_original_format`` no longer short-circuits on
 ``golden_mode == "Disable"``: cross_check sets ``golden_mode_override`` to
 ``"Promote"`` *after* ``gen_input``, so the override is not visible during
 input generation.  The function now always computes ``original_input_arrays``

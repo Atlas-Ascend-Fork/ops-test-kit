@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 import ttk.core_modules.kernel.compare as compare_mod
-from ttk.core_modules.kernel.compare import __outputs_to_numpy_arrays as _decode_outputs
+from ttk.core_modules.kernel.compare import _outputs_to_numpy_arrays as _decode_outputs
 from ttk.core_modules.kernel.compare import comparing
 from ttk.core_modules.kernel.result import KernelExecuteResult
 from ttk.switches import MODE, SWITCHES
@@ -29,7 +29,7 @@ from ttk.switches import MODE, SWITCHES
 
 @pytest.fixture(autouse=True)
 def _mock_outputs_to_numpy():
-    with patch("ttk.core_modules.kernel.compare.__outputs_to_numpy_arrays", lambda *args, **kwargs: None):
+    with patch("ttk.core_modules.kernel.compare._outputs_to_numpy_arrays", lambda *args, **kwargs: None):
         yield
 
 
