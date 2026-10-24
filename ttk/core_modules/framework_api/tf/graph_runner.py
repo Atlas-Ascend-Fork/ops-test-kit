@@ -140,6 +140,7 @@ def execute_tf_graph(
             call_args=args,
             call_kwargs=kwargs,
             sig_idx=sig_idx,
+            graph_tag=testcase.testcase_name,
         )
 
         from .param_extractor import (
@@ -240,6 +241,22 @@ def execute_tf_graph(
 # ── 图网络构造与执行 ────────────────────────────────────────────
 
 
+def _unique_node_name(api_func, graph_tag):
+    """按用例唯一化的算子节点 name kwargs；API 不接受 name 或无 tag 时为空。
+
+    npu_device 动态 shape 图的 GE 会话模型缓存按算子节点名复用（graph_id
+    与函数名/rank/dtype/常量无关），批跑复用进程时同名节点会命中其它用例
+    已编译的模型导致常量串台；注入唯一 name 迫使 graph_id 错开。
+    """
+    if not graph_tag:
+        return {}
+    import inspect
+
+    if "name" in inspect.signature(api_func).parameters:
+        return {"name": f"{getattr(api_func, '__name__', 'op')}_tta_{graph_tag}"}
+    return {}
+
+
 class TfGraphWrapper:
     """Wrap a TF API callable in tf.function for graph-mode execution.
 
@@ -259,6 +276,7 @@ class TfGraphWrapper:
         call_args=None,
         call_kwargs=None,
         sig_idx=None,
+        graph_tag=None,
     ):
         import tensorflow as tf
 
@@ -282,6 +300,7 @@ class TfGraphWrapper:
                 call_kwargs,
                 sig_idx,
                 resource_names=self._resource_names,
+                graph_tag=graph_tag,
             )
             self._sig_param_names = set(sig_param_names)
         elif input_signature is not None:
@@ -292,7 +311,14 @@ class TfGraphWrapper:
 
     @staticmethod
     def _build_kw_function(
-        api_func, param_names, input_signature, call_args=None, call_kwargs=None, sig_idx=None, resource_names=None
+        api_func,
+        param_names,
+        input_signature,
+        call_args=None,
+        call_kwargs=None,
+        sig_idx=None,
+        resource_names=None,
+        graph_tag=None,
     ):
         """Build tf.function with explicit named params matching input_signature.
 
@@ -313,6 +339,10 @@ class TfGraphWrapper:
         resource_names (tf.raw_ops.Resource* 的 DT_RESOURCE 位): call 时把
         tf.Variable 换成 .handle; 无输出 raw op 在 trace 下返回 Operation,
         tf.function 拒绝 — 降级为 None(eager 下本就返回 None)。
+
+        graph_tag: 算子节点名注入 (name=) — npu_device 动态 shape 图的 GE
+        会话模型缓存按节点名复用, 同名节点会错误命中其它用例编译过的模型
+        (常量串台, 如 paddings/block_shape)。按用例名唯一化节点名规避。
         """
         import tensorflow as tf
 
@@ -332,9 +362,12 @@ class TfGraphWrapper:
             elif call_kwargs and name in call_kwargs:
                 closure_values[name] = call_kwargs[name]
 
+        node_kwargs = _unique_node_name(api_func, graph_tag)
+
         def wrapper(*args):
             kwargs = dict(zip(tensor_names, args))
             kwargs.update(closure_values)
+            kwargs.update(node_kwargs)
             if resource_names:
                 for name in resource_names:
                     v = kwargs.get(name)

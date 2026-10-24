@@ -35,6 +35,7 @@ import numpy as np
 
 from ttk.remote import has_data
 from ttk.utilities.container import deep_flatten
+from ttk.utilities.dtypes import is_4bit_dtype
 
 CHUNK_SIZE = 64 * 1024  # 64KB chunks for file streaming
 
@@ -138,15 +139,33 @@ RESP_MEM_THRESHOLD = 64 << 20
 
 
 # float8 家族按原始字节传输：dtype 元数据由 X-Input-Schema 声明。
-# 与 executor._FLOAT8_WIRE_DTYPES 同口径。
-_FLOAT8_WIRE_DTYPES = ("float8_e4m3fn", "float8_e5m2", "float8_e8m0", "hifloat8")
+# 与 executor._UINT8_WIRE_DTYPES 同口径。
+_UINT8_WIRE_DTYPES = (
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e8m0",
+    "hifloat8",
+    "int4",
+    "float4_e2m1",
+    "float4_e1m2",
+    "hifloat4",
+)
 
 
 def _wire_leaf(arr):
-    """float8 家族按原始字节（uint8 位）传输；其余原样直通。"""
+    """按位传输 numpy 无原生存储的 dtype：float8 家族→uint8、4bit 家族→uint8、
+    bfloat16→int16；其余直通。
+
+    dtype 元数据由 X-Input-Schema 声明，服务端据此重铸；0-D 不走
+    ascontiguousarray（会把标量升成 (1,)）。
+    """
     name = getattr(getattr(arr, "dtype", None), "name", "")
-    if name in _FLOAT8_WIRE_DTYPES:
-        return np.ascontiguousarray(arr).view(np.uint8)
+    if name in _UINT8_WIRE_DTYPES or is_4bit_dtype(name):
+        wire = np.ascontiguousarray(arr) if arr.ndim else arr
+        return wire.view(np.uint8)
+    if name == "bfloat16":
+        wire = np.ascontiguousarray(arr) if arr.ndim else arr
+        return wire.view(np.int16)
     return arr
 
 
@@ -154,7 +173,8 @@ def _serialize_to_file(inputs: list, dir=None) -> str:
     """Serialize numpy inputs to a temporary .npz file.
 
     deep_flatten 展开嵌套（每叶子一个 a{i}），过滤 None。float8 家族只传
-    uint8 原始位（npz 无法以原生 dtype 落盘回读），元数据由 schema 声明。
+    uint8 原始位、bfloat16 只传 int16 原始位（npz 无法以原生 dtype 落盘回读），
+    元数据由 schema 声明。
     dir: 临时文件目录（默认系统 tempdir）。返回路径，caller 清理。
     """
     leaves = [a for a in deep_flatten(inputs) if a is not None]
@@ -167,7 +187,7 @@ def _reinterpret_dtype(arr, dtype_name):
     from ..utilities.dtypes import resolve_numpy_dtype
 
     try:
-        if dtype_name in ("bfloat16", "float8_e5m2", "float8_e4m3fn", "float8_e8m0"):
+        if dtype_name == "bfloat16" or dtype_name in _UINT8_WIRE_DTYPES or is_4bit_dtype(dtype_name):
             return arr.view(resolve_numpy_dtype(dtype_name))
     except (ImportError, AttributeError, ValueError, TypeError, RuntimeError):
         return arr

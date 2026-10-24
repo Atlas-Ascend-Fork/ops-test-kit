@@ -38,8 +38,17 @@ _FRAMEWORK_RESERVED = {"device"}
 _PROVIDER_MODULE_ALIASES = {"tf": "tensorflow"}
 
 # npz 无法承载的自定义 dtype：wire 只传原始字节，元数据由 X-Input-Schema 声明。
-# 与 dispatcher._FLOAT8_WIRE_DTYPES 同口径。
-_FLOAT8_WIRE_DTYPES = ("float8_e4m3fn", "float8_e5m2", "float8_e8m0", "hifloat8")
+# 与 dispatcher._UINT8_WIRE_DTYPES 同口径。
+_UINT8_WIRE_DTYPES = (
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e8m0",
+    "hifloat8",
+    "int4",
+    "float4_e2m1",
+    "float4_e1m2",
+    "hifloat4",
+)
 # float8 家族中 torch 有原生存储的类型（其余 numpy 直通）。
 _TORCH_FLOAT8_DTYPES = ("float8_e4m3fn", "float8_e5m2")
 
@@ -638,6 +647,24 @@ def _invoke_function(callable_fn, named, attrs, param_order):
     return callable_fn(**dict(zip(param_names, vals), **zip_kwargs))
 
 
+def _tf_bf16_wire(v):
+    """tf bf16 张量位级 bitcast 成 int16 按位落盘；非 bf16 张量/不可用返回 None。
+
+    绕开 numpy __array__ 协议（部分 TF/numpy 组合下协议产物不可识别），
+    wire 位与通用 bf16 分支等价。
+    """
+    try:
+        import tensorflow as tf
+    except ImportError:
+        return None
+    if tf.is_tensor(v) and v.dtype == tf.bfloat16:
+        try:
+            return np.asarray(tf.bitcast(v, tf.int16).numpy()), "bfloat16"
+        except Exception:  # noqa: S110
+            logging.debug("tf.bitcast bf16→int16 failed; falling back to generic asarray path", exc_info=True)
+    return None
+
+
 def _to_numpy_pair(v, provider):
     """Convert one output to (numpy_array, semantic_dtype_name), provider-aware.
 
@@ -668,16 +695,19 @@ def _to_numpy_pair(v, provider):
         except ImportError:
             pass
     # tf tensor / numpy / array-like — np.asarray handles it; never imports torch.
-    a = np.asarray(v)
-    dt = a.dtype.name
-    if "bfloat16" in dt or "bf16" in dt:
-        return np.ascontiguousarray(a).view(np.int16), "bfloat16"
-    if dt in _FLOAT8_WIRE_DTYPES:
-        # NumPy/TF float8 dtypes use a non-standard ``<f1`` descriptor that
-        # NumPy cannot read back from NPZ. Keep the semantic dtype in schema
-        # and serialize only the raw byte representation, like torch outputs.
-        return np.ascontiguousarray(a).reshape(a.shape).view(np.uint8), dt
-    return a, dt
+    tf_out = _tf_bf16_wire(v) if provider == "tf" else None
+    if tf_out is None:
+        a = np.asarray(v)
+        dt = a.dtype.name
+        if dt in ("bfloat16", "bf16"):
+            return np.ascontiguousarray(a).reshape(a.shape).view(np.int16), "bfloat16"
+        if dt in _UINT8_WIRE_DTYPES:
+            # NumPy/TF float8/4bit dtypes use non-standard 1-byte descriptors that
+            # NumPy cannot read back from NPZ. Keep the semantic dtype in schema
+            # and serialize only the raw byte representation, like torch outputs.
+            return np.ascontiguousarray(a).reshape(a.shape).view(np.uint8), dt
+        return a, dt
+    return tf_out
 
 
 def _outputs_to_numpy(outputs, provider):
@@ -721,7 +751,7 @@ def _restore_wire_dtype(value, dtype_name):
     """
     if not isinstance(value, np.ndarray) or not dtype_name:
         return None
-    if not (is_4bit_dtype(dtype_name) or dtype_name in _FLOAT8_WIRE_DTYPES):
+    if not (is_4bit_dtype(dtype_name) or dtype_name in _UINT8_WIRE_DTYPES):
         return None
     try:
         return value.view(resolve_numpy_dtype(dtype_name))
