@@ -45,6 +45,7 @@ pre-commit run --all-files       # ruff + codespell + 基础检查（v4，非 pr
 
 - pytest 配置在 `pyproject.toml` 的 `[tool.pytest.ini_options]`：marker 有 `slow`/`device`/`e2e`，`xfail_strict=true`。
 - 需真机 NPU 的测试用 skipif 自动跳过（如 `tests/core_modules/framework_api/test_hccl_apis.py`，无 CANN 环境跳过；其余套件按 torch/tf 可用性跳过）。
+- `tests/core_modules/framework_api/test_extractor_chain_matrix.py` 的 28 条解析链胜者分布用例按基线 `torch==2.9.0` + `torch_npu==2.9.0.post7` 钉死：其他组合（如 README 推荐的 `torch==2.12.0`）下自动降级为编排层结构校验并 skip 钉死断言（属预期，非故障）；按当期版本重冻结基线的方法见该文件 docstring。
 - `tests/conftest.py` 会清掉 `ASCEND_*` 环境变量并预加载默认 config，防止测试意外吃到真机配置。
 
 ## 架构

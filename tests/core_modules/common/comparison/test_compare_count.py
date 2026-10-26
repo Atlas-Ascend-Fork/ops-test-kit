@@ -78,3 +78,14 @@ class TestThirdPartyCount:
         """third_parties=None → 正常流程（不报错）。"""
         r = compare_with_hooks(_Tc(), ["DYN_OFF"], [np.array([1.0])], _stds(1), _hooks(("float32",)))
         assert r[2] is True
+
+
+class TestStandardsSlotMismatch:
+    """standards 与 outputs 槽数失配：显式可定位报错（非裸 list index out of range）。"""
+
+    def test_shorter_standards_raises_descriptive_error(self):
+        """VALID 输出无对应判据槽 → IndexError 带失配上下文（golden 期槽扩展未重解析的回归网）。"""
+        outputs = [np.array([1.0]), np.array([2.0])]
+        goldens = [None, np.array([2.0])]  # 输出0 golden 抑制位（非 VALID），输出1 走数值比对
+        with pytest.raises(IndexError, match="out of sync with output slots"):
+            compare_with_hooks(_Tc(), outputs, goldens, _stds(1), _hooks(("float32", "float32")))

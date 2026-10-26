@@ -23,7 +23,7 @@
 | Kernel | `pad_float8` / `pad_float4` | pad float8_e5m2 / float4_e2m1 | `E80008: ... but actually is [float8_e5m2 / float4_e2m1]` |
 | Kernel | `requant_float8` | AscendQuantV2 → float8 | `OPTILING_FAILURE: Parameter dst_type of has incorrect dtype DT_FLOAT8_E5M2. It should be DT_INT8, DT_INT4.` |
 | Kernel/GEIR | `matmul_v3_optional_inputs` | MatMulV3 可选输入 | Kernel 通路为 perf-only 无 golden（Comparison 列 UNSUPPORTED，状态记 FAIL，非支持面问题）；GEIR 通路报 `E19999 Cannot find Node custom infer_data` |
-| GEIR | `pad_float8` / `pad_float4` / `quant_int8` / `requant_float8` | Pad / AscendQuantV2 | `EZ3002 Unsupported_Operator` |
+| GEIR | `pad_float8` / `pad_float4` / `quant_int8` / `requant_float8` | Pad / AscendQuantV2 | `EZ3002 Unsupported_Operator`（其中 float4 用例还需 `pip3 install en-dtypes`，缺失时先报 `EN_DTYPES IS NEEDED TO SUPPORT FLOAT4_E2M1 DTYPE`） |
 | E2E | `pad_fp8_e4m3` / `pad_fp8_e5m2` / `pad_fp8_e8m0` | torch.nn.functional.pad fp8 族 | `EZ1001: Tensor self not implemented for DT_FLOAT8_*` |
 | E2E | `causal_conv1d_fn_basic` | torch.ops.cann_ops_transformer | `EZ1013: JSON configuration file of operator aclnnCausalConv1dFn_* cannot be found`（需部署配套 cann-ops-transformer 自定义算子包；加载 C++ 扩展还需系统 `ninja`） |
 | E2E | `add_bool` | bool add（logical or 语义，binary_equal 字节级比对） | 部分版本线 NPU 侧按算术加实现（1+1 字节为 0x02 而非 0x01），比对判 FAIL 且日志呈 `Expected: True(0x01) Actual: True(0x02)`——为设备侧 bool 规范表示缺陷，非用例或环境问题 |

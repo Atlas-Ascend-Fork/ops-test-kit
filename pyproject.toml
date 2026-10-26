@@ -42,8 +42,10 @@ dependencies = [
 tf = ["tensorflow>=2.12"]
 torch = ["torch>=2.0"]
 # torch 与 torch_npu 必须主次版本配套（官方配套矩阵外的组合 import 即崩：<2.13 为
-# 经测试矩阵上限，矩阵扩容后同步上调）
-e2e-npu = ["torch>=2.0,<2.13", "torch_npu>=2.1,<2.13"]
+# 经测试矩阵上限，矩阵扩容后同步上调）。pip 区间内取最新 patch，已实测不配套的
+# 组合逐点排除：torch_npu 2.12.0.post3 配 torch 2.12.0 import 崩溃退出码 134
+# （当前 PyPI 无它能配套的 torch patch），后续再出坏 patch 同法追加。
+e2e-npu = ["torch>=2.0,<2.13", "torch_npu>=2.1,<2.13,!=2.12.0.post3"]
 e2e-xpu = ["torch>=2.0"]
 dev = [
     "pytest>=7",

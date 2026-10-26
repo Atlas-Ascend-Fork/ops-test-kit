@@ -193,6 +193,15 @@ def compare(
         if verdict.per_output[idx] != "VALID":
             total_log += verdict.log_lines[idx] or ""
             continue
+        if idx >= len(standards):
+            # 前置契约（standards 与 outputs 同长）被破坏时给出可定位信息，
+            # 而非裸 list index out of range（如 GEIR shape-unknown 元数据槽
+            # 并入后未重解析 standards 的失配）。
+            raise IndexError(
+                f"standards({len(standards)}) mismatch with outputs({len(outputs)}): "
+                f"no tolerance standard for output[{idx}] "
+                f"(resolve_tolerance out of sync with output slots)"
+            )
         token = standards[idx].token
         comparison = get_comparison(token)
         c = comparison(
