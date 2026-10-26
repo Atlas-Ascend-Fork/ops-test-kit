@@ -10,14 +10,11 @@
 """GEIR worker/execute 单元测试。
 
 覆盖：dl=1 确定性状态判定（_det_status）、逐模式结果合并（_merge_mode_result
-/ _absorb_fields 的 cst_/dyn_ 槽映射与吸收语义）、_run_once 超时路径
-（kill + wait + pipe 读线程回收 + RuntimeError）。
+/ _absorb_fields 的 cst_/dyn_ 槽映射与吸收语义）。
 """
 
 import logging
-import subprocess
 import types
-from contextlib import ExitStack
 from unittest import mock
 
 import numpy as np
@@ -293,22 +290,3 @@ class TestReconcileInputs:
                 raise RuntimeError("boom")
 
         geir_worker._reconcile_inputs(_Broken())  # 不抛——对账基础设施不得破坏通路
-
-
-class TestRunOnceTimeout:
-    """_run_once 超时路径：真实 pipe + mock Popen。"""
-
-    def test_timeout_raises_and_kills_process(self):
-        proc = mock.MagicMock()
-        proc.communicate.side_effect = subprocess.TimeoutExpired(cmd="geir", timeout=1)
-        plan = geir_execute.GraphExecPlan(
-            binary="bin", config_path="cfg", build_dir=".", prof_path="", input_prefix="prefix"
-        )
-        testcase = types.SimpleNamespace(testcase_name="tc", flat_output_dtypes=(), flat_output_shapes=())
-        switches = types.SimpleNamespace(proc_timeout=1)
-        with ExitStack() as stack:
-            stack.enter_context(mock.patch.object(geir_execute.subprocess, "Popen", return_value=proc))
-            with pytest.raises(RuntimeError, match="GEIR execution timed out"):
-                geir_execute._run_once(testcase, 0, switches, plan)
-        proc.kill.assert_called_once()
-        proc.wait.assert_called_once()

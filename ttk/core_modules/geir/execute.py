@@ -22,13 +22,16 @@
 
 __all__ = ["GraphExecPlan", "GraphExecResult", "execute_graph"]
 
+import atexit
 import contextlib
 import glob
 import hashlib
 import logging
 import os
+import select
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -41,6 +44,18 @@ from ..kernel.device_state import clear_device_state
 from .output_parse import _parse_stdout
 from .perf_parse import _parse_msprof_task_duration
 from .testcase import GeirTestcase
+
+_SERVE_CASE_ERROR = "GEIR execution failed (serve):"
+
+
+def _set_pdeathsig():
+    """Linux PR_SET_PDEATHSIG：主进程死亡时子进程收 SIGKILL（覆盖 GE 内部卡死场景）。"""
+    try:
+        import ctypes
+
+        ctypes.CDLL(None).prctl(1, 9)
+    except Exception as e:  # noqa: BLE001  # 非 Linux 平台无 prctl 时静默降级为仅 EOF 兜底
+        logging.debug("[GEIR-serve] set pdeathsig unavailable: %s", e)
 
 
 @dataclass
@@ -83,7 +98,7 @@ def execute_graph(
             clear_device_state(switches)  # 轮间父进程 RTS 清（子进程执行中不可介入）
             if run_idx > 0:
                 _write_all_input_bins(testcase.input_arrays, plan.input_prefix)  # 防图算子原地写污染
-            outputs, perf_us = _run_once(testcase, dev_id, switches, plan)
+            outputs, perf_us = _run_once_serve(testcase, dev_id, switches, plan)
             result.outputs = outputs
             if plan.prof_path:
                 result.device_perf_us = perf_us
@@ -93,6 +108,147 @@ def execute_graph(
         _cleanup_bins(plan.input_prefix)
     result.det_status = _det_status(md5_list, deterministic, testcase.testcase_name)
     return result
+
+
+class _GeirServe:
+    """每 worker 一个常驻 GE 子进程（harness argv[5]="-" serve 模式）。
+
+    GEInitialize 整批一次；数据管道逐例协议：成功 [8B num_outputs][8B len][data]*；
+    失败 [8B -1][8B len][msg]。以 (binary, mtime) 为键——算子重编译后自动重启常驻进程。
+    """
+
+    def __init__(self, binary: str, build_dir: str, dev_id: int):
+        self.binary = binary
+        data_r, data_w = os.pipe()
+        self._data_r = data_r
+        self.proc = subprocess.Popen(
+            [binary, str(dev_id), "", str(data_w), "", "-"],
+            pass_fds=(data_w,),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=build_dir,
+            preexec_fn=_set_pdeathsig,  # noqa: PLW1509  # 仅 libc prctl 设置，无 Python 对象操作
+        )
+        os.close(data_w)  # 父进程关写端, 子进程 EOF 即收工
+        self._stderr_tail = bytearray()
+        self._stdout_tail = bytearray()
+
+        def _drain(stream, sink):
+            try:
+                for chunk in iter(lambda: stream.read(4096), b""):
+                    sink.extend(chunk)
+                    del sink[:-16384]
+            except Exception as e:  # noqa: BLE001  # 排空线程: 进程退出后 read 抛错属预期
+                logging.debug("[GEIR-serve] drain thread stopped: %s", e)
+
+        threading.Thread(target=_drain, args=(self.proc.stderr, self._stderr_tail), daemon=True).start()
+        threading.Thread(target=_drain, args=(self.proc.stdout, self._stdout_tail), daemon=True).start()
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def _read_exact(self, n: int, deadline: float) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise RuntimeError("GEIR serve timeout: incomplete frame")
+            ready, _, _ = select.select([self._data_r], [], [], remaining)
+            if not ready:
+                raise RuntimeError("GEIR serve timeout: incomplete frame")
+            chunk = os.read(self._data_r, n - len(buf))
+            if not chunk:
+                raise RuntimeError(
+                    "GEIR serve process exited unexpectedly: " + self._stderr_tail[-2000:].decode("utf-8", "replace")
+                )
+            buf += chunk
+        return buf
+
+    def run_case(self, testcase, plan: GraphExecPlan, switches) -> list:
+        """喂一行 config，读一例完整帧，返回解析后的输出列表。"""
+        entry = plan.config_path + "\t" + plan.input_prefix
+        if plan.prof_path:
+            entry += "\t" + plan.prof_path
+        self.proc.stdin.write((entry + "\n").encode())
+        self.proc.stdin.flush()
+        deadline = time.time() + (switches.proc_timeout or 1800)
+        head = self._read_exact(8, deadline)
+        num_outputs = int(np.frombuffer(head, dtype=np.int64)[0])
+        if num_outputs < 0:
+            msg_len = int(np.frombuffer(self._read_exact(8, deadline), dtype=np.int64)[0])
+            msg = self._read_exact(msg_len, deadline).decode("utf-8", errors="replace")
+            raise RuntimeError(f"{_SERVE_CASE_ERROR}{msg}")
+        stream = bytearray(head)
+        for _ in range(num_outputs):
+            len_raw = self._read_exact(8, deadline)
+            stream.extend(len_raw)
+            byte_count = int(np.frombuffer(len_raw, dtype=np.int64)[0])
+            stream.extend(self._read_exact(byte_count, deadline))
+        return _parse_stdout(
+            bytes(stream),
+            testcase.flat_output_dtypes,
+            testcase.flat_output_shapes,
+            case_name=testcase.testcase_name,
+        )
+
+    def close(self):
+        with contextlib.suppress(Exception):
+            self.proc.stdin.close()
+        try:
+            self.proc.wait(timeout=10)
+        except Exception:
+            self.proc.kill()
+            with contextlib.suppress(Exception):
+                self.proc.wait(timeout=5)
+        with contextlib.suppress(Exception):
+            os.close(self._data_r)
+
+
+_SERVE_INST: Optional[_GeirServe] = None
+_SERVE_KEY: Optional[tuple] = None
+
+
+def _serve_instance(plan: GraphExecPlan, dev_id: int) -> _GeirServe:
+    """取当前 worker 的常驻实例；键（binary, mtime）变化或进程死亡则重启。"""
+    global _SERVE_INST, _SERVE_KEY
+    key = (plan.binary, os.path.getmtime(plan.binary))
+    if _SERVE_INST is not None and (key != _SERVE_KEY or not _SERVE_INST.alive()):
+        _SERVE_INST.close()
+        _SERVE_INST = None
+    if _SERVE_INST is None:
+        _SERVE_INST = _GeirServe(plan.binary, plan.build_dir, dev_id)
+        _SERVE_KEY = key
+    return _SERVE_INST
+
+
+def _close_geir_serve():
+    global _SERVE_INST, _SERVE_KEY
+    if _SERVE_INST is not None:
+        _SERVE_INST.close()
+        _SERVE_INST = None
+        _SERVE_KEY = None
+
+
+atexit.register(_close_geir_serve)
+
+
+def _run_once_serve(testcase, dev_id: int, switches, plan: GraphExecPlan) -> tuple:
+    """常驻模式单轮：prof 目录差集逻辑与一次性模式一致。"""
+    prof_before = _snapshot_prof_entries(plan.prof_path)
+    serve = _serve_instance(plan, dev_id)
+    try:
+        outputs = serve.run_case(testcase, plan, switches)
+    except RuntimeError as e:
+        if not str(e).startswith(_SERVE_CASE_ERROR):
+            _close_geir_serve()
+        raise
+    except Exception:
+        _close_geir_serve()
+        raise
+    new_profs = _new_prof_dirs(plan.prof_path, prof_before)
+    device_perf_us = _parse_msprof_task_duration(new_profs) if plan.prof_path else None
+    return outputs, device_perf_us
 
 
 def _snapshot_prof_entries(prof_path: str) -> frozenset:
@@ -111,77 +267,6 @@ def _new_prof_dirs(prof_path: str, before: frozenset) -> list:
         return []
     current = {entry for entry in os.listdir(prof_path) if os.path.isdir(os.path.join(prof_path, entry))}
     return [os.path.join(prof_path, entry) for entry in sorted(current - before)]
-
-
-def _run_once(testcase, dev_id, switches, plan: GraphExecPlan) -> tuple:
-    """单轮执行：Popen + pipe 数据通道 + plog 捕获 + 输出/perf 解析。"""
-    prof_before = _snapshot_prof_entries(plan.prof_path)
-    data_r, data_w = os.pipe()
-    data_holder = []
-
-    def _drain_pipe(_dr=data_r, _dh=data_holder):
-        chunks = []
-        while True:
-            chunk = os.read(_dr, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        _dh.append(b"".join(chunks))
-
-    reader = threading.Thread(target=_drain_pipe, name=f"geir_data_{testcase.testcase_name}")
-    reader.start()
-    try:
-        try:
-            proc = subprocess.Popen(
-                [plan.binary, str(dev_id), plan.input_prefix, str(data_w), plan.prof_path, plan.config_path],
-                pass_fds=(data_w,),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=plan.build_dir,
-            )
-        finally:
-            os.close(data_w)  # parent closes write-end so reader gets EOF
-    except Exception:
-        os.close(data_r)
-        reader.join(timeout=5)
-        raise
-    try:
-        stdout_bytes, stderr_bytes = proc.communicate(timeout=switches.proc_timeout or 1800)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        reader.join(timeout=5)
-        os.close(data_r)
-        raise RuntimeError("GEIR execution timed out") from None
-    reader.join(timeout=30)
-    os.close(data_r)
-
-    _log_process_output(testcase.testcase_name, stdout_bytes, stderr_bytes)
-    if proc.returncode != 0:
-        stderr = stderr_bytes.decode("utf-8", errors="replace")[:10000]
-        raise RuntimeError(f"GEIR execution failed (rc={proc.returncode}): {stderr}")
-
-    new_profs = _new_prof_dirs(plan.prof_path, prof_before)
-    device_perf_us = _parse_msprof_task_duration(new_profs) if plan.prof_path else None
-    run_outputs = _parse_stdout(
-        data_holder[0] if data_holder else b"",
-        testcase.flat_output_dtypes,
-        testcase.flat_output_shapes,
-        case_name=testcase.testcase_name,
-    )
-    data_holder.clear()
-    return run_outputs, device_perf_us
-
-
-def _log_process_output(case_name, stdout_bytes, stderr_bytes):
-    """Capture plog to TTK logging. stdout holds plog echo (when
-    ASCEND_SLOG_PRINT_TO_STDOUT=1); stderr holds [TTK-GEIR] markers."""
-    if stdout_bytes:
-        for line in stdout_bytes.decode("utf-8", errors="replace").splitlines():
-            if line.strip():
-                logging.info("[GEIR/%s] %s", case_name, line)
-    if stderr_bytes:
-        logging.debugc("[GEIR/%s] stderr:\n%s", case_name, stderr_bytes.decode("utf-8", errors="replace"))
 
 
 def _write_input_bin(arr, path):

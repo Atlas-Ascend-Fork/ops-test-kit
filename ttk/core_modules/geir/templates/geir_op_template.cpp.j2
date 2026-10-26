@@ -405,11 +405,29 @@ int main(int argc, char* argv[]) {
         GEFinalize();
     };
 
+    // ---------- 数据通道: 循环外打开一次, 常驻模式的失败帧也走这里 ----------
+    FILE* data_out = (data_fd >= 0) ? fdopen(data_fd, "wb") : stdout;
+    if (data_out == nullptr) {
+        fprintf(stderr, "[TTK-GEIR] fdopen(data_fd=%d) failed; fallback to stdout\n", data_fd);
+        data_out = stdout;
+    }
+    // 常驻模式失败帧: [8B -1][8B msg_len][msg]——父进程读到 -1 即本例失败, 循环继续
+    auto write_fail_frame = [&](const string& msg) {
+        int64_t neg = -1;
+        fwrite(&neg, 8, 1, data_out);
+        int64_t msg_len = (int64_t)msg.size();
+        fwrite(&msg_len, 8, 1, data_out);
+        fwrite(msg.data(), 1, msg_len, data_out);
+        fflush(data_out);
+    };
+
     // ---------- 常驻模式 ----------
     // argv[5] 为 "-" 时进入常驻: 从 stdin 逐行读 "config_path<TAB>input_prefix",
     // 每读一行跑一个用例, 读到 EOF 退出。GEInitialize 因此**整批只做一次**
     // —— 实测它要 8.5 秒, 而逐例真正必须做的 AddGraph/RunGraph 只要 4.3 秒。
     // 传具体路径时行为与原来完全一致(跑一个用例就退出)。
+    // 单例失败(配置/Session/AddGraph/RunGraph)在常驻模式下发失败帧后继续下一例;
+    // 一次性模式保持原行为(stderr 报错 + 退出)。
     bool ttk_first_round = true;
     string ttk_cfg_path;
     string ttk_prof_buf;
@@ -457,6 +475,7 @@ int main(int argc, char* argv[]) {
     JsonValue config = jsonParseFile(ttk_cfg_path.c_str());
     if (config.isNull()) {
         fprintf(stderr, "[TTK-GEIR] Failed to parse config: %s\n", ttk_cfg_path.c_str());
+        if (ttk_serve_mode) { write_fail_frame(string("Failed to parse config: ") + ttk_cfg_path); continue; }
         finalize_all();
         return FAILED;
     }
@@ -705,6 +724,7 @@ int main(int argc, char* argv[]) {
     Session* session = new (nothrow) Session(build_options);
     if (session == nullptr) {
         fprintf(stderr, "[TTK-GEIR] Failed to create Session\n");
+        if (ttk_serve_mode) { write_fail_frame("Failed to create Session"); continue; }
         finalize_all();
         return FAILED;
     }
@@ -718,6 +738,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "[TTK-GEIR] AddGraph failed: %d, error: %s, warning: %s\n",
                 ret, err_msg.GetString(), warn_msg.GetString());
         delete session;
+        if (ttk_serve_mode) { write_fail_frame(string("AddGraph failed: ") + err_msg.GetString()); continue; }
         finalize_all();
         return FAILED;
     }
@@ -742,16 +763,13 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "[TTK-GEIR] RunGraph failed: %d, error: %s, warning: %s\n",
                 ret, err_msg.GetString(), warn_msg.GetString());
         delete session;
+        if (ttk_serve_mode) { write_fail_frame(string("RunGraph failed: ") + err_msg.GetString()); continue; }
         finalize_all();
         return FAILED;
     }
 
     // ---------- output: [8B num_outputs][8B byte_count][data]... ----------
-    FILE* data_out = (data_fd >= 0) ? fdopen(data_fd, "wb") : stdout;
-    if (data_out == nullptr) {
-        fprintf(stderr, "[TTK-GEIR] fdopen(data_fd=%d) failed; fallback to stdout\n", data_fd);
-        data_out = stdout;
-    }
+    // data_out 已在循环外打开(常驻失败帧共用)
 
     // Dynamic-shape metadata for outputs marked by output_shape_unknown_indexes
     // (kernel-route protocol): one extra chunk holding, per marked output in
@@ -783,6 +801,11 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+
+    // 常驻模式: profiling 先收尾再发结果帧——父进程收到帧即解析 PROF 目录,
+    // 若帧先于 finalize 发出, msprof 数据未落盘, device_perf_us 会解析为空。
+    // 幂等(布尔门控), 循环尾的 prof_teardown 不会重复执行。
+    if (ttk_serve_mode) prof_teardown();
 
     int64_t num_outputs = (int64_t)output_tensors.size() + (shape_meta.empty() ? 0 : 1);
     fwrite(&num_outputs, 8, 1, data_out);
