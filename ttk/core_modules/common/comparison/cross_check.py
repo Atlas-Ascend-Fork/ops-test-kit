@@ -19,7 +19,40 @@ import math
 
 import numpy as np
 
+from ....utilities.dtypes import is_float_dtype, resolve_numpy_dtypes
 from .registry import CHUNK_SIZE, FAIL_REASONS, ComparisonBase, EachCompareResult, _TopK, register_comparison
+
+
+def fold_to_output_dtype(a, output_dtype):
+    """把参照值按**声明的输出 dtype** 往返一次，取其在该 dtype 下可表示的值。
+
+    为何需要：golden_mode=Promote（cross_check 恒走）下 golden 的 **输出 dtype 也被抬档**
+    （kernel/golden.py 的 Promote 段按 DTYPE_PROMOTE_MAP 改写 context.output_dtypes：
+    bf16/fp16→fp32、fp32→fp64），且此后**无人把它降回**——__normalize_goldens 在 dtype
+    不等时只施加溢出语义（clip/置 inf-nan），kernel/compare.py 只转被测输出。于是特殊位
+    的「同为有限且数值相等」判定在比 bf16 的被测与 fp32 的 golden，**结构上恒不成立**
+    （实测 1016 vs 1016.26996、12032 vs 12052.904，差值恰是 1 个窄档 ULP 量级）。
+    折叠后二者同在窄档取值，该判定才按设计生效。
+
+    用法限定：只服务特殊位「有限且数值相等」这一项。
+      · 不折叠 **Path B 的比值** —— 那里的分母正需要抬档 golden 当高精度基准，降档等于
+        撤销 Promote。
+      · 不参与 nan/inf/finite 分类 —— 窄档放不下的有限值折叠后会成 ±inf（如 fp32 的
+        3.4e38 → fp16 inf），拿它去分类会凭空改变非有限语义；而 golden 送进比对器前已由
+        __normalize_goldens / _apply_overflow_semantics 按输出 dtype 施加过溢出语义，
+        该情形本不会出现。
+      · 不改调用方的数组（astype 返回新对象）。
+    """
+    if not is_float_dtype(output_dtype):
+        return a
+    try:
+        nd = np.dtype(resolve_numpy_dtypes(output_dtype))
+    except (TypeError, RuntimeError):
+        return a  # 该 dtype 无 numpy 承载（缺 ml_dtypes 等）——保持原值，不改变既有行为
+    if nd == a.dtype:
+        return a
+    with np.errstate(over="ignore", invalid="ignore"):
+        return a.astype(nd).astype(a.dtype)
 
 
 def safe_div(num, den, err):
@@ -154,7 +187,7 @@ class CrossCheckComparison(ComparisonBase):
         """单块三路径扫描：special 交叉校验 / large 比值累计 / small 误差计数。"""
         special = np.isnan(tc) | np.isinf(tc) | np.isnan(gc) | np.isinf(gc) | np.isnan(bc) | np.isinf(bc)
         finite = ~special
-        if state.special_ok and special.any() and self._special_fail(tc, gc, bc, special).any():
+        if state.special_ok and special.any() and self._special_fail(tc, gc, bc, special, self.output_dtype).any():
             state.special_ok = False
         large = finite & (np.abs(gc) >= sv["small_value"])
         small = finite & (np.abs(gc) < sv["small_value"])
@@ -188,7 +221,7 @@ class CrossCheckComparison(ComparisonBase):
                 state.top_small.add(d[mis], (np.flatnonzero(small) + s)[mis])
 
     @staticmethod
-    def _special_fail(t, g, b, special) -> np.ndarray:
+    def _special_fail(t, g, b, special, output_dtype=None) -> np.ndarray:
         """Path A: 特殊位（NaN/Inf）三方交叉校验——失败位掩码。
 
         规则（满足任一即通过）：
@@ -209,7 +242,11 @@ class CrossCheckComparison(ComparisonBase):
         # 规则1：NPU 与 third_party 一致（同为 nan/+inf/-inf，或同为有限且数值相等）
         tb_match = (t_nan & b_nan) | (t_pinf & b_pinf) | (t_ninf & b_ninf) | (t_fin & b_fin & (t == b))
         # 规则2：NPU 与 golden 一致（同为 nan/+inf/-inf，或同为有限且数值相等）
-        tg_match = (t_nan & g_nan) | (t_pinf & g_pinf) | (t_ninf & g_ninf) | (t_fin & g_fin & (t == g))
+        # 「数值相等」按**声明的输出 dtype** 比：Promote 把 golden 的输出 dtype 一并抬了档且
+        # 此后无人降回，直接比则该项恒不成立（详见 fold_to_output_dtype）。折叠只参与本项，
+        # 不参与上面的 nan/inf 分类、也不改 golden 本身。
+        gq = fold_to_output_dtype(g, output_dtype)
+        tg_match = (t_nan & g_nan) | (t_pinf & g_pinf) | (t_ninf & g_ninf) | (t_fin & g_fin & (t == gq))
 
         return special & ~(tb_match | tg_match)
 

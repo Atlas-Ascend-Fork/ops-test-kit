@@ -14,8 +14,8 @@ import numpy as np
 from ttk.core_modules.common.comparison.cross_check import CrossCheckComparison, safe_div
 
 
-def _make(output, golden, third_party, params):
-    return CrossCheckComparison(output, golden, 0, "float32", params, third_party=third_party)
+def _make(output, golden, third_party, params, output_dtype="float32"):
+    return CrossCheckComparison(output, golden, 0, output_dtype, params, third_party=third_party)
 
 
 def test_pass_when_all_good():
@@ -175,6 +175,44 @@ def test_nan_inf_pass_npu_matches_finite_golden_third_special():
     c = _make(out, g, third, _NAN_PARAMS)
     _, _, is_pass, _ = c.compare()
     assert is_pass
+
+
+def test_nan_inf_rule2_across_promoted_golden_dtype():
+    """规则2 的「数值相等」必须按**声明的输出 dtype** 比，而不是裸 ==。
+
+    上面那组用例把 NPU 与 golden 都构造成同一 dtype，恒能逐位相等；真实流水不是这样：
+    golden_mode=Promote 会把 golden 的输出 dtype 一并抬档（bf16→fp32、fp32→fp64）且此后
+    无人降回，于是「有限且相等」在裸 == 下结构性恒不成立，规则2 从未生效。
+    数据取自 GroupNormSiluQuant 实测（n=1 且输入含 ±inf，rstd=1/sqrt(eps)）：
+    NPU(bf16)=1016，golden(fp32)=1016.26996，竞品 torch 两遍法 (inf-inf)^2 得 NaN。
+    """
+    # bf16 输出档：NPU 落在 bf16 可表示值上，golden 是被抬档的 fp32 真值
+    out = np.array([1016.0], dtype=np.float32)
+    g = np.array([1016.26996], dtype=np.float32)
+    third = np.array([np.nan], dtype=np.float32)
+    c = _make(out, g, third, _NAN_PARAMS, output_dtype="bfloat16")
+    _, _, is_pass, _ = c.compare()
+    assert is_pass
+
+    # fp32 输出档同理：golden 被抬到 fp64
+    out = np.array([np.float32(1016.2699556378086)], dtype=np.float64)
+    g = np.array([1016.2699556378086], dtype=np.float64)
+    third = np.array([np.nan], dtype=np.float64)
+    c = _make(out, g, third, _NAN_PARAMS, output_dtype="float32")
+    _, _, is_pass, _ = c.compare()
+    assert is_pass
+
+
+def test_nan_inf_rule2_still_fails_beyond_rounding():
+    """折叠不等于放水：NPU 偏离 golden 超过窄档一格舍入时仍判 FAIL。"""
+    # bf16 在 1016 附近的 1 ULP = 4（网格 …1012/1016/1020/1024…）；NPU 给 1032 已偏 4 格
+    out = np.array([1032.0], dtype=np.float32)
+    g = np.array([1016.26996], dtype=np.float32)
+    third = np.array([np.nan], dtype=np.float32)
+    c = _make(out, g, third, _NAN_PARAMS, output_dtype="bfloat16")
+    _, _, is_pass, metrics = c.compare()
+    assert not is_pass
+    assert metrics["reason"] == "NaN/Inf mismatch"
 
 
 def test_nan_inf_fail_golden_matches_third_finite():
