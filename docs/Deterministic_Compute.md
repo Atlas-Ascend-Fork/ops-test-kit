@@ -1,8 +1,8 @@
 # 确定性计算与batch一致性
 
 `--deterministic-level`（缩写 `--dl`）控制一次 TTK 执行的确定性等级。level 3 的第一阶段执行
-普通精度校验 + 框架内 batch 一致性比对（同 relation 组输出逐样本哈希）；跨 relation 集合的
-样本级比对（FA 整批 vs 分批）由 dump 驱动的第二阶段单独完成。
+普通精度校验 + 框架内 batch 一致性比对（按声明样本切片哈希，跨用例以 api+seed+切片长度对齐分组）；
+不同 seed 关系集合的样本级比对（FA 整批 vs 分批）由 dump 驱动的第二阶段单独完成。
 
 ## 等级与优先级
 
@@ -45,17 +45,22 @@ batch relation 完整时，四通路输入生成期由框架执行片段替换
 
 ## 第一阶段比对（框架内，四通路）
 
-worker 比对后，dl=3 且 bcid 非空的用例对 output 0 沿首轴（axis 0）逐样本切哈希
-MD5 → `batch_summary`（随 ReturnStructure 回传；slot 0 首轴组派生的逻辑轴仅用于
-校验输出维度足够）；主进程 cleanup 按
-`batch_consistency_id` 分组，同位置哈希集合基数判定一致/不一致（PASS/FAIL 汇总日志，
-非结果列判据）。四通路结果 CSV 均含 `batch_consistency_id` 列（对账用）。
+worker 比对后，dl=3 且 bcid 非空的用例按**声明的 relation 样本切片**切 output 0
+（每个样本把 `batch_slice_info` 的 (start, stop, step) 直接落在 `batch_axis` 声明的轴上），
+逐样本 MD5 → `batch_summary`（随 ReturnStructure 回传；样本 key = 各轴 seed 元组 +
+各轴切片长度元组）。**只 hash 声明位置**——每个用例声明了几个样本，就 hash 几次；
+未声明位置不参与；切片粒度（整 batch / 单 token / 多轴）由声明区间本身决定，
+框架不做布局感知。主进程 cleanup 按 key 跨用例分组（key = api_name + seed 元组 +
+长度元组，不含声明顺序/位置；多 API 混在同一 CSV 时不串比），同 key 片段 hash
+集合基数判定一致/不一致（PASS/FAIL 汇总日志，非结果列判据）；同 seed 样本跨
+用例换序（reorder）自动按 key 对齐比较。四通路结果 CSV 均含
+`batch_consistency_id` 列（对账用）。
 
 ## 第二阶段（dump 驱动，可选）
 
-跨 relation 集合的样本级比对（如 FA 整批一次跑 vs 分批多次跑，两组 bcid 不同）由
-`scripts/compare_batch_consistency.py` 完成：`--dump out --dump-format bin` 且设置
-`NPU_DUMP_PATH` 执行后，用结果 CSV 运行该脚本比对输出 dump。
+不同 seed 的跨 relation 集合样本级比对（如 FA 整批一次跑 vs 分批多次跑，两组
+声明 seed 不同）由 `scripts/compare_batch_consistency.py` 完成：`--dump out
+--dump-format bin` 且设置 `NPU_DUMP_PATH` 执行后，用结果 CSV 运行该脚本比对输出 dump。
 
 > 注意：该脚本要求 dump 文件为平铺命名（`NPU_DUMP_PATH/<用例名或 dump_file_prefix>_output_0.bin`）；
 > `--dump` 落盘为 `<case>/output[_<segment>]_0_<dtype>.bin` 目录布局，使用前需按脚本约定整理 dump 文件。

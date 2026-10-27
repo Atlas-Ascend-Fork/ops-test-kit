@@ -24,6 +24,7 @@ Path/str、list/tuple 的同目录输入不分叉成多份。
 __all__ = ["get_plugin_function", "clear_plugin_cache"]
 
 # Standard Packages
+import logging
 from typing import Callable, Dict, Optional, Tuple
 
 from .custom_plugin_manager import CustomPluginManager
@@ -51,6 +52,24 @@ def get_plugin_function(
         return _func_cache[cache_key]
 
     func = load_spec_function(operator_name, plugin_type, paths)
+    if func is not None:
+        # 缓存键粒度打印（进程内一次）：解析到用户注册函数时可见来源
+        # （spec 文件真实路径 + 类.属性），定位"插件没被拾取/拾取了错误
+        # 文件"的第一个抓手。动态 exec 的合成模块名无路径信息，故文件
+        # 经 SpecLoader 挂在类上（__ttk_spec_file__）另查。
+        from .spec_manager import get_spec_class_meta
+
+        meta = get_spec_class_meta(operator_name, paths)
+        source = (meta or {}).get("spec_file") or getattr(func, "__module__", "?")
+        logging.info(
+            "TestSpec resolve hit: op=%s attr=%s pathway=%s → %s.%s (%s)",
+            operator_name,
+            plugin_type,
+            level_type,
+            getattr(func, "__module__", "?"),
+            getattr(func, "__qualname__", func),
+            source,
+        )
 
     # 旧系统仅 golden/input 有约定（门控见 CustomPluginManager.supports）
     if func is None and paths and CustomPluginManager.supports(plugin_type):

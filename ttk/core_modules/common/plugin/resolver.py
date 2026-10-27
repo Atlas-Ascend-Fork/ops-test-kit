@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""SpecResolver：8 个 spec 属性的统一 resolve 前端。
+"""SpecResolver：9 个 spec 属性的统一 resolve 前端。
 
 各 resolve 方法内部经 get_plugin_function 双系统合并查询（带缓存）：命中
 → 返回；未命中 → golden 调通路注入的 fallback（通路差异唯一注入点），
@@ -23,9 +23,11 @@ dict/class 形态原样透传。
 __all__ = ["SpecResolver"]
 
 # Standard Packages
+import logging
 from typing import Any, Callable, Optional
 
 from ..invoke import resolve_callable_str
+from . import InvokeDescribeError
 from .loader import get_plugin_function
 
 # 查询名（get_plugin_function 第二参）→ TestSpec 类属性名的桥接在
@@ -34,7 +36,7 @@ from .loader import get_plugin_function
 
 
 class SpecResolver:
-    """8 个 spec 属性的统一 resolve 前端（各通路 worker 消费）。"""
+    """9 个 spec 属性的统一 resolve 前端（各通路 worker 消费）。"""
 
     def __init__(self, name: str, pathway: str, plugin_path):
         self._name = name
@@ -86,3 +88,35 @@ class SpecResolver:
     def resolve_torch_graph(self) -> Optional[type]:
         """类形态（nn.Module 子类）。"""
         return self._query("torch_graph")
+
+    def resolve_describe(self) -> Optional[Callable]:
+        """参数化用例的 describe（未知 CSV 列 params → 张量描述字典）。"""
+        return self._resolve_method("describe")
+
+    def invoke_describe(self, params) -> Optional[dict]:
+        """resolve 后直接执行 describe(params) 并收敛 {shapes, dtypes} 契约。
+
+        describe 的"怎么调"极简（单 params 入参），故执行收敛收在 spec 层
+        而非 common/invoke（golden/npu_preprocess 的绑定/设备域语义）。
+        Returns: dict（越界 key warning 后丢弃）；spec 未注册 describe →
+        None（消费方静默跳过）。调用异常 / 非 dict 返回 → 抛
+        InvokeDescribeError（code=DESCRIBE_FAILED / DESCRIBE_RESULT_NOT_DICT，
+        消费方映射到用例 is_valid/fail_reason，细节进日志）。
+        """
+        describe_fn = self.resolve_describe()
+        if describe_fn is None:
+            return None
+        try:
+            declared = describe_fn(params)
+        except Exception as exc:  # noqa: BLE001 describe 是算子插件代码，异常归一为契约错误
+            logging.error("[%s] describe failed with params %r: %s", self._name, sorted(params), exc)
+            raise InvokeDescribeError("DESCRIBE_FAILED", f"{type(exc).__name__}: {exc}") from exc
+        if not isinstance(declared, dict):
+            logging.error("[%s] describe must return a dict, got %s", self._name, type(declared).__name__)
+            raise InvokeDescribeError("DESCRIBE_RESULT_NOT_DICT", f"got {type(declared).__name__}, expected dict")
+        for key in declared:
+            if key not in ("shapes", "dtypes"):
+                logging.warning(
+                    "[%s] describe key %r is out of the {shapes, dtypes} contract (ignored)", self._name, key
+                )
+        return declared

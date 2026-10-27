@@ -103,7 +103,7 @@ class AddTestSpec:
 | `pre_compare` | 比对前处理 | 函数 |
 | `torch_graph` | Graph 模式 | `torch.nn.Module` 子类（仅 torch API） |
 | `npu_preprocess` | NPU 执行前设备侧预处理钩子（-1 动态槽物化） | 函数（ACLNN / E2E） |
-| `describe` | 算子描述信息（保留字段，当前未消费） | 函数 |
+| `describe` | 参数化用例组装：CSV 未知列 → params，只返回 `{shapes, dtypes}`，框架按通路映射（kernel/geir→input_shapes；aclnn/e2e→tensor_view_shapes） | 函数 |
 
 ## golden 三形式
 
@@ -192,13 +192,15 @@ def sort_golden(x, descending=False, **kwargs):
 | `isclose` | numpy.isclose 容差比对 | `close` |
 | `cosine` | 余弦相似度 | `cosine` |
 
-> 前五行可写入 `Spec.tolerance`；`isclose` 和 `cosine` 为 CLI 框架增强，仅通过 `--compare` 指定。
+> 前六行可写入 `Spec.tolerance`；`cosine` 为 CLI 框架增强，仅通过 `--compare` 指定。
 > `mix_tolerance` 可用 `rtol`/`atol`/`required_matched_ratio`/`max_abs_error_limit` 覆盖默认阈值表（`max_abs_error_limit` 配置后完全替代 ULP 动态上限，配置值即最终上限）。
+> `isclose` 可用 `rtol`/`atol`/`ptol` 覆盖 dtype 分档默认（`ptol` 为允许超差元素占比；CSV `precision_tolerances`/`absolute_precision` 的 legacy 容差仍优先于 Spec 顶层值）。
 
 ```python
 tolerance = {
     "float32": {"standard": "mix_tolerance"},
     "int8": {"standard": "binary_equal"},
+    "float16": {"standard": "isclose", "rtol": 0.005, "atol": 0.000025, "ptol": 0.005},
 }
 ```
 

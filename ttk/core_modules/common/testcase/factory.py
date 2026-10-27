@@ -109,7 +109,10 @@ class UniversalTestcaseFactory:
             if not self.testcase_instance.is_legit_header(actual_header):
                 ignored_headers.append(actual_header)
         if ignored_headers:
-            logging.warning(f"Detected unidentified headers and will be ignored: {ignored_headers}")
+            logging.warning(
+                f"Detected unidentified headers: {ignored_headers} "
+                "(ignored, or passed to spec.describe as params when the pathway shape/dtype fields are absent)"
+            )
 
         set_thread_name("HeaderCheckDuplicateHeaders")
         # Check duplicates

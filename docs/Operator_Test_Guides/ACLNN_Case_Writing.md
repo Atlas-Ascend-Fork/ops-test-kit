@@ -12,8 +12,8 @@
 
 | 字段 | 类型 | 是否必填 | 默认值 | 说明 |
 |------|------|---------|--------|------|
-| `tensor_view_shapes` | SHAPELIKE_DYN_NESTED | **是** | `()` | 张量视图shape，支持TensorList嵌套。如 `"(((3,3),(3,2)),(3,5))"` 表示TensorList输入。 |
-| `tensor_dtypes` | STRING_SCALAR_NESTED | **是** | `()` | 张量数据类型，支持嵌套。如 `"('float32','float32')"` 或 `"(('float32','float32'),'float32')"` |
+| `tensor_view_shapes` | SHAPELIKE_DYN_NESTED | 否 | `()` | 张量视图shape，支持TensorList嵌套。如 `"(((3,3),(3,2)),(3,5))"` 表示TensorList输入。缺省时可由 Spec 的 `describe` 按参数列组装回填（按 API 参数列表含输出槽位，见[参数化用例](../Test_Case_Generation.md)）。 |
+| `tensor_dtypes` | STRING_SCALAR_NESTED | 否 | `()` | 张量数据类型，支持嵌套。如 `"('float32','float32')"` 或 `"(('float32','float32'),'float32')"`。缺省时可由 `describe` 回填。 |
 | `tensor_formats` | STRING_SCALAR_NESTED | 否 | `('ND',)` | 张量格式，支持嵌套。如 `(('ND','ND'),'ND')` |
 | `tensor_storage_shapes` | SHAPELIKE_STC_NESTED | 否 | `()` | 张量存储shape（用于非连续张量）。回退到视图shape。 |
 | `tensor_view_offsets` | INT_CONTAINER_NESTED | 否 | `()` | 张量视图在存储中的偏移量。 |

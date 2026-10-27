@@ -67,14 +67,19 @@ class TestcaseE2e(ApiTestcaseBase):
         "_multi_device_thread_contexts",
     )
 
+    describe_pathway = "e2e"
+
     identity_headers = {
         **ApiTestcaseBase.identity_headers,
         "api_name": (FIELD_TYPES.STRING, None),
     }
 
     tensor_property_headers = {
-        "tensor_view_shapes": (FIELD_TYPES.SHAPELIKE_DYN_NESTED, None),
-        "tensor_dtypes": (FIELD_TYPES.STRING_SCALAR_NESTED, None),
+        # 缺省 () 使参数化用例（无 shapes/dtypes 列，由 spec.describe 组装）
+        # 可过 factory 必填字段解析；空值行仍按 validate 判无效（工厂 API 短路
+        # 除外）。CSV 显式声明列时行为不变。
+        "tensor_view_shapes": (FIELD_TYPES.SHAPELIKE_DYN_NESTED, None, ()),
+        "tensor_dtypes": (FIELD_TYPES.STRING_SCALAR_NESTED, None, ()),
     }
 
     optional_tensor_headers = {
@@ -421,6 +426,7 @@ class TestcaseE2e(ApiTestcaseBase):
     def validate(self):
         super().validate()
         self._strip_backward_suffix()  # 后缀剥离在签名对账生态消费前
+        self._apply_describe_shapes()
         if not self.api_name:
             self.is_valid = False
             self.fail_reason = "api_name is empty"

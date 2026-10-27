@@ -58,6 +58,8 @@ class TestcaseAclnn(ApiTestcaseBase):
     Structure for Op Api Profiling
     """
 
+    describe_pathway = "aclnn"
+
     __slots__ = (
         # === aclnn-specific testcase configurations === #
         "output_inplace_indexes",
@@ -482,6 +484,7 @@ class TestcaseAclnn(ApiTestcaseBase):
         super().validate()
         self._parse_device_ids_field()
         self._check_api_name()
+        self._apply_describe_shapes()
         if not self.is_valid:
             return
         self._normalize_compressed_fields()

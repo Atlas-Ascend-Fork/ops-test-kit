@@ -112,11 +112,45 @@ TTK 支持两种等价的输入文件格式，表头与字段定义完全相同�
 
 > **注意**：包含特殊字符（括号、逗号、引号）的字段必须用双引号包裹。
 
+# 参数化用例（describe）
+
+输入特别多的算子（如 18 输入的 sparse_flash_mla）可以用抽象参数列替代逐张量
+形状声明：在 CSV 里直接写 `B/S1/N1/D` 等待识别列，在算子 spec 里提供
+`describe(params)`，由它组装 shapes/dtypes 回填用例。
+
+- 触发条件：该行 CSV 的**形状/类型字段任一缺省**（kernel/geir 为
+  `input_shapes`/`input_dtypes`，ACLNN/E2E 为 `tensor_view_shapes`/
+  `tensor_dtypes`）。两者都已显式声明时，未识别列照旧忽略，行为不变。
+- `params`：该行所有 TTK 未识别列的非空值汇总。数字/容器经字面量求值
+  （`2`→int、`(128, 64)`→tuple），裸词（`BSND`、`bfloat16`）退回字符串。
+- **契约**：`describe` 只返回 `{"shapes": ..., "dtypes": ...}` 两个 key，
+  框架按通路映射到本通路 shape 字段（kernel/geir → `input_shapes`/
+  `input_dtypes`，ACLNN/E2E → `tensor_view_shapes`/`tensor_dtypes`）。
+  ACLNN 的 shapes 按 API 参数列表**含输出槽位**。
+- **缺啥补啥**：shapes 与 dtypes 不强绑定——任一缺省即触发 describe，
+  只回填缺省字段；CSV 已显式声明的字段不回填（"不缺的不读"）。
+- 其余字段不参与契约：`attributes`、`output_tensor_indexes`、
+  `output_shapes`/`output_dtypes` 等仍由 CSV 列显式提供（可写 `ELEWISE`
+  等推断字符串）；CSV 显式声明的字段优先，describe 不覆盖。
+- 失败语义：describe 抛异常/非 dict/缺 `shapes` → 用例置无效
+  （`DESCRIBE_FAILED` / `DESCRIBE_RESULT_NOT_DICT` / `DESCRIBE_MISSING_SHAPES`）。
+
+```python
+class GemmTestSpec:
+    @staticmethod
+    def describe(params):
+        m, k, n = params["M"], params["K"], params["N"]
+        return {
+            "shapes": ((m, k), (k, n)),
+            "dtypes": ("float16", "float16"),
+        }
+```
+
+对应 CSV：`testcase_name,api_name,M,K,N` → `gemm_tc,torch.mm,128,4096,4096`。
+
 # 回退链
 
-部分字段在未显式设置时自动回退到其他字段：
-
-| 字段 | 回退到 |
+部分字段在未显式设置时自动回退到其他字段：| 字段 | 回退到 |
 |------|--------|
 | `input_ori_shapes` | `input_shapes` |
 | `output_ori_shapes` | `output_shapes` |

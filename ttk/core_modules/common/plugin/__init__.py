@@ -15,21 +15,33 @@
 旧系统（custom_plugin_ 前缀）：__golden__/__input__ 约定加载，服务尚未
 迁移到 TestSpec 的外部算子仓库。
 
-公开面 4 名：get_plugin_function / SpecResolver / get_spec_class_meta /
-InvalidSpecError（CustomPluginManager/PluginScanner 不进 __all__，仅 loader
-内部 import）。
+公开面 5 名：查询入口（get_plugin_function / get_spec_class_meta）→
+统一前端（SpecResolver）→ 异常（InvalidSpecError / InvokeDescribeError）。
+CustomPluginManager/PluginScanner 不进 __all__，仅 loader 内部 import。
 """
 
 __all__ = [
     "get_plugin_function",
-    "SpecResolver",
     "get_spec_class_meta",
+    "SpecResolver",
     "InvalidSpecError",
+    "InvokeDescribeError",
 ]
 
 
 class InvalidSpecError(Exception):
     """属性类型不符合约定，validate 失败时抛出（fail-fast）"""
+
+
+class InvokeDescribeError(Exception):
+    """describe 执行/返回契约违约：code ∈ {DESCRIBE_FAILED, DESCRIBE_RESULT_NOT_DICT}。
+
+    消费方（testcase 通路）把 code 映射到用例 fail_reason，消息进日志。
+    """
+
+    def __init__(self, code, message):
+        super().__init__(f"{code}: {message}")
+        self.code = code
 
 
 def __getattr__(name):

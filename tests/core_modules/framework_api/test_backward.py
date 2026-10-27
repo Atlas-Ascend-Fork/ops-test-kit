@@ -148,18 +148,3 @@ class TestBackwardExecutionHelpers:
         grads = _run_backward(None, out, [a, b])
         assert len(grads) == 1
         assert torch.equal(grads[0], torch.full((2, 3), 2.0))
-
-
-class TestCpuGoldenBackwardChain:
-    def test_run_backward_on_cpu_manual_path(self):
-        from ttk.core_modules.common.backend.cpu_torch_backend import CpuTorchBackend
-        from ttk.core_modules.framework_api.golden import _run_backward_on_cpu
-
-        raw = [np.random.rand(2, 3).astype(np.float32) for _ in range(2)]
-        case = _make_case("torch.add.backward")
-        backend = CpuTorchBackend()
-        out = _run_backward_on_cpu("torch.add", raw, case, None, backend)
-        assert len(out) == 3
-        np.testing.assert_allclose(out[0], raw[0] + raw[1], rtol=1e-6)
-        np.testing.assert_allclose(out[1], np.ones((2, 3), dtype=np.float32), rtol=1e-6)
-        np.testing.assert_allclose(out[2], np.ones((2, 3), dtype=np.float32), rtol=1e-6)

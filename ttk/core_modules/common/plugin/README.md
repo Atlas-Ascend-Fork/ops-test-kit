@@ -169,8 +169,9 @@ def customize_inputs(x, min_val, max_val, **kwargs):
 | `isclose` | numpy.isclose 容差比对 | `close` |
 | `cosine` | 余弦相似度 | `cosine` |
 
-> 前五行为官方标准，可写入 `Spec.tolerance`；`isclose` 和 `cosine` 为 CLI 框架增强，仅通过 `--compare` 指定。CLI 可用值以 `--compare` 的 choices 为准（`bin` 仅为内部判据别名，不能直接传入）。
+> 前六行可写入 `Spec.tolerance`；`cosine` 为 CLI 框架增强，仅通过 `--compare` 指定。CLI 可用值以 `--compare` 的 choices 为准（`bin` 仅为内部判据别名，不能直接传入）。
 > `mix_tolerance` 可用 `rtol`/`atol`/`required_matched_ratio`/`max_abs_error_limit` 覆盖默认阈值表。`max_abs_error_limit` 默认按 `max(兜底值, 32×ULP(最大误差点))` 动态计算；显式配置将完全替代动态计算（配置值即最终上限，不再叠加 ULP——大值域将失去值域自适应放行）。
+> `isclose` 可用 `rtol`/`atol`/`ptol` 覆盖 dtype 分档默认（`ptol` 为允许超差元素占比；CSV `precision_tolerances`/`absolute_precision` 的 legacy 容差仍优先于 Spec 顶层值）。
 
 `torch_graph` Graph 模式（仅 E2E）：
 
@@ -187,9 +188,37 @@ class TorchSoftmaxTestSpec:
     torch_graph = SoftmaxGraph
 ```
 
-`describe` 算子描述信息：
+`describe` 参数化用例组装（简化 CSV 列 → shapes/dtypes）：
 
-返回算子的描述性信息（如约束、备注等），函数形式，返回 str。保留字段，当前框架暂未消费（仅做类型校验）。
+多输入算子可用抽象参数列替代逐张量形状声明（如 `B/S1/N1/D`）。CSV 行的
+通路形状/类型字段（kernel/geir 为 `input_shapes`/`input_dtypes`，aclmn/e2e
+为 `tensor_view_shapes`/`tensor_dtypes`）**任一缺省**时，框架把该行所有
+TTK 未识别列收集为 `params`（数字/容器经字面量求值，裸词如 `BSND` 退回
+字符串），调用 `describe(params)`。
+
+**契约**：describe 只返回 `{"shapes": ..., "dtypes": ...}` 两个 key，
+各通路自行映射：kernel/geir → `input_shapes`/`input_dtypes`；aclmn/e2e
+→ `tensor_view_shapes`/`tensor_dtypes`。aclnn 的 shapes 按 API 参数列表
+**含输出槽位**；`attributes`/`output_tensor_indexes`/输出形状等其余字段
+仍由 CSV 列显式提供（describe 不回填）。**shapes 与 dtypes 不强绑定**：
+两者任一缺省即触发，缺啥补啥——CSV 已显式声明的字段不回填（"不缺的
+不读"）。describe 未声明时未识别列照旧忽略，行为不变；抛异常/非 dict/
+缺 shapes → 用例置无效（`DESCRIBE_FAILED` / `DESCRIBE_RESULT_NOT_DICT` /
+`DESCRIBE_MISSING_SHAPES`）。
+
+```python
+class GemmTestSpec:
+    @staticmethod
+    def describe(params):
+        m, k, n = params["M"], params["K"], params["N"]
+        return {
+            "shapes": ((m, k), (k, n)),
+            "dtypes": ("float16", "float16"),
+        }
+
+# CSV: testcase_name,api_name,M,K,N
+#       gemm_tc,torch.mm,128,4096,4096
+```
 
 ## 命名与注册
 

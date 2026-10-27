@@ -22,6 +22,8 @@ from ttk.core_modules.kernel.testcase import TestcaseKernel
 class GeirTestcase(TestcaseKernel):
     __slots__ = ("dyn_input_shapes",)
 
+    describe_pathway = "geir"
+
     non_platform_static_property_headers: Dict[str, tuple] = {
         **TestcaseKernel.non_platform_static_property_headers,
         "dyn_input_shapes": (FIELD_TYPES.SHAPELIKE_DYN_NESTED, None, None),

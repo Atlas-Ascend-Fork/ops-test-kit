@@ -12,9 +12,17 @@ from typing import Dict
 
 from . import InvalidSpecError
 
-# Spec.tolerance 只收官方标准；框架增强/别名 token 走 CLI --compare
-_SPEC_TOLERANCE_STANDARDS = {"stat_rel_err", "binary_equal", "cross_check", "quant", "mix_tolerance"}
-_FRAMEWORK_TOKENS = {"isclose", "close", "cosine", "bin", "binary", "requant"}  # CLI-only
+# Spec.tolerance 收官方标准 + isclose/close 别名；其余框架增强 token 走 CLI --compare
+_SPEC_TOLERANCE_STANDARDS = {
+    "stat_rel_err",
+    "binary_equal",
+    "cross_check",
+    "quant",
+    "mix_tolerance",
+    "isclose",
+    "close",
+}
+_FRAMEWORK_TOKENS = {"cosine", "bin", "binary", "requant"}  # CLI-only
 
 # Valid types for each attribute: tuple of types
 _CHECK_RULES: Dict[str, tuple] = {

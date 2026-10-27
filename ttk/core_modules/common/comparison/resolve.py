@@ -204,6 +204,11 @@ def _ptol_params(extra: dict, dtype_str: str) -> dict:
     return {k: v for k, v in extra.items() if k == "ptol"}
 
 
+def _isclose_params(extra: dict, dtype_str: str) -> dict:
+    """isclose 的 Spec 参数：rtol/atol/ptol 直接透传；缺省 → 判据默认钩子分档。"""
+    return {name: extra[name] for name in ("rtol", "atol", "ptol") if name in extra}
+
+
 def _cross_check_params(extra: dict, dtype_str: str) -> dict:
     """level（三比值预设，Spec 可逐项覆盖）+ small_value 两件：Spec 覆盖 > 表。"""
     if dtype_str not in SMALL_VALUE:
@@ -228,7 +233,7 @@ def _cross_check_params(extra: dict, dtype_str: str) -> dict:
     }
 
 
-# 判据 → 参数解析器。未登记的判据（bin/isclose/cosine）无表驱动参数——
+# 判据 → 参数解析器。未登记的判据（bin/cosine）无表驱动参数——
 # 它们读 legacy CSV 容差，由 resolve_tolerance 调用方注入。
 _PARAM_RESOLVERS = {
     "stat_rel_err": _stat_rel_err_params,
@@ -237,6 +242,8 @@ _PARAM_RESOLVERS = {
     "quant": _ptol_params,
     "requant": _ptol_params,
     "cross_check": _cross_check_params,
+    "close": _isclose_params,
+    "isclose": _isclose_params,
 }
 
 

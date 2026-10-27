@@ -23,8 +23,8 @@
 
 | 字段 | 类型 | 是否必填 | 默认值 | 说明 |
 |------|------|---------|--------|------|
-| `tensor_view_shapes` | SHAPELIKE_DYN_NESTED | **是** | *(无)* | 输入张量shape，支持TensorList嵌套。如 `"((2,3,4),(2,3,4))"`。无必选张量参数的 factory API（如 `torch.zeros`）可留空 |
-| `tensor_dtypes` | STRING_SCALAR_NESTED | **是** | *(无)* | 输入张量数据类型。如 `"('float32','float32')"`。支持广播：`"('float32',)"` 填充所有位置。factory API 可留空（同上） |
+| `tensor_view_shapes` | SHAPELIKE_DYN_NESTED | 否 | `()` | 输入张量shape，支持TensorList嵌套。如 `"((2,3,4),(2,3,4))"`。缺省时可由 Spec 的 `describe` 按参数列组装回填（见[参数化用例](../Test_Case_Generation.md)）；无必选张量参数的 factory API（如 `torch.zeros`）可留空 |
+| `tensor_dtypes` | STRING_SCALAR_NESTED | 否 | `()` | 输入张量数据类型。如 `"('float32','float32')"`。支持广播：`"('float32',)"` 填充所有位置。缺省时可由 `describe` 回填；factory API 可留空（同上） |
 | `tensor_formats` | STRING_SCALAR_NESTED | 否 | `()` | 张量格式。支持广播 |
 | `tensor_storage_shapes` | SHAPELIKE_STC_NESTED | 否 | `()` | 非连续张量的存储shape。回退到视图shape |
 | `tensor_view_offsets` | INT_CONTAINER_NESTED | 否 | `()` | 张量视图在存储中的偏移量。 |

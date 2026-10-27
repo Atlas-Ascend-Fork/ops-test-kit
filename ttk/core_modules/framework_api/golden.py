@@ -290,59 +290,6 @@ def has_dynamic_golden_source(testcase, switches, manual_case=None):
     return get_plugin_function(testcase.api_name, "golden", "e2e", switches.plugin_path) is not None
 
 
-def _run_backward_on_cpu(api_name, raw_inputs, testcase, dist, cpu_backend):
-    """backward golden：CPU forward + autograd.grad（与被测同构）。"""
-
-    import torch
-
-    cpu_inputs = [cpu_backend.from_numpy(x.copy()) if x is not None else None for x in raw_inputs]
-    for t in cpu_inputs:
-        if t is not None and hasattr(t, "requires_grad_") and t.is_floating_point():
-            t.requires_grad_(True)
-    golden_api_name = api_name + ".backward"
-    golden_api_info = FrameworkApiInfoKeeper().get(golden_api_name)
-    if golden_api_info is not None:
-        logging.warning(
-            f"[golden] registered backward entry {golden_api_name} is not executable "
-            f"(no EagerExecutor implementation); falling back to manual forward + grad"
-        )
-    # keeper 后缀条目仅作登记提示（无独立执行器）：手工 forward + grad
-    args = list(cpu_inputs)
-    r = _invoke_plain(api_name, args, testcase)
-    grad_inputs = [t for t in args if getattr(t, "requires_grad", False)]
-    outputs = r if isinstance(r, (tuple, list)) else [r]
-    outputs = [o for o in outputs if getattr(o, "requires_grad", False)]
-    if outputs and grad_inputs:
-        grad_outputs = [torch.ones_like(o) for o in outputs]
-        grads = torch.autograd.grad(outputs, grad_inputs, grad_outputs=grad_outputs, allow_unused=True)
-        return _flatten_cpu_outputs(r) + [g.numpy() for g in grads if g is not None]
-    return _flatten_cpu_outputs(r)
-
-
-def _invoke_plain(api_name, args, testcase):
-    """位置直调（优先复用 testcase 的 param_plan；无 plan 时按位直调——仅 CPU 参照）。"""
-    import importlib
-
-    module_path, _, attr = api_name.rpartition(".")
-    fn = getattr(importlib.import_module(module_path), attr)
-    plan = testcase.get_param_plan()
-    if plan is not None:
-        pos_args, kwargs, _ = plan.build_args(args)
-        return fn(*pos_args, **kwargs)
-    return fn(*args)
-
-
-def _flatten_cpu_outputs(result):
-    out = []
-    items = result if isinstance(result, (tuple, list)) else [result]
-    for o in items:
-        if hasattr(o, "numpy"):
-            out.append(o.detach().numpy())
-        elif isinstance(o, (tuple, list)):
-            out.extend(x.detach().numpy() for x in o if hasattr(x, "numpy"))
-    return out
-
-
 def _run_api(api_name, raw_inputs, testcase, backend, dev_id=0, api_info=None):
     """按 API 名字执行并返回 numpy 列表；backend 决定 CPU/NPU 落点。
 

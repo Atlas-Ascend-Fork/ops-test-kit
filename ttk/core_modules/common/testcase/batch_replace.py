@@ -29,26 +29,28 @@ import logging
 import numpy
 
 from ....utilities import RandomData, get
-from .batch import has_complete_batch_relation
+from .batch import has_complete_batch_relation, parse_batch_relations
 
 
 def _slot_instructions(testcase, slot_idx):
     """槽位替换指令迭代器：(axis_idx, (start, stop, step), sample_seed)。
 
     嵌套结构与 bcid 派生（TestcaseBase._generate_batch_consistency_id）
-    同构：slot -> 轴组 -> 样本；None 元素跳过。未声明的槽（get 越界 →
-    None）无指令。
+    同构：slot -> 轴组 -> 样本，经 parse_batch_relations 解析（单样本非法
+    跳过；结构不完整 → 无指令）。未声明的槽（get 越界 → None）无指令。
     """
-    axes = get(testcase.batch_axis, slot_idx)
-    slice_groups = get(testcase.batch_slice_info, slot_idx)
-    seed_groups = get(testcase.batch_seed, slot_idx)
-    for axis_idx, slices, seeds in zip(axes or (), slice_groups or (), seed_groups or ()):
-        if axis_idx is None:
-            continue
-        for sample_slice, sample_seed in zip(slices or (), seeds or ()):
-            if sample_slice is None or sample_seed is None:
-                continue
-            yield axis_idx, sample_slice, sample_seed
+    relations = parse_batch_relations(
+        getattr(testcase, "batch_axis", None),
+        getattr(testcase, "batch_slice_info", None),
+        getattr(testcase, "batch_seed", None),
+        slot_idx,
+    )
+    if relations is None:
+        return
+    axes, samples = relations
+    for axis_index, axis_idx in enumerate(axes):
+        for sample_slices, sample_seeds in samples:
+            yield axis_idx, sample_slices[axis_index], sample_seeds[axis_index]
 
 
 def apply_slot_batch_replacement(testcase, slot_idx, arr, *, dtype, data_range, distribution):

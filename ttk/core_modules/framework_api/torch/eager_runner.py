@@ -28,8 +28,7 @@ def enable_requires_grad(backend, args):  # noqa: ARG001
 
 
 def run_backward(backend, output, args):  # noqa: ARG001
-    """backward：autograd.grad（函数式）——梯度是返回值，unused 位直接过滤丢弃
-    （golden 侧 _run_backward_on_cpu 同构过滤，两侧对称、不按输入位对齐）。
+    """backward：autograd.grad（函数式）——梯度是返回值，unused 位直接过滤丢弃。
     设计支点：多轮零状态（无 .grad 累积）+ 结果采集复用正向体系。"""
     import torch
     from torch import autograd

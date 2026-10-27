@@ -916,6 +916,23 @@ class ApiTestcaseBase(TestcaseBase):
 
     # ========== Normalize ==========
 
+    def _describe_operator_name(self):
+        return self.api_name
+
+    def _describe_gate_fields(self):
+        return ("tensor_view_shapes", "tensor_dtypes")
+
+    def _assemble_described_shapes(self, shapes, dtypes) -> None:
+        """describe 的 shapes/dtypes → tensor_view_shapes/tensor_dtypes（缺啥补啥）。
+
+        aclnn 的 shapes 按 API 参数列表含输出槽位（输出索引经既有
+        auto-fill / CSV output_tensor_indexes 列消费）。
+        """
+        if shapes is not None:
+            self._merge_described("tensor_view_shapes", shapes)
+        if dtypes is not None:
+            self._merge_described("tensor_dtypes", dtypes)
+
     def _normalize_compressed_fields(self):
         if not self.is_valid or not self.tensor_view_shapes:
             return

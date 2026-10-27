@@ -109,6 +109,11 @@ class TestcaseBase(metaclass=ABCMeta):  # noqa: B024
     identity_headers: Dict[str, tuple] = {
         "testcase_name": (FIELD_TYPES.STRING, None),
     }
+
+    # spec.describe 参数化用例的通路锚点：None = 该通路不参与（describe 不触发）。
+    # 四通路类覆写："kernel"/"geir"/"aclnn"/"e2e"（注册名与查询通路由此
+    # 派生，见 _apply_describe_shapes / _describe_operator_name）。
+    describe_pathway: Optional[str] = None
     special_property_headers: Dict[str, tuple] = {
         "input_data_ranges": (FIELD_TYPES.SHAPELIKE_FLOAT_SIGNED_NESTED, None, ((None, None),)),
         "precision_tolerances": (FIELD_TYPES.SHAPELIKE_FLOAT_NESTED, None, None),
@@ -247,6 +252,81 @@ class TestcaseBase(metaclass=ABCMeta):  # noqa: B024
         self._normalize_input_data_range()
         self._parse_device_ids_field()
         self._generate_batch_consistency_id()
+
+    # ========== spec.describe 参数化用例 ==========
+
+    def _apply_describe_shapes(self):
+        """CSV 未提供形状/类型列时，未识别列 → params 调 spec.describe。
+
+        契约：describe(params) 只返回 {"shapes": ..., "dtypes": ...} 两个
+        key；各通路经 _assemble_described_shapes 把二者映射成本通路的
+        shape 字段（kernel/geir→input_shapes/input_dtypes，aclmn/e2e→
+        tensor_view_shapes/tensor_dtypes）。aclnn 的 shapes 按 API 参数
+        列表含输出槽位（输出索引/属性等其余字段仍走 CSV 列）。
+        shapes 与 dtypes 不强绑定：两者任一缺省即触发 describe，缺啥补
+        啥——CSV 已显式声明的字段不回填（"不缺的不读"）。describe 未
+        声明 → 静默跳过（沿用原"形状为空"语义）；抛异常 / 非 dict 除
+        外，缺 shapes 且 CSV 未提供形状 → 用例置无效。仅主进程
+        validate 期调用一次。
+        """
+        pathway = self.describe_pathway
+        if not pathway or not self.is_valid:
+            return
+        name = self._describe_operator_name()
+        gate_fields = self._describe_gate_fields()
+        if not name or not gate_fields:
+            return
+        shapes_field, dtypes_field = gate_fields
+        if not shapes_field or not dtypes_field:
+            return
+        if getattr(self, shapes_field, None) and getattr(self, dtypes_field, None):
+            return
+        from ttk.switches import get_global_storage
+
+        from ..plugin import InvokeDescribeError, SpecResolver
+        from .describe import collect_describe_params
+
+        params = collect_describe_params(self)
+        if not params:
+            return
+        resolver = SpecResolver(name, pathway, get_global_storage().plugin_path)
+        try:
+            declared = resolver.invoke_describe(params)
+        except InvokeDescribeError as exc:
+            self.is_valid = False
+            self.fail_reason = exc.code
+            logging.error("[%s] %s", self.testcase_name, exc)
+            return
+        if declared is None:
+            return  # spec 未注册 describe：静默跳过（沿用原"形状为空"语义）
+        shapes = declared.get("shapes")
+        if shapes is None and not getattr(self, shapes_field, None):
+            self.is_valid = False
+            self.fail_reason = "DESCRIBE_MISSING_SHAPES"
+            logging.error("[%s] describe(%s) must return a 'shapes' key", self.testcase_name, name)
+            return
+        self._assemble_described_shapes(shapes, declared.get("dtypes"))
+
+    def _describe_operator_name(self) -> Optional[str]:
+        """describe 的注册名：kernel/geir 用 op_name，aclmn/e2e 用 api_name。"""
+        return None
+
+    def _describe_gate_fields(self) -> Optional[tuple]:
+        """本通路的 (形状字段, 类型字段)：两者均非空时不触发 describe；
+        任一缺省则触发，且只回填缺省字段（CSV 已声明字段优先）。"""
+        return None
+
+    def _assemble_described_shapes(self, shapes, dtypes) -> None:  # noqa: B027 通路覆写钩子（默认 no-op）
+        """把 describe 的 shapes/dtypes 映射到本通路 shape 字段（通路覆写）。"""
+
+    def _merge_described(self, field, value) -> None:
+        """describe 值回填：CSV 显式声明（非空单元格）优先，不覆盖。"""
+        if (self.original_dict or {}).get(field):
+            return
+        try:
+            setattr(self, field, value)
+        except AttributeError as exc:
+            logging.warning("[%s] describe cannot set %r: %s", self.testcase_name, field, exc)
 
     def _parse_device_ids_field(self):
         """CSV 字符串解析："0,1,2"→(0,1,2) / "all"→探测全量 / 空→None / 已 tuple 透传。

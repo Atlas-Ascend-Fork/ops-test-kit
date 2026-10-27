@@ -70,9 +70,10 @@ class TestBatchConsistency:
 
     @staticmethod
     def _summary(tc_name, bcid, hashes):
-        from ttk.core_modules.common.comparison.batch_consistency import BatchSummary
+        from ttk.core_modules.common.comparison.batch_consistency import BatchSummary, SampleHash
 
-        return BatchSummary(testcase_name=tc_name, batch_consistency_id=bcid, sample_hashes=hashes)
+        samples = [SampleHash(seeds=(seed,), lengths=(1,), digest=digest) for seed, digest in hashes]
+        return BatchSummary(testcase_name=tc_name, batch_consistency_id=bcid, sample_hashes=samples)
 
     @staticmethod
     def _case(bcid, batch_axis, dl=3, name="tc"):
@@ -81,7 +82,8 @@ class TestBatchConsistency:
             op_name="Add",
             batch_consistency_id=bcid,
             batch_axis=batch_axis,
-            batch_slice_info=(0, 1),  # 元数据在位即可（切片沿 axis 0 全样本）
+            batch_slice_info=([[(0, 1, 1), (1, 2, 1), (2, 3, 1), (3, 4, 1)]],),
+            batch_seed=([[7, 8, 9, 10]],),
             _dl=dl,
         )
 
@@ -95,11 +97,11 @@ class TestBatchConsistency:
     def test_assemble_summary_slices_output_zero(self):
         from ttk.core_modules.common.comparison.batch_consistency import assemble_batch_summary
 
-        tc = self._case("s1|axis0", 0)
+        tc = self._case("s1|axis0", ((0,),))
         outputs = [np.arange(12, dtype=np.float32).reshape(4, 3)]
         summary = assemble_batch_summary(outputs, tc, tc.batch_consistency_id)
         assert summary is not None
-        assert len(summary.sample_hashes) == 4  # axis=0 切 4 样本
+        assert len(summary.sample_hashes) == 4  # 4 个声明样本各 1 行
 
     def test_instance_collects_and_compares(self, caplog):
         from ttk.core_modules.geir import GeirInstance
@@ -107,10 +109,10 @@ class TestBatchConsistency:
         ins = GeirInstance()
         ins.case_result_title = GeirReturnStructure.get_titles()
 
-        # 两个同 id 用例：样本哈希一致 → PASS
+        # 两个用例声明同 seed 样本：片段哈希一致 → PASS
         # （收集已上提 InstanceBase._collect_batch_summary——主循环在
         # handle_result 前统一调用）
-        for name, hashes in (("tc_a", ["h1", "h2"]), ("tc_b", ["h1", "h2"])):
+        for name, hashes in (("tc_a", [(7, "h1"), (8, "h2")]), ("tc_b", [(8, "h2"), (7, "h1")])):
             result = GeirReturnStructure()
             result.batch_summary = self._summary(name, "s1", hashes)
             task = types.SimpleNamespace(testcase=types.SimpleNamespace(testcase_name=name))
@@ -125,7 +127,7 @@ class TestBatchConsistency:
         # 改成不一致 → FAIL 日志
         ins2 = GeirInstance()
         ins2.case_result_title = GeirReturnStructure.get_titles()
-        for name, hashes in (("tc_a", ["h1", "h2"]), ("tc_b", ["h1", "XX"])):
+        for name, hashes in (("tc_a", [(7, "h1"), (8, "h2")]), ("tc_b", [(8, "h2"), (7, "XX")])):
             result = GeirReturnStructure()
             result.batch_summary = self._summary(name, "s1", hashes)
             task = types.SimpleNamespace(testcase=types.SimpleNamespace(testcase_name=name))

@@ -173,7 +173,8 @@ absolute_precision,"(1e-8, 1e-5)"
 # CLI
 python3 -m ttk kernel -i cases.csv --compare close
 
-# Spec.tolerance 不支持 close（CLI 框架增强，仅通过 --compare 指定）
+# Spec.tolerance（rtol/atol/ptol 可覆盖 dtype 分档默认；legacy CSV 容差仍优先）
+tolerance = {"float16": {"standard": "isclose", "rtol": 0.005, "atol": 0.000025, "ptol": 0.005}}
 ```
 
 ## 4. 余弦相似度（cosine）

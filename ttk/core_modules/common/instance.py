@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import time
 from abc import ABCMeta, abstractmethod
+from contextlib import suppress
 from multiprocessing.context import BaseContext
 from typing import IO, Any, Dict, List, Optional, Tuple, Union
 
@@ -86,34 +87,10 @@ def get_instance_by_name(name: str) -> "InstanceBase":
     return _INSTANCE_SINGLETONS[name]
 
 
-# 跑批 worker 是 forkserver 子进程 —— 它们从一个极简进程起, **不继承父进程已导入的模块**,
-# 于是每个 worker 都要自己 import 一遍重模块。本机实测: torch 2.37s、tbe 0.64s、te 0.67s,
-# 这笔开销与用例数无关, 每次跑批都付(小批量调试时占比最高)。
-# ``set_forkserver_preload`` 让 forkserver 进程自己先导入一次, 子进程 fork 出来即已具备,
-# 实测同一机制在 xpu_server 上把子进程启动从 2.3s 压到 0.03s。
-# 安全性: CPython 的 forkserver 对 preload 列表里的模块是 ``try: __import__ except ImportError: pass``,
-# 模块缺失只会被忽略, 不会让跑批起不来; 故这里只列"装了就该预载"的重模块。
-# torch 系预载对 TF 用例是毒药: torch/tbe/te 会连带加载 torch_npu, 而已加载 torch 的
-# 进程再 import tensorflow 必定 SIGSEGV(libstdc++ 弱符号合并冲突, 见
-# ttk/remote/server/_framework_preload.py 模块注记)。TF 预载 tensorflow 先行,
-# 后续任意 torch 系导入均安全(实测 tf → torch/torch_npu/tbe/te 全序正常)。
-_WORKER_PRELOAD_TORCH = ("numpy", "torch", "tbe", "te")
-_WORKER_PRELOAD_TF = ("numpy", "tensorflow")
-
-
-def _worker_preload_modules(switches) -> tuple:
-    """按通路/框架选预载表。框架检测(run_with_switches)先于 Instance 构建完成。"""
-    if getattr(switches, "test_mode", "") == "framework-api" and getattr(switches, "framework", "") == "tf":
-        return _WORKER_PRELOAD_TF
-    return _WORKER_PRELOAD_TORCH
-
-
-def _preload_worker_modules(ctx: BaseContext, preload: tuple = _WORKER_PRELOAD_TORCH) -> None:
-    """给 worker 的 forkserver 设预载模块。必须在任何子进程启动**之前**调用。"""
-    try:
-        ctx.set_forkserver_preload(list(preload))
-    except Exception as e:  # noqa: BLE001  # 预载只是提速, 失败绝不该让跑批不可用
-        logging.debug("set_forkserver_preload skipped: %s", e)
+# 跑批 worker 是 forkserver 子进程，不继承父进程已导入的模块——重模块由
+# worker 在用例路径上惰性导入（不再预载：预载曾把 torch/tbe/te 无差别塞进
+# 每个 worker，TF golden 在同一进程再 import tensorflow 会撞 libstdc++
+# 弱符号合并冲突而 SIGSEGV，见 ttk/remote/server/_framework_preload.py）。
 
 
 def intersect_device_ids(requested, grantable):
@@ -179,7 +156,6 @@ class InstanceBase(metaclass=ABCMeta):
         self._front_input_count: int = 0
         # Multiprocessing
         self.mp_context: BaseContext = multiprocessing.get_context("forkserver")
-        _preload_worker_modules(self.mp_context, _worker_preload_modules(self.switches))
         self.mp_manager = None
         self.device_locks = ()
         self.used_device = []
@@ -466,25 +442,99 @@ class InstanceBase(metaclass=ABCMeta):
             self._batch_summaries[task.testcase.testcase_name] = summary
 
     def _compare_batch_summaries(self) -> None:
-        """batch 一致性组装比对：按 bcid 分组 → 同关系位置 hash 集合基数判定
-        （四通路共同尾巴；无收集即 no-op）。"""
+        """batch 一致性组装比对：按 (api_name, seed, 切片长度) 跨用例分组 →
+        同 key 片段 hash 集合基数判定（四通路共同尾巴；无收集即 no-op）。
+
+        batch 一致性是确定性的一种：组比对失败时，在收尾对结果 CSV 做一次
+        重写，把涉及用例的 deterministic_status 置 FAIL（热路径零改动）。
+        """
         if not self._batch_summaries:
             return
-        consistent, failures = compare_batch_consistency(self._batch_summaries)
+        consistent, failures, compared_groups, failed_cases = compare_batch_consistency(self._batch_summaries)
         if consistent:
             logging.info(
-                "batch consistency PASS: %d case(s) in %d group(s)",
+                "batch consistency PASS: %d case(s), %d relation group(s) compared",
                 len(self._batch_summaries),
-                len({s.batch_consistency_id for s in self._batch_summaries.values()}),
+                compared_groups,
             )
         else:
             logging.error("batch consistency FAIL: %s", failures)
+            self._mark_batch_consistency_fail(failed_cases)
         logging.info(
-            "Level-3 phase one compared batch relations by per-sample output hashes (see the "
-            "batch consistency summary above). For raw-dump slice comparison across cases with "
-            "different relation sets, run with --dump out --dump-format bin and NPU_DUMP_PATH "
-            "set, then run scripts/compare_batch_consistency.py with this result CSV."
+            "Level-3 phase one compared declared batch samples by (seed, slice length) across "
+            "cases (see the batch consistency summary above). For raw-dump slice comparison of "
+            "relations declared with different seeds, run with --dump out --dump-format bin and "
+            "NPU_DUMP_PATH set, then run scripts/compare_batch_consistency.py with this result CSV."
         )
+
+    def _mark_batch_consistency_fail(self, failed_cases) -> None:
+        """组比对失败 → 结果 CSV 的 deterministic_status 置 FAIL。
+
+        收尾一次性重写：流式读改写（不驻留全量行），列定位用文件自身的
+        表头行，改写后原子替换（临时文件 + os.replace 后重开句柄，异常
+        清理临时文件）。
+        无结果文件/无相关列/无改写则静默跳过——batch 一致性是辅助校验，
+        不阻断主流程。
+        """
+        if not failed_cases or not self.result_path or not os.path.isfile(self.result_path):
+            return
+        if self.result_csv_file is not None:
+            self.result_csv_file.flush()
+        temporary = f"{self.result_path}.tmp"
+        try:
+            with open(self.result_path, newline="") as source:
+                reader = csv.reader(source)
+                try:
+                    header = next(reader)
+                except StopIteration:
+                    return
+                try:
+                    name_idx = header.index("testcase_name")
+                    det_idx = header.index("deterministic_status")
+                except ValueError:
+                    return
+                with open(temporary, "w", newline="") as destination:
+                    writer = csv.writer(destination)
+                    writer.writerow(header)
+                    changed = False
+                    for row in reader:
+                        if (
+                            len(row) > max(name_idx, det_idx)
+                            and row[name_idx] in failed_cases
+                            and row[det_idx] != "FAIL"
+                        ):
+                            row[det_idx] = "FAIL"
+                            changed = True
+                        writer.writerow(row)
+            if changed:
+                os.replace(temporary, self.result_path)
+                self._reopen_result_csv()
+                logging.info(
+                    "batch consistency FAIL marked case(s) as deterministic_status=FAIL in %s",
+                    self.result_path,
+                )
+        except OSError as exc:
+            logging.warning(
+                "batch consistency FAIL: cannot rewrite %s deterministic_status: %s",
+                self.result_path,
+                exc,
+            )
+        finally:
+            with suppress(OSError):
+                os.remove(temporary)
+
+    def _reopen_result_csv(self):
+        """os.replace 重写后重开结果 CSV：旧句柄指向已 unlink 的 inode，续写会静默丢失。"""
+        if self.result_csv_file is not None:
+            with suppress(OSError):
+                self.result_csv_file.close()
+        try:
+            self.result_csv_file = open(self.result_path, newline="", mode="a+")  # noqa: SIM115
+        except OSError:
+            self.result_csv_file = None
+            self.result_csv_writer = None
+            return
+        self.result_csv_writer = csv.writer(self.result_csv_file)
 
     def _warn_incomplete_batch_relation(self, testcase) -> None:
         """dl=3 但 batch 三字段缺一：派发期按用例提示一次。

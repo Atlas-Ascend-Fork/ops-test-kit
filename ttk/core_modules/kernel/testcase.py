@@ -67,6 +67,8 @@ class TestcaseKernel(TestcaseBase):
     Structure for Op Profiling
     """
 
+    describe_pathway = "kernel"
+
     __slots__ = (
         # === testcase valid configurations === #
         "op_name",
@@ -707,10 +709,28 @@ class TestcaseKernel(TestcaseBase):
         """Ready for profile"""
         return self.compile_done == 3
 
+    def _describe_operator_name(self):
+        return self.op_name
+
+    def _describe_gate_fields(self):
+        return ("input_shapes", "input_dtypes")
+
+    def _assemble_described_shapes(self, shapes, dtypes) -> None:
+        """describe 的 shapes/dtypes → input_shapes/input_dtypes（缺啥补啥）。
+
+        输出形状不在两 key 契约内：output_shapes/output_dtypes 仍由 CSV
+        显式声明（可写 ELEWISE/REDUCE 推断字符串）。
+        """
+        if shapes is not None:
+            self._merge_described("input_shapes", shapes)
+        if dtypes is not None:
+            self._merge_described("input_dtypes", dtypes)
+
     def validate(self):
         super().validate()
         self.input_shapes = self.input_shapes or ()
         self._check_op_name()
+        self._apply_describe_shapes()
         self._check_input_count()
         self._check_attributes()
         # Step 1: input distribution → flat_input_shapes available

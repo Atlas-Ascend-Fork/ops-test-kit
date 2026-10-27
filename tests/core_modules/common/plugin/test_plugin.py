@@ -300,10 +300,10 @@ class TestValidation:
             get_plugin_function("bad_attr", "golden", "kernel", str(tmp_path))
 
     def test_framework_tolerance_token_rejected(self, tmp_path):
-        """框架增强 token 不得写入 Spec.tolerance，报错指路 --compare。"""
+        """框架增强 token（cosine）不得写入 Spec.tolerance，报错指路 --compare。"""
         (tmp_path / "bad_tol.py").write_text(
             "class BadTolSpec:\n"
-            '    tolerance = {"float32": {"standard": "isclose"}}\n'
+            '    tolerance = {"float32": {"standard": "cosine"}}\n'
             "\n"
             '__spec__ = {"bad_tol": "BadTolSpec"}\n'
         )

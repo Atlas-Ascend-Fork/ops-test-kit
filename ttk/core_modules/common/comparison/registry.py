@@ -190,9 +190,11 @@ class ComparisonBase(metaclass=ABCMeta):
         """rtol/atol/ptol 解析为终值成员变量（compare_impl 直接消费）。
 
         来源优先级：legacy CSV 列（per-output，get 按输出位取值）
-        > Spec.tolerance 顶层（仅 ptol——quant/requant 通路经 _ptol_params 注入）
+        > Spec.tolerance 顶层（quant/requant 的 ptol、isclose 的 rtol/atol/ptol
+          经各自参数解析器注入 tol_options 顶层）
         > 判据默认钩子（标量默认读类属性；dtype 分档/运行期条件由子类覆写）。
-        ptol=0 须与"未配置"区分（0 是合法的零容忍），顶层解析不走 or 短路。
+        rtol=0/atol=0/ptol=0 须与"未配置"区分（0 是合法的零容忍），
+        顶层解析不走 or 短路。
         """
         legacy = self.tol_options.get("legacy", {})
         for name, declared in (
@@ -203,8 +205,8 @@ class ComparisonBase(metaclass=ABCMeta):
             if declared is None:
                 continue  # 判据不消费此容差（legacy 值静默忽略——消费面由判据声明）
             value = get(_legacy_seq(legacy, name), self.output_idx)
-            if value is None and name == "ptol":
-                raw = self.tol_options.get("ptol")
+            if value is None:
+                raw = self.tol_options.get(name)
                 if raw is not None:
                     try:
                         value = float(raw)
