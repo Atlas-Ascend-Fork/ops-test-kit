@@ -128,8 +128,9 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2
 | `--output` | `-o` | 无 | 输出结果CSV路径（覆盖已有文件），与 `-a` 互斥 | `-o results.csv` |
 | `--append` | `-a` | 无 | 追加结果到已有CSV（表头不匹配则覆盖），与 `-o` 互斥 | `-a results.csv` |
 | `--po` / `--progress-output` | | 无 | 进度输出路径（`Key:Value` 纯文本：StartAt/ElapsedTime/TotalCases/CompletedCases） | `--po /tmp/progress.txt` |
+| `--print` | | 开启 | 是否打印跑批过程中的周期性摘要；不影响进度文件和最终汇总 | `--print=false` |
 
-> 每个用例的独立日志目录是默认行为（`{root}/log/{mode}/{testcase_name}/ttk.log`），无需参数；摘要信息无条件打印，不可关闭。
+> 每个用例的独立日志目录是默认行为（`{root}/log/{mode}/{testcase_name}/ttk.log`），无需参数；周期性摘要默认打印，可通过 `--print=false` 关闭。
 
 # 通路专属参数
 
