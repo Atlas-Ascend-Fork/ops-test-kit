@@ -163,6 +163,84 @@ class TestBindParams:
         assert g(*ia, **ik) == (1, -1)
 
 
+class TestBindParamsSelfNamedInput:
+    """self 名输入（aten 惯例 schema，如 aclnnReal 的唯一输入参数名）的绑定契约。
+
+    回归：bind_params 曾在 leftover 处把 self 名池条目整体丢弃（既不进
+    **kwargs 也进不了 *args），与 docstring 位置送达承诺矛盾——远端三方
+    执行 aclnnReal 时输入被静默丢弃、服务端 500。
+    """
+
+    @staticmethod
+    def test_self_named_input_delivery_matrix():
+        """送达矩阵：普通函数 self 形参按名绑定（仅 *args 按插入序、仅 **kwargs
+        可经 kwargs 收取）；绑定 __call__ 与未绑定 __init__ 的 self 是实例占位，
+        self 名输入只能经 *args 位置送达、绝不注入 **kwargs（self= 与实例位
+        冲突）；无自定义 __init__ 的类经 object.__init__ 守卫直接实例化。"""
+        from ttk.core_modules.common.xpu import bind_params, invoke_third_party
+
+        def real(self, out=None):
+            return (self, out)
+
+        ia, ik = bind_params(real, {"self": "T"})
+        assert real(*ia, **ik) == ("T", None)
+
+        def varargs_only(*args):
+            return args
+
+        args, kwargs = bind_params(varargs_only, {"self": "T", "other": "O"})
+        assert varargs_only(*args, **kwargs) == ("T", "O")
+
+        def kwargs_only(**kwargs):
+            return kwargs
+
+        _ia, ik = bind_params(kwargs_only, {"self": "T"})
+        assert ik == {"self": "T"}
+
+        class VarargsCall:
+            def __call__(self, *args, input=None, **kwargs):
+                return (args, input)
+
+        args, kwargs = bind_params(VarargsCall().__call__, {"self": "T"})
+        assert args == ("T",)
+        assert kwargs == {}
+
+        class KwOnlyCall:
+            def __call__(self, **kwargs):
+                return kwargs
+
+        args, kwargs = bind_params(KwOnlyCall().__call__, {"self": "T"})
+        assert args == ()
+        assert kwargs == {}
+
+        class NamedInit:
+            def __init__(self, gamma=2.0):
+                self.gamma = gamma
+
+        ia, ik = bind_params(NamedInit.__init__, {"self": "T", "gamma": 9.0}, warn_leftover=False)
+        assert NamedInit(*ia, **ik).gamma == 9.0
+
+        class VarargsInit:
+            def __init__(self, *args, **kwargs):
+                self.received = (args, kwargs)
+
+        ia, ik = bind_params(VarargsInit.__init__, {"self": "T"}, warn_leftover=False)
+        assert VarargsInit(*ia, **ik).received == (("T",), {})
+
+        class KwOnlyInit:
+            def __init__(self, **kwargs):
+                self.received = kwargs
+
+        ia, ik = bind_params(KwOnlyInit.__init__, {"self": "T"}, warn_leftover=False)
+        assert KwOnlyInit(*ia, **ik).received == {}
+
+        class RealLike:
+            def __call__(self, *args, input=None, **kwargs):
+                return [f"real({args[0] if args else input})"]
+
+        assert invoke_third_party(RealLike, named={"self": "T"}, attrs={}, device=None) == ["real(T)"]
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # XPU/NPU 执行重叠（XpuDispatch 句柄 / 快照契约 / deadline 补偿 / 总闸）
 # + manual_xpu 本地装载（loader / 归档）——common/xpu 域

@@ -294,10 +294,36 @@ def _format_device(device):
     return device
 
 
+def _self_is_instance_slot(func) -> bool:
+    """签名中的 ``self`` 形参是否为实例占位（而非 API 真实参数名）。
+
+    仅未绑定的 ``__init__`` 如此——其首参由 ``cls(*args)`` 填充，永不来自
+    输入/属性池。普通函数（含 aten 惯例 ``def f(self, ...)`` 形态的三方
+    API/插件函数）的 ``self`` 是真实参数名，须按名绑定；绑定方法的签名已
+    由 Python 去掉实例参，不在此列。
+    """
+    import inspect
+
+    return not inspect.ismethod(func) and getattr(func, "__name__", None) == "__init__"
+
+
+def _self_kwarg_conflicts(func) -> bool:
+    """``self=`` 关键字是否会与实例位冲突（self 名输入不可经 **kwargs 送达）。
+
+    绑定方法（实例已占 ``self`` 位，``inst(self=...)`` → multiple values
+    for argument 'self'）与未绑定 ``__init__``（``cls(**{'self': ...})``
+    同理）都冲突；普通函数无实例位，安全。
+    """
+    import inspect
+
+    return not inspect.isfunction(func) or _self_is_instance_slot(func)
+
+
 def bind_params(func, name_to_value: dict, device: Optional[str] = None, warn_leftover: bool = True) -> tuple:
     """Bind a name->value map onto ``func``'s signature BY PARAMETER NAME.
 
-    Returns ``(args, kwargs)``. Each declared param (except self / VAR) is resolved by:
+    Returns ``(args, kwargs)``. Each declared param (except an unbound-
+    ``__init__`` instance slot / VAR) is resolved by:
       * name in ``name_to_value`` -> take value (positional before ``*``, keyword after);
       * framework-reserved name (``device``) -> inject ``device`` (when not None);
       * has a default -> use the default: pre-star params get the default appended
@@ -305,11 +331,18 @@ def bind_params(func, name_to_value: dict, device: Optional[str] = None, warn_le
         slot would shift every later value one param to the left); post-star
         params are simply skipped (Python applies the default);
       * otherwise -> :class:`UnknownParamError` (neither input/attr nor defaulted).
-    ``*args`` collects unconsumed entries (in insertion order) as positional args.
-    ``**kwargs`` absorbs leftover entries (excluding ``self``); otherwise
-    ``warn_leftover`` controls whether unconsumed entries log a warning (default True).
-    A pool entry named ``self`` is never injected into ``**kwargs``; use ``*args``
-    to receive it positionally.
+    A ``self`` parameter is a REAL API param name for plain functions (aten
+    convention, e.g. ``torch._foreach_addcmul(self, tensor1, ...)``) and binds
+    from the pool like any name; only an unbound ``__init__``'s ``self`` (the
+    instance slot, filled by ``cls(*args)``) is skipped.
+    ``*args`` collects unconsumed entries (in insertion order) as positional
+    args; with ``**kwargs`` present, non-``self`` leftovers go to ``**kwargs``
+    instead (no double-feeding). A pool entry named ``self`` (an input whose
+    schema name is literally ``self``, e.g. aclnnReal's only input) is
+    delivered positionally via ``*args``; it goes through ``**kwargs`` only for
+    plain functions (no instance slot to collide with), never for bound
+    methods / unbound ``__init__``. ``warn_leftover`` controls whether
+    unconsumed/undeliverable entries log a warning (default True).
     """
     import inspect
 
@@ -321,10 +354,11 @@ def bind_params(func, name_to_value: dict, device: Optional[str] = None, warn_le
     has_var_positional = False
     consumed = set()
     for name, param in sig.parameters.items():
-        # self 仅在未绑定函数上是实例参数；绑定方法签名已去实例参，残留 self 是
-        # API 真实形参名（aten 惯例 torch._foreach_addcmul(self, tensor1, ...)）——
-        # 一律跳过会把第一个输入静默丢掉
-        if name == "self" and not inspect.ismethod(func):
+        # self 双语义：未绑定 __init__ 的首参 self 是实例占位（cls(*args) 填充），
+        # 跳过；普通函数签名里的 self 是 API 真实形参名（aten 惯例
+        # torch._foreach_addcmul(self, tensor1, ...)），按名绑定——一律跳过会把
+        # 第一个输入静默丢掉（aclnnReal 等 self 名输入的远端三方执行即由此回归）。
+        if name == "self" and _self_is_instance_slot(func):
             continue
         if param.kind is inspect.Parameter.VAR_POSITIONAL:
             seen_star = True
@@ -355,14 +389,30 @@ def bind_params(func, name_to_value: dict, device: Optional[str] = None, warn_le
                 f"parameter {name!r} of {getattr(func, '__name__', func)} has no value "
                 f"(not in inputs/attrs, no default)"
             )
-    leftover = {k: v for k, v in name_to_value.items() if k not in consumed and k != "self"}
+    leftover = {k: v for k, v in name_to_value.items() if k not in consumed}
+    if has_var_positional and not has_var_keyword:
+        # 仅 *args：全部 leftover（含 self 名输入）按插入序整体位置送达
+        args.extend(leftover.values())
+        return tuple(args), kwargs
+    unset = object()
+    self_value = leftover.pop("self", unset)
     if leftover:
         if has_var_keyword:
             kwargs.update(leftover)
-        elif has_var_positional:
-            args.extend(leftover.values())
         elif warn_leftover:
             logging.warning("bind_params: unconsumed pool entries %s", sorted(leftover))
+    if self_value is not unset:
+        if has_var_positional:
+            # *args + **kwargs 并存：self 只走 *args——bound 方法的 self= 关键字
+            # 会与实例位冲突（multiple values for argument 'self'）
+            args.append(self_value)
+        elif has_var_keyword and not _self_kwarg_conflicts(func):
+            kwargs["self"] = self_value
+        elif warn_leftover:
+            logging.warning(
+                "bind_params: pool entry 'self' undeliverable to %s (no *args; **kwargs collides with the instance slot)",
+                getattr(func, "__name__", func),
+            )
     return tuple(args), kwargs
 
 
@@ -389,11 +439,14 @@ def invoke_third_party(func, named: dict, attrs: dict, device, param_order: Opti
                 ordered[k] = v
         merged = ordered
     if inspect.isclass(func):
-        try:
-            init_args, init_kwargs = bind_params(func.__init__, merged, device=device, warn_leftover=False)
-        except UnknownParamError:
-            init_args, init_kwargs = (), {}
-        inst = func(*init_args, **init_kwargs)
+        if func.__init__ is object.__init__:  # 无自定义 __init__: 直接实例化
+            inst = func()
+        else:
+            try:
+                init_args, init_kwargs = bind_params(func.__init__, merged, device=device, warn_leftover=False)
+            except UnknownParamError:
+                init_args, init_kwargs = (), {}
+            inst = func(*init_args, **init_kwargs)
         call_args, call_kwargs = bind_params(inst.__call__, merged, device=device)
         return inst(*call_args, **call_kwargs)
     args, kwargs = bind_params(func, merged, device=device)

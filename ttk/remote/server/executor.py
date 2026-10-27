@@ -567,10 +567,15 @@ def _invoke(callable_fn, named, attrs, provider, device_id, use_device, profile=
 
 
 def _function_param_names(sig):
-    """Non-self, non-*args/**kwargs parameter names, in declaration order."""
+    """Non-*args/**kwargs parameter names, in declaration order.
+
+    A plain function's ``self`` is a real API parameter (aten convention,
+    e.g. ``torch._foreach_addcmul``) and is kept; bound methods have no
+    ``self`` in their signature already.
+    """
     names = []
     for p, v in sig.parameters.items():
-        if v.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL) and p != "self":
+        if v.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
             names.append(p)
     return names
 
@@ -579,11 +584,13 @@ def _ordered_values(param_order, merged, attrs):
     """``param_order`` entries present in ``merged`` but not declared as attrs.
 
     Keeps attrs out of the positional zip so an attr never consumes a tensor
-    slot; attrs are re-supplied as keywords by the caller.
+    slot; attrs are re-supplied as keywords by the caller. ``param_order`` is
+    C-header order — a ``self`` entry zips onto the function's first parameter
+    like any other input (no exclusion-based hacks).
     """
     values = []
     for k in param_order:
-        if k in merged and k not in (attrs or {}) and k != "self":
+        if k in merged and k not in (attrs or {}):
             values.append(merged[k])
     return values
 
@@ -591,8 +598,10 @@ def _ordered_values(param_order, merged, attrs):
 def _invoke_function(callable_fn, named, attrs, param_order):
     """Three-phase invoke for a plain function (not a class).
 
-    1. kwargs as-is (when input names match API param names)
-    2. positional (torch uses input/other which don't match schema names)
+    1. kwargs as-is (when input names match API param names — including a
+       function-form plugin's real ``self`` parameter)
+    2. positional, in schema (C-header) order — ``self`` included; torch
+       builtins reject the ``self`` keyword but take it positionally
     3. inspect signature, zip positional values to real param names (TF raw_ops)
 
     param_order (when available) provides C-header order so 'self' and other
@@ -601,8 +610,7 @@ def _invoke_function(callable_fn, named, attrs, param_order):
     merged = dict(attrs or {})
     merged.update(named)
     try:
-        call_kwargs = {k: v for k, v in merged.items() if k != "self"}
-        return callable_fn(**call_kwargs)
+        return callable_fn(**merged)
     except TypeError:
         pass
 
@@ -610,8 +618,8 @@ def _invoke_function(callable_fn, named, attrs, param_order):
         # Positional values = named INPUTS only; attrs go by keyword (their
         # names match the API params). Folding attrs into pos_vals duplicated
         # them (pos_vals + pos_kwargs) and mis-bound them positionally.
-        pos_vals = [v for k, v in named.items() if k != "self"]
-        pos_kwargs = {k: v for k, v in (attrs or {}).items() if k != "self"}
+        pos_vals = list(named.values())
+        pos_kwargs = dict(attrs or {})
         return callable_fn(*pos_vals, **pos_kwargs)
     except TypeError as exc:
         bind_error = exc
@@ -634,16 +642,16 @@ def _invoke_function(callable_fn, named, attrs, param_order):
         # of the positional zip so an attr never consumes a tensor slot.
         ordered_vals = _ordered_values(param_order, merged, attrs)
         if len(ordered_vals) <= len(param_names):
-            zip_kwargs = {k: v for k, v in (attrs or {}).items() if k != "self"}
+            zip_kwargs = dict(attrs or {})
             return callable_fn(**dict(zip(param_names, ordered_vals), **zip_kwargs))
-    vals = [v for k, v in named.items() if k != "self"]
+    vals = list(named.values())
     if len(vals) > len(param_names):
         raise TypeError(
             f"{getattr(callable_fn, '__name__', callable_fn)} expects "
             f"{len(param_names)} params {param_names}, "
             f"got {len(vals)} inputs {list(named.keys())}"
         ) from bind_error
-    zip_kwargs = {k: v for k, v in (attrs or {}).items() if k != "self"}
+    zip_kwargs = dict(attrs or {})
     return callable_fn(**dict(zip(param_names, vals), **zip_kwargs))
 
 
