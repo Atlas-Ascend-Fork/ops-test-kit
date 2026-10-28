@@ -15,9 +15,14 @@
 - 执行协议：数据通道 os.pipe()，读线程 _drain_pipe（64KB 管道缓冲防死锁），
   逐输出 [8B num_outputs][8B byte_count][data]*；stdout/stderr 留给 GE
   运行时日志（不与数据混流），Popen.communicate() 并行收两端。
-- dl=1 时 run_time 轮：每轮重写输入 bin（防图算子原地写污染，Kernel
-  inplace 逐轮恢复的同构防御）；--clear-ub/-l1/-l0 时轮间由父进程 RTS
-  helper kernel 清（C++ 子进程执行中不可介入，语义等价"每轮执行前清"）。
+- run_time 轮（--run 透传，默认 3，与 kernel/aclnn 同口径）：每轮重写输入 bin
+  （防图算子原地写污染，Kernel inplace 逐轮恢复的同构防御）；--clear-ub/-l1/
+  -l0 时轮间由父进程 RTS helper kernel 清（C++ 子进程执行中不可介入，语义等价
+  "每轮执行前清"）。
+- perf 整批结束后聚合（_collect_round_perf）：本次运行新增的 PROF 目录按目录
+  名内嵌时间戳升序，剔除时间戳最早的首轮（图编译/装载冷启动，与 kernel/aclnn
+  首轮剔除同口径），剩余轮逐目录 Task Duration median 入样后跨轮 median；
+  run=1 单轮冷启动口径；差集捕获不足总轮数时跳过剔除防误剔有效轮。
 """
 
 __all__ = ["GraphExecPlan", "GraphExecResult", "execute_graph"]
@@ -71,7 +76,7 @@ class GraphExecPlan:
 
 @dataclass
 class GraphExecResult:
-    """图执行段产出：最后一轮输出 + 确定性状态 + 设备耗时（µs）。"""
+    """图执行段产出：最后一轮输出 + 确定性状态 + 设备耗时（µs，跨轮 median）。"""
 
     outputs: List[np.ndarray] = field(default_factory=list)
     det_status: Optional[str] = None
@@ -81,8 +86,13 @@ class GraphExecResult:
 def execute_graph(
     testcase: GeirTestcase, dev_id: int, switches, plan: GraphExecPlan, pre_compare=None
 ) -> GraphExecResult:
-    """逐轮执行编译出的 C++ 图测试程序（dl=1 时 run_time 轮）。
+    """逐轮经常驻 serve 子进程执行图（--run 透传）。
 
+    轮数语义：与 kernel/aclnn 同口径——执行 run_time 轮，首个（图编译/装载
+    冷启动）不进性能窗口，剩余 run_time-1 轮为有效样本；run=1 单轮冷启动口径
+    （唯一一轮计入）。
+    perf 采集在轮循环整体结束后统一完成（_collect_round_perf）：本次运行新增
+    PROF 目录按时间戳排序、剔除最早一轮后聚合，首轮识别不依赖循环序号。
     pre_compare（双消费点之二）：dl=1 时逐轮作为确定性校验的规范化阶段——
     双半边签名（outputs + goldens），hash 只用 outputs 半边；GEIR 变换在轮间
     Python 侧，天然在 C++ msprof 采集进程之外（零窗口约束）。
@@ -91,21 +101,20 @@ def execute_graph(
     _write_all_input_bins(testcase.input_arrays, plan.input_prefix)
     testcase.original_input_arrays = None
     deterministic = getattr(switches, "deterministic_level", 0) == 1
-    run_count = switches.run_time if deterministic else 1
+    run_count = switches.run_time
     md5_list = []
+    prof_before = _snapshot_prof_entries(plan.prof_path)  # 本次运行前快照（整批一次）
     try:
         for run_idx in range(run_count):
             clear_device_state(switches)  # 轮间父进程 RTS 清（子进程执行中不可介入）
             if run_idx > 0:
                 _write_all_input_bins(testcase.input_arrays, plan.input_prefix)  # 防图算子原地写污染
-            outputs, perf_us = _run_once_serve(testcase, dev_id, switches, plan)
-            result.outputs = outputs
-            if plan.prof_path:
-                result.device_perf_us = perf_us
+            result.outputs = _run_once_serve(testcase, dev_id, switches, plan)
             if deterministic:
-                md5_list.append(_det_round_hash(testcase, outputs, testcase.golden_arrays, pre_compare))
+                md5_list.append(_det_round_hash(testcase, result.outputs, testcase.golden_arrays, pre_compare))
     finally:
         _cleanup_bins(plan.input_prefix)
+    result.device_perf_us = _collect_round_perf(plan, prof_before, run_count, testcase.testcase_name)
     result.det_status = _det_status(md5_list, deterministic, testcase.testcase_name)
     return result
 
@@ -233,12 +242,15 @@ def _close_geir_serve():
 atexit.register(_close_geir_serve)
 
 
-def _run_once_serve(testcase, dev_id: int, switches, plan: GraphExecPlan) -> tuple:
-    """常驻模式单轮：prof 目录差集逻辑与一次性模式一致。"""
-    prof_before = _snapshot_prof_entries(plan.prof_path)
+def _run_once_serve(testcase, dev_id: int, switches, plan: GraphExecPlan) -> list:
+    """常驻模式单轮：喂一行 config，读一例完整帧。
+
+    perf 不在本轮解析——轮循环整体结束后由 _collect_round_perf 按目录
+    时间戳统一聚合，首轮识别与循环序号解耦。
+    """
     serve = _serve_instance(plan, dev_id)
     try:
-        outputs = serve.run_case(testcase, plan, switches)
+        return serve.run_case(testcase, plan, switches)
     except RuntimeError as e:
         if not str(e).startswith(_SERVE_CASE_ERROR):
             _close_geir_serve()
@@ -246,9 +258,6 @@ def _run_once_serve(testcase, dev_id: int, switches, plan: GraphExecPlan) -> tup
     except Exception:
         _close_geir_serve()
         raise
-    new_profs = _new_prof_dirs(plan.prof_path, prof_before)
-    device_perf_us = _parse_msprof_task_duration(new_profs) if plan.prof_path else None
-    return outputs, device_perf_us
 
 
 def _snapshot_prof_entries(prof_path: str) -> frozenset:
@@ -267,6 +276,70 @@ def _new_prof_dirs(prof_path: str, before: frozenset) -> list:
         return []
     current = {entry for entry in os.listdir(prof_path) if os.path.isdir(os.path.join(prof_path, entry))}
     return [os.path.join(prof_path, entry) for entry in sorted(current - before)]
+
+
+def _prof_dir_timestamp(prof_dir: str) -> Optional[str]:
+    """PROF_000001_<YYYYMMDDHHMMSSmmm>_<pid+rand> 目录名内嵌时间戳；无法解析返回 None。"""
+    parts = os.path.basename(prof_dir).split("_")
+    if len(parts) >= 4 and len(parts[2]) >= 14 and parts[2].isdigit():
+        return parts[2]
+    return None
+
+
+def _collect_round_perf(plan: GraphExecPlan, prof_before: frozenset, run_count: int, case_name: str):
+    """整批运行后的性能聚合：本次新增 PROF 目录按时间戳升序，剔除最早一轮。
+
+    run_count 为总执行轮数（execute_graph 传入 run_time，与 kernel/aclnn 同
+    口径——首轮执行但首轮数据不进性能窗口）：
+    - run_count>1：时间戳最早的目录即首轮产物（图编译/装载冷启动），不进
+      性能窗口，剩余 run_count-1 轮为有效样本；
+    - run_count=1：唯一一轮计入（单轮冷启动口径）；
+    - 差集捕获目录数不足 run_count 时跳过剔除——误剔有效轮的风险优先于
+      口径完整，同时告警暴露 PROF 目录缺失；
+    - 时间戳不可解析时回退目录名序（PROF 序号前缀为 msprof 进程内单调）；
+    - 逐目录 Task Duration median 入样（op_summary 优先/task_time 兜底，见
+      perf_parse），跨轮 median 聚合；无有效样本返回 None。
+    """
+    if not plan.prof_path:
+        return None
+    new_dirs = _new_prof_dirs(plan.prof_path, prof_before)
+    if not new_dirs:
+        return None
+    keys = [_prof_dir_timestamp(prof_dir) for prof_dir in new_dirs]
+    if all(keys):
+        ordered = [prof_dir for _, prof_dir in sorted(zip(keys, new_dirs))]
+    else:
+        logging.warning("[%s] GEIR perf: PROF dir name without timestamp, fallback to name order", case_name)
+        ordered = new_dirs
+    if len(ordered) < run_count:
+        logging.warning(
+            "[%s] GEIR perf: %s/%s rounds' PROF dirs captured; first-round exclusion skipped",
+            case_name,
+            len(ordered),
+            run_count,
+        )
+        included = ordered
+    elif run_count > 1:
+        included = ordered[1:]
+    else:
+        included = ordered
+    samples = []
+    for prof_dir in included:
+        value = _parse_msprof_task_duration([prof_dir])
+        if value is not None:
+            samples.append(value)
+    if not samples:
+        return None
+    median_us = round(float(np.median(samples)), 3)
+    logging.info(
+        "[%s] GEIR device perf: rounds=%s, included=%s, samples=%s, median=%.3f us",
+        case_name,
+        run_count,
+        len(included),
+        samples,
+        median_us,
+    )
+    return median_us
 
 
 def _write_input_bin(arr, path):

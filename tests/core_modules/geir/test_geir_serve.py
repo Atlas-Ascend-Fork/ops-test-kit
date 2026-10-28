@@ -63,9 +63,8 @@ def test_run_once_serve_success(monkeypatch):
     serve = types.SimpleNamespace(run_case=lambda *_: ["output"])
     monkeypatch.setattr(geir_execute, "_serve_instance", lambda *_: serve)
     monkeypatch.setattr(geir_execute, "_close_geir_serve", lambda: pytest.fail("must not close"))
-    outputs, perf_us = geir_execute._run_once_serve(_testcase(), 0, types.SimpleNamespace(proc_timeout=1), _plan())
+    outputs = geir_execute._run_once_serve(_testcase(), 0, types.SimpleNamespace(proc_timeout=1), _plan())
     assert outputs == ["output"]
-    assert perf_us is None
 
 
 @pytest.mark.parametrize(

@@ -129,18 +129,20 @@ python3 -m ttk geir -i add.csv -b
 GEIR 模式默认会采集Profiling性能数据：
 
 ```shell
-# 默认执行（含Profiling，每用例图执行 1 次）
+# 默认执行（含Profiling，每用例图执行 --run 轮，默认 3 轮，首轮不进性能窗口）
 python3 -m ttk geir -i add.csv
 
-# 设置图执行轮数（仅在 --dl 1 确定性校验下生效，默认 3 轮）
-python3 -m ttk geir -i add.csv --run=5 --dl=1
+# 设置图执行轮数（与 kernel/aclnn 同口径：run>1 时首轮不进性能窗口，
+# 其余 run-1 轮跨轮取 median；--run 1 采单次冷启动；--dl 1 时多轮同时
+# 用于 MD5 确定性校验）
+python3 -m ttk geir -i add.csv --run=5
 ```
 
 ## 性能相关参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--run` | 图执行轮数，仅在 `--dl 1`（确定性校验）时生效；默认模式下每用例执行 1 次 | 3 |
+| `--run` | 图执行轮数（与 kernel/aclnn 同口径）：`--run > 1` 时首轮（图编译/装载冷启动）不进性能窗口，其余 `--run - 1` 轮 Task Duration 跨轮取 median；`--run 1` 采单次冷启动；`--dl 1`（确定性校验）时多轮兼做轮间 MD5 一致性检查 | 3 |
 | `--task-prof` | 任务级 Profiling 开关 | 开启 |
 
 # 多卡并行

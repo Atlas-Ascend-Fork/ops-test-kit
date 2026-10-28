@@ -9,12 +9,16 @@
 # ----------------------------------------------------------------------------
 """GEIR worker/execute 单元测试。
 
-覆盖：dl=1 确定性状态判定（_det_status）、逐模式结果合并（_merge_mode_result
+覆盖：dl=1 确定性状态判定（_det_status）、execute_graph 轮数编排（--run 直达
+serve 轮数，与 kernel/aclnn 同口径）、_collect_round_perf 时间戳聚合（最早目
+录剔除/捕获不足保护/差集隔离历史目录）、逐模式结果合并（_merge_mode_result
 / _absorb_fields 的 cst_/dyn_ 槽映射与吸收语义）。
 """
 
 import logging
+import os
 import types
+from contextlib import ExitStack
 from unittest import mock
 
 import numpy as np
@@ -232,6 +236,188 @@ class TestDetRoundHash:
         assert h1 != geir_execute._md5_of(outputs)  # 规范化生效（raw 序不同）
         assert h1 == geir_execute._md5_of([np.sort(outputs[0])])  # hash = 规范化后的 outputs 半边
         assert list(outputs[0]) == [3.0, 1.0, 2.0]  # 浅拷贝隔离：原 outputs 保持 raw（比对侧自行规范化）
+
+
+class TestExecuteGraphRunCount:
+    """execute_graph 轮数编排：--run 即执行轮数（与 kernel/aclnn 同口径），perf 走聚合。"""
+
+    @staticmethod
+    def _switches(run_time, dl=0):
+        return types.SimpleNamespace(run_time=run_time, deterministic_level=dl)
+
+    @staticmethod
+    def _case():
+        arr = np.ones(2, dtype=np.float32)
+        return types.SimpleNamespace(
+            testcase_name="tc", input_arrays=[arr], golden_arrays=[arr.copy()], original_input_arrays=None
+        )
+
+    @staticmethod
+    def _plan(tmp_path, prof=True):
+        return geir_execute.GraphExecPlan(
+            binary="bin",
+            config_path="cfg",
+            build_dir=str(tmp_path),
+            prof_path=str(tmp_path / "prof") if prof else "",
+            input_prefix=str(tmp_path / "in"),
+        )
+
+    def _execute(self, tmp_path, switches, perf_value=None, prof=True):
+        """mock serve 单轮/输入落盘/轮间清态/整批 perf 聚合，仅保留轮编排逻辑。"""
+        plan = self._plan(tmp_path, prof=prof)
+        testcase = self._case()
+        state = {"rounds": 0, "collect": None}
+
+        def _fake_run_once_serve(tc, dev_id, sw, pl):
+            state["rounds"] += 1
+            return [np.ones(2, dtype=np.float32)]
+
+        def _fake_collect(pl, before, run_count, case_name):
+            state["collect"] = (run_count, case_name)
+            return perf_value
+
+        with ExitStack() as stack:
+            write = stack.enter_context(mock.patch.object(geir_execute, "_write_all_input_bins"))
+            stack.enter_context(mock.patch.object(geir_execute, "clear_device_state"))
+            stack.enter_context(mock.patch.object(geir_execute, "_cleanup_bins"))
+            stack.enter_context(mock.patch.object(geir_execute, "_run_once_serve", side_effect=_fake_run_once_serve))
+            stack.enter_context(mock.patch.object(geir_execute, "_collect_round_perf", side_effect=_fake_collect))
+            result = geir_execute.execute_graph(testcase, 0, switches, plan)
+        return result, state["rounds"], write, state["collect"]
+
+    def test_run_time_without_dl_runs_all_rounds(self, tmp_path):
+        """dl=0：--run 3 → 执行 3 轮（跑 3 算 2，剔除发生在聚合段）。"""
+        result, rounds, _, collect = self._execute(tmp_path, self._switches(3, dl=0), perf_value=25.0)
+        assert rounds == 3
+        assert result.device_perf_us == 25.0
+        assert collect == (3, "tc")
+
+    def test_run2_executes_two_rounds(self, tmp_path):
+        """--run 2：执行 2 轮（跑 2 算 1），run_count 透传聚合。"""
+        result, rounds, _, collect = self._execute(tmp_path, self._switches(2), perf_value=20.0)
+        assert rounds == 2
+        assert collect == (2, "tc")
+        assert result.device_perf_us == 20.0
+
+    def test_single_round_cold_start(self, tmp_path):
+        """--run 1：单轮执行，冷启动口径（唯一一轮计入）。"""
+        result, rounds, _, collect = self._execute(tmp_path, self._switches(1), perf_value=10.0)
+        assert rounds == 1
+        assert collect == (1, "tc")
+        assert result.device_perf_us == 10.0
+
+    def test_prof_off_same_rounds(self, tmp_path):
+        """perf 关：执行轮数不变（--run 3 → 3 轮），perf 聚合返回 None。"""
+        result, rounds, _, collect = self._execute(tmp_path, self._switches(3), prof=False)
+        assert rounds == 3
+        assert collect == (3, "tc")
+        assert result.device_perf_us is None  # prof_path 空 → 聚合返回 None
+
+    def test_dl1_collects_round_md5(self, tmp_path):
+        """dl=1：全部轮（含被剔除的首轮）都做 MD5 校验，一致 → PASS。"""
+        result, rounds, _, _ = self._execute(tmp_path, self._switches(2, dl=1))
+        assert rounds == 2
+        assert result.det_status == "PASS"
+
+    def test_inputs_rewritten_between_rounds(self, tmp_path):
+        """轮间重写输入 bin：落盘次数 = 首轮前 1 次 + 轮间 总轮数-1 次。"""
+        _, rounds, write, _ = self._execute(tmp_path, self._switches(3))
+        assert rounds == 3
+        assert write.call_count == 3
+
+    def test_perf_none_passthrough(self, tmp_path):
+        """perf 聚合返回 None 时 device_perf_us 保持 None。"""
+        result, _, _, _ = self._execute(tmp_path, self._switches(2), perf_value=None)
+        assert result.device_perf_us is None
+
+
+class TestCollectRoundProf:
+    """_collect_round_perf：时间戳升序聚合，最早目录（首轮冷启动）剔除。"""
+
+    @staticmethod
+    def _plan(prof_root):
+        return geir_execute.GraphExecPlan(
+            binary="bin", config_path="cfg", build_dir=".", prof_path=str(prof_root), input_prefix="prefix"
+        )
+
+    @staticmethod
+    def _mk_prof(root, seq, ts):
+        path = root / f"PROF_{seq:06d}_{ts}_0000000TESTCASE"
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    def _collect(self, tmp_path, rounds_spec, run_count, old_count=0):
+        """rounds_spec: [(seq, ts, value), ...] 本轮各目录；返回 (聚合值, 被解析目录列表)。"""
+        root = tmp_path / "prof"
+        root.mkdir()
+        for i in range(old_count):
+            self._mk_prof(root, i + 1, f"2020010100000000{i}")
+        before = geir_execute._snapshot_prof_entries(str(root))
+        value_of = {}
+        for seq, ts, value in rounds_spec:
+            value_of[self._mk_prof(root, seq, ts)] = value
+        parsed = []
+
+        def _fake_parse(dirs):
+            parsed.append(dirs[0])
+            return value_of[dirs[0]]
+
+        with mock.patch.object(geir_execute, "_parse_msprof_task_duration", side_effect=_fake_parse):
+            result = geir_execute._collect_round_perf(self._plan(root), before, run_count, "tc")
+        return result, parsed
+
+    def test_earliest_timestamp_excluded(self, tmp_path):
+        """run>1：剔除按内嵌时间戳（非目录名序号）——最早 ts 的目录不进窗口。"""
+        rounds = [
+            (1, "20261027052500000", 10.0),  # 序号 1 但时间戳最晚 → 保留
+            (2, "20261027052300000", 30.0),  # 序号 2 时间戳最早 → 首轮，剔除
+            (3, "20261027052400000", 20.0),
+        ]
+        result, parsed = self._collect(tmp_path, rounds, run_count=3)
+        assert result == 15.0  # median(10, 20) —— 剔除的是时间戳最早的 30，非名字序最前的 10
+        parsed_names = {os.path.basename(p) for p in parsed}
+        assert not any(n.startswith("PROF_000002_") for n in parsed_names)
+
+    def test_single_round_kept(self, tmp_path):
+        """run=1：唯一一轮计入（冷启动口径）。"""
+        result, parsed = self._collect(tmp_path, [(1, "20261027052300000", 10.0)], run_count=1)
+        assert result == 10.0
+        assert len(parsed) == 1
+
+    def test_missing_dirs_skip_exclusion(self, tmp_path, caplog):
+        """差集捕获不足 run_count：跳过剔除并告警（防误剔稳态轮）。"""
+        rounds = [(1, "20261027052300000", 10.0), (2, "20261027052400000", 30.0)]
+        with caplog.at_level(logging.WARNING):
+            result, parsed = self._collect(tmp_path, rounds, run_count=3)
+        assert result == 20.0  # 两轮全计入
+        assert len(parsed) == 2
+        assert any("exclusion skipped" in r.getMessage() for r in caplog.records)
+
+    def test_old_dirs_excluded_by_diff(self, tmp_path):
+        """运行前已有的历史 PROF 目录不参与本次聚合。"""
+        rounds = [(2, "20261027052300000", 10.0), (3, "20261027052400000", 30.0)]
+        result, parsed = self._collect(tmp_path, rounds, run_count=2, old_count=1)
+        assert result == 30.0  # 新目录中较早者剔除，历史目录不在差集内
+        assert len(parsed) == 1
+
+    def test_none_value_round_excluded(self, tmp_path):
+        """入窗目录无 prof 数据（None）不入样，有效样本单独聚合。"""
+        rounds = [(1, "20261027052300000", 10.0), (2, "20261027052400000", None), (3, "20261027052500000", 30.0)]
+        result, _ = self._collect(tmp_path, rounds, run_count=3)
+        assert result == 30.0  # 首轮剔除 + None 轮跳过 → 仅剩 30
+
+    def test_all_none_returns_none(self, tmp_path):
+        """入窗轮全无 prof 数据：device_perf_us 保持 None。"""
+        rounds = [(1, "20261027052300000", None), (2, "20261027052400000", None)]
+        result, _ = self._collect(tmp_path, rounds, run_count=2)
+        assert result is None
+
+    def test_empty_prof_path_returns_none(self, tmp_path):
+        """task-prof 关闭（prof_path 空）时不采集。"""
+        plan = geir_execute.GraphExecPlan(
+            binary="bin", config_path="cfg", build_dir=".", prof_path="", input_prefix="prefix"
+        )
+        assert geir_execute._collect_round_perf(plan, frozenset(), 1, "tc") is None
 
 
 class TestReconcileInputs:

@@ -14,7 +14,7 @@ TTK 支持采集算子在 NPU 上的执行性能。通过 `--warmup`、`--run`�
 
 | 模式 | 参数 | 语义 |
 |------|------|------|
-| 稳态性能（默认） | `--warmup true --run 3` | 预热后跑 3 次（首轮是否计入随通路：kernel/aclnn 首轮不进统计、e2e 全部计入，见下文），反映算子稳态开销 |
+| 稳态性能（默认） | `--warmup true --run 3` | 预热后跑 3 次（kernel/aclnn/geir 首轮均不进统计、e2e 全部计入，见下文），反映算子稳态开销 |
 | 冷启动性能 | `--warmup false --run 1` | 不预热，只跑 1 次，反映首次执行的全部开销 |
 
 ```shell
@@ -49,20 +49,20 @@ python3 -m ttk e2e -i cases.csv --warmup false --run 1 -o cold.csv
 - **warmup**：同 kernel，launch 空 helper kernel 1 次，仅预热硬件层
 - **采集**：`--run > 1` 时 `start_step=1` 跳过首次，采后 N-1 次取平均。首次执行需分配 workspace 等 HBM 内存（`aclnnAddGetWorkspaceSize` 首次耗时远高于后续），属于一次性内存申请开销，不计入稳态性能；`--run 1` 时 `start_step=0` 采那 1 次
 - **冷启动**：`--warmup false --run 1`，不预热且只跑 1 次，采到完整冷启动开销
-- **注意**：`--warmup false --run 3` 仍会跳首次（`start_step=1`），因为 `run_time > 1`；若要采首次需用 `--run 1`
+- **注意**：`--warmup false --run 3` 时预热轮仍不进窗（`start_step=1`）；若要采首轮需用 `--run 1`
 
 ### geir（GE 图编译执行）
 
-- **warmup**：无
-- **采集**：非确定性模式（默认）只跑 1 次子进程，取 `median`；确定性模式（`--dl 1`）跑 `--run` 次做 MD5 校验
-- **冷启动**：geir 每次都是全新子进程执行编译好的二进制，冷热启动等价，`--warmup` 开关无效
+- **warmup**：无（`--warmup` 开关不改变轮数；预热轮即首轮，见下）
+- **采集**：执行 `--run` 轮（与 kernel/aclnn 同口径），结束后统一解析本次新增的 PROF 目录（按目录名内嵌时间戳升序，与执行轮次一一对应）；时间戳最早的**首轮**（图编译/装载冷启动）不进窗口，其余 `--run - 1` 轮 Task Duration 跨轮取 `median`；`--run 1` 时 `start_step` 语义等价——唯一一轮计入（冷启动口径）；`--dl 1` 时全部轮同时做 MD5 确定性校验
+- **冷启动**：serve 常驻子进程整批一次 GEInitialize；每用例每模式时间戳最早的 PROF 目录即首轮冷启动原始数据（TTK 未对其执行 msprof 导出，需要时用 msprof 自行导出 `task_time`/`op_summary` 后读取）
 
 ## 采集次数与统计方式
 
 | 通路 | 采集工具 | 读取文件 | 读取列 | 统计方式 | 实际采集次数 |
 |------|---------|---------|--------|---------|-------------|
 | kernel | CANN msprof | `op_summary_*.csv` / `task_time_*.csv` | `Task Duration(us)` / `task_time(us)` | `median`（中位数） | `--run - 1` 次（`--run > 1`，首轮不进窗）；`1` 次（`--run = 1`） |
-| geir | CANN msprof（子进程） | `op_summary_*.csv` / `task_time_*.csv` | `Task Duration(us)` / `task_time(us)` | `median`（中位数） | `1` 次（默认）；`--run` 次（`--dl 1`） |
+| geir | CANN msprof（serve 子进程） | `op_summary_*.csv` / `task_time_*.csv` | `Task Duration(us)` / `task_time(us)` | `median`（轮内任务级 + 跨轮） | `--run - 1` 次（`--run > 1`，首轮不进窗）；`1` 次（`--run = 1`） |
 | aclnn | CANN msprof | `api_statistic_*.csv` / `op_statistic_*.csv` | `Avg(us)` / `Avg Time(us)` | msprof 内部按采集次数取平均 | `--run - 1` 次（`--run > 1`）；`1` 次（`--run = 1`） |
 | e2e（torch） | torch_npu.profiler | `kernel_details.csv` | `Duration(us)` | 累加后 `/ run_count`（平均值） | `--run` 次 |
 | e2e（tf） | CANN msprof | `op_statistic_*.csv` | `Avg Time(us)` | msprof 内部按采集次数取平均，求和所有 op | `--run` 次 |
