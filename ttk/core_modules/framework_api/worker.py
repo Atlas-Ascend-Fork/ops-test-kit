@@ -107,6 +107,26 @@ def _should_run_eager(switches) -> bool:
     return bool(getattr(switches, "eager_enabled", True))
 
 
+def _mirror_cst_failure_on_dedup(testcase, switches, return_struct, error_text):
+    """失败路径镜像：eager 阶段异常时若双开去重成立，graph_cst 列写入同源错误。
+
+    镜像块（``_execute_phases``）位于 eager 执行之后，异常传播先于镜像赋值 →
+    失败用例 GRAPH CST 列留空，偏离「两列恒同值」。此处按
+    同一判据（``eager_graph_alias()=='cst'`` + 双开）补镜像：错误文本与
+    eager 列同一字符串（调用方传同一份 ``_attach_plog_errors`` 产物——镜像内
+    二次附加会因 plog 逐次累积而异文），perf 与输出无值可比对（保持空）。
+    判据解析自身失败不得掩盖原异常路径。
+    """
+    try:
+        if not (_should_run_eager(switches) and switches.cst_switches.enabled):
+            return
+        alias_fn = getattr(adapter_for_testcase(testcase), "eager_graph_alias", None)
+        if callable(alias_fn) and alias_fn() == "cst":
+            return_struct.graph_cst_precision = error_text
+    except Exception:  # noqa: BLE001  # 镜像属尽力而为：任何失败不得掩盖原异常
+        logging.debug("cst failure mirror skipped: %s", testcase.testcase_name, exc_info=True)
+
+
 def _print_get_shape(arr):
     return arr.shape if hasattr(arr, "shape") else arr
 
@@ -311,8 +331,13 @@ def run(testcase, device_grant_events, device_granted_indices, dev_id, is_multi_
             )
     except Exception as e:
         logging.error(f"[{testcase.testcase_name}] Error: {e}", exc_info=True)
-        return_struct.eager_precision = _attach_plog_errors(str(e))
+        # 两列同串：eager 列与镜像列共用同一份 _attach_plog_errors 产物（单次
+        # plog 读取——镜像内二次附加会因 plog 逐次累积而异文；裸 str(e) 的多行
+        # 文本亦违反「CSV 单元格不能带换行」约束）
+        err_text = _attach_plog_errors(str(e))
+        return_struct.eager_precision = err_text
         return_struct.precision_status = "FAIL"
+        _mirror_cst_failure_on_dedup(testcase, switches, return_struct, err_text)
         _profiling_end_print(testcase, return_struct, switches=switches)
 
     return return_struct
@@ -1136,6 +1161,20 @@ def _device_profiling(
         process_ctx.notify_status("OnProfilingPrint")
         _profiling_print(testcase, backend, dev_id, switches)
 
+        # 模式等价去重（adapter 钩子驱动、无框架分支）：onnx 的 eager ≡ 静态图
+        # （om 恒为静态图）——双开（--eager + -c）时单次执行，(nps, perf, det) 镜像刷
+        # EAGER 与 GRAPH CST 两列；镜像必须在三元组齐备的编排点做（perf/det 是
+        # _execute_eager 侧资产，adapter 内 memo 拿不到）。dyn/aclgraph 不去重——
+        # 由 adapter.run_graph 快速失败（空 nps 会落 GRAPH_EXEC_FAILURE，不能静默跳空列）。
+        # getattr 防御：eager_graph_alias 是可选协议（基类默认 None），
+        # duck-typed 测试替身可不携带。
+        eager_alias_fn = getattr(adapter, "eager_graph_alias", None)
+        dedup_cst = (
+            callable(eager_alias_fn)
+            and eager_alias_fn() == "cst"
+            and _should_run_eager(switches)
+            and switches.cst_switches.enabled
+        )
         if _should_run_eager(switches):
             process_ctx.notify_status("OnEagerProfiling")
             result_nps, perf, eager_det_status = _capture_peak_memory(
@@ -1154,6 +1193,10 @@ def _device_profiling(
                 raw_inputs,
                 deterministic_level,
             )
+            if dedup_cst:
+                # 同一份执行结果镜像两列：比对入口对两列独立 evaluate，nps/perf/det
+                # 同源 → 两列恒同值
+                graph_cst_nps, graph_cst_perf, graph_cst_det = result_nps, perf, eager_det_status
         if api.graph_enabled:
             graph_fn = adapter.run_graph
             if getattr(switches, "aclgraph_enabled", False):
@@ -1174,7 +1217,9 @@ def _device_profiling(
                     is_aclgraph=True,
                     deterministic_level=deterministic_level,
                 )
-            if switches.cst_switches.enabled:
+            if switches.cst_switches.enabled and not dedup_cst:
+                # 去重时跳过二次执行（eager 通道已镜像）；notify 亦跳过——本用例
+                # 无独立 cst 执行阶段
                 process_ctx.notify_status("OnGraphCst")
                 graph_cst_nps, graph_cst_perf, graph_cst_det, graph_cst_err = _run_graph_phase(
                     "static",

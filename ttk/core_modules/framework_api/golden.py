@@ -20,6 +20,10 @@ E2E golden 生成。
 设备由调用方经 exec_backend 指定（None = CPU；NPU 后端 = 上板），不读
 golden_mode。
 
+onnx 域（api_name/golden_api 为 onnx.<OpType>）：Priority 1/3 经
+_run_onnx_reference 分发——同一 model_builder 组模 + ReferenceEvaluator
+参照，不走 resolve_api/CPU 直调。
+
 All paths use testcase.get_param_plan() to get consistent arg ordering
 with profiling.py — same plan, same (*args, **kwargs) layout.
 """
@@ -49,6 +53,10 @@ def _get_cpu_backend(framework="torch"):
             from ..common.backend.cpu_tf_backend import CpuTfBackend
 
             _cpu_backend_cache[framework] = CpuTfBackend()
+        elif framework == "onnx":
+            from ..common.backend.onnx_backend import CpuOnnxBackend
+
+            _cpu_backend_cache[framework] = CpuOnnxBackend()
         else:
             from ..common.backend.cpu_torch_backend import CpuTorchBackend
 
@@ -120,6 +128,10 @@ def _golden_from_csv_api(testcase, golden_api, raw_inputs, exec_backend, dev_id)
     """
     if golden_api.lower() == "disable":
         return ["SUPPRESSED"]
+    if detect_framework(golden_api) == "onnx":
+        # onnx golden_api：不走 resolve_api/CPU 直调（onnx.<OpType> 非模块属性，
+        # 必抛 ValueError），直接分发 ReferenceEvaluator
+        return _run_onnx_reference(golden_api, raw_inputs, testcase)
     api_info = testcase.get_api_info() if golden_api == testcase.api_name else FrameworkApiInfoKeeper().get(golden_api)
     if exec_backend is not None and exec_backend.is_npu():
         return _run_api(golden_api, raw_inputs, testcase, exec_backend, dev_id, api_info=api_info)
@@ -129,6 +141,45 @@ def _golden_from_csv_api(testcase, golden_api, raw_inputs, exec_backend, dev_id)
         logging.warning(f"[golden] golden_api {reason}")
         return ["UNSUPPORTED"]
     return _run_api(golden_api, raw_inputs, testcase, cpu_backend, api_info=api_info)
+
+
+def _run_onnx_reference(api_name, raw_inputs, testcase):
+    """onnx golden：ReferenceEvaluator 跑同一 model_builder 产物（与被测同构）。
+
+    - 参数位经 build_positional_args 重建（与被测侧 plan.build_args 同一装配机器；
+      golden_api=onnx.<Op> 时按目标 op 匹配重载）；
+    - 输入 specs 从实际数组重建（dtype 随数组走：Promote 时 raw_inputs 已被
+      _promote_raw_inputs 抬精度，ReferenceEvaluator 以 fp32/fp64 计算高精度真值）；
+    - attrs 从 testcase.attributes（kw-only 装配，与被测侧 kwargs 同源）；
+    - ReferenceEvaluator 不支持的算子/dtype：异常上抛 → Invoke.golden 既有
+      GOLDEN_FAILURE 占位（不拖累执行与 perf）。
+    """
+    import numpy as np
+
+    from .api_param import build_positional_args
+    from .onnx.model_builder import build_input_specs, build_model_proto
+
+    op_type = api_name[len("onnx.") :]
+    dist = testcase.tensor_list_dist
+    nested = nest_by_distribution(list(raw_inputs), dist) if dist else list(raw_inputs)
+    golden_info = FrameworkApiInfoKeeper().get(api_name)
+    if golden_info is None:
+        raise RuntimeError(f"onnx golden: cannot parse {api_name} (schema not in the environment registry)")
+    args, kwargs, _ = build_positional_args(
+        api_name,
+        nested,
+        testcase.attributes or {},
+        testcase.output_tensor_indexes,
+        tensor_distribution=[d > 0 for d in dist] if dist else None,
+        api_info=golden_info,
+    )
+    input_specs, host_inputs = build_input_specs(golden_info, args)
+    model = build_model_proto(op_type, input_specs, kwargs)
+    from onnx.reference import ReferenceEvaluator
+
+    feed = {name: np.ascontiguousarray(arr) for (name, _shape, _dtype), arr in zip(input_specs, host_inputs)}
+    outputs = ReferenceEvaluator(model).run(None, feed)
+    return [np.asarray(o) for o in outputs]
 
 
 def generate_golden(testcase, raw_inputs, plugin_path=None, switches=None, backend="cpu", exec_backend=None, dev_id=0):
@@ -170,6 +221,12 @@ def generate_golden(testcase, raw_inputs, plugin_path=None, switches=None, backe
         # NPU 时插件收 device 串（输入由框架上板），CPU 时 device=None
         device = f"npu:{dev_id}" if run_on_npu else None
         return _call_plugin_with_plan(testcase, func, switches, backend, device=device)
+
+    # onnx 域：无独立 NPU/CPU 直调语义——ReferenceEvaluator 即 CPU 参照
+    # （resolve_api 解析 onnx.<OpType> 必抛 ValueError；om 执行即被测腿本身，
+    # 无独立 NPU golden 可言），插件未命中即分发
+    if detect_framework(api_name) == "onnx":
+        return _run_onnx_reference(api_name, raw_inputs, testcase)
 
     # --- Priority 2.5: run_on_npu → same API on NPU ---
     if run_on_npu:

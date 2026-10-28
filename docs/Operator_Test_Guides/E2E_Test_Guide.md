@@ -112,6 +112,10 @@ python3 -m ttk info
 
 确认设备信息正常后再执行测试。
 
+## onnx 测试环境准备
+
+onnx 域（`api_name` 为 `onnx.<OpType>`）无需 torch/tensorflow/npu_device：被测腿经 atc 离线编译 .om 后由 aclmdl 执行，Golden 用 onnx ReferenceEvaluator。环境准备（onnx ≥ 1.13 且 opset ≤ 18 的版本约束、CANN atc）、用例约定（输出槽/属性/Variadic）、模式等价与失败码详见 [ONNX算子测试指南](./ONNX_Test_Guide.md)。
+
 # 测试用例编写
 
 CSV 字段说明详见 [E2E 用例编写](./E2E_Case_Writing.md)。
@@ -133,9 +137,9 @@ E2E 模式由统一的 Backend 抽象层（`ttk.core_modules.common.backend`）�
 
 | 后端 | 依赖 |
 |------|------|
-| NPU | torch 用例：torch + torch_npu；TF 用例：tensorflow + npu_device |
+| NPU | torch 用例：torch + torch_npu；TF 用例：tensorflow + npu_device；onnx 用例：CANN（atc + libascendcl） |
 | NPUSim | `--backend npusim` 仿真执行（camodel，详见 [NPUSim 仿真测试](../NPUSim/npusim_usage.md)） |
-| CPU | torch 用例：torch；TF 用例：tensorflow（`--backend cpu` 强制） |
+| CPU | torch 用例：torch；TF 用例：tensorflow（`--backend cpu` 强制）；onnx 用例：仅 Golden/输入生成（设备执行需 NPU） |
 
 ## 执行命令
 

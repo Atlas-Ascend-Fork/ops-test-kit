@@ -1,17 +1,18 @@
 # E2E 通路示例用例
 
-按框架分文件：`tf_cases.csv`（TensorFlow，13 例）与 `torch_cases.csv`（torch/torch_npu，24 例），每条用例的 `remark` 列即测试项。
+按框架分文件：`tf_cases.csv`（TensorFlow，13 例）、`torch_cases.csv`（torch/torch_npu，24 例）与 `onnx_cases.csv`（ONNX，6 例），每条用例的 `remark` 列即测试项。
 
 > 前沿 dtype/算子用例（fp8 族、`causal_conv1d_fn_basic`、`add_bool` 等）的通过依赖本地 CANN 版本的算子支持面，不支持时的预期错误签名见上级 [README 的 CANN 版本配套说明](../README.md)。
 
 ```bash
 E=examples/case_store/e2e
-# TF 全量（13 例）；torch 全量（24 例）
+# TF 全量（13 例）；torch 全量（24 例）；onnx 全量（6 例）
 python3 -m ttk e2e -i $E/tf_cases.csv
 python3 -m ttk e2e -i $E/torch_cases.csv
+python3 -m ttk e2e -i $E/onnx_cases.csv
 ```
 
-> 同一表内不得混用 torch 与 tf API（框架检测会拒绝）；TF 进程预载 tensorflow、torch 进程预载 torch 系模块，两者互斥。受限内存容器（如 32GB cgroup）下 TF 用例建议 `--pc 2`：每个 TF worker 约 3GB host 内存，默认 `--pc 4` 可能触发 host 内存闸门等待。
+> 同一表内不得混用不同框架 API（torch / tf / onnx，框架检测会拒绝）；TF 进程预载 tensorflow、torch 进程预载 torch 系模块、onnx 进程预载 numpy + onnx，三者互斥。受限内存容器（如 32GB cgroup）下 TF 用例建议 `--pc 2`：每个 TF worker 约 3GB host 内存，默认 `--pc 4` 可能触发 host 内存闸门等待。
 
 ## 基础精度链路（add / abs / relu）
 
@@ -59,6 +60,36 @@ python3 -m ttk e2e -i $E/tf_cases.csv -t tf_scatter_div_stateful,tf_dequantize_s
 python3 -m ttk e2e -i $E/torch_cases.csv -t npu_gelu_f16,causal_conv1d_fn_basic
 ```
 
-dtype 覆盖：float16 / float32 / float64 / bfloat16 / int8 / int16 / int32 / int64 / uint8 / bool / complex64 / float8_e5m2 / float8_e4m3fn / float8_e8m0fnu（torch）、float16 / float32 / bfloat16 / int32 / quint8（tf）。fp4 / int4 为 torch 存储态 dtype（无计算内核），经 Kernel/GEIR 通路覆盖（`pad_float4` / `avgpool_update_int4`）。
+## ONNX 域（onnx_cases.csv）
+
+CSV 以 `onnx.<OpType>` 声明单算子：TTK 自动组装单算子 ONNX 模型 → atc 离线编译 .om → NPU 经 aclmdl 执行，与 CPU 侧 onnx ReferenceEvaluator 参考实现比对（golden 与被测共用同一 model_builder 产物，同构参照）。参数（输入/属性）来自环境 onnx 包的算子 schema（`onnx.defs`，环境注册表即权威），无多级回退链。
+
+| 用例 | 测试项 |
+|---|---|
+| `onnx_add_f32` | 基础双输入 f32 基线（输出槽声明缺省，返回值自动对账） |
+| `onnx_add_f16` | dtype 覆盖 float16 + 输出槽声明（`flat_output_dtypes` 锚定 golden Promote 抬 fp32 真值） |
+| `onnx_add_broadcast` | 广播语义：4×1×3 与 5×3 输入，输出 4×5×3 由 atc shape inference 推导 |
+| `onnx_concat_i32` | Variadic 输入（TensorList 嵌套）+ 必选属性 axis + 单输出槽（int32 binary_equal） |
+| `onnx_split_f32` | Optional 输入 split 尾部省略（少输入匹配补 None 占位）；3 个 None 槽 = 输出槽声明（Variadic 输出 × num_outputs=3） |
+| `onnx_matmul_bf16` | bf16 精度档 + 输出槽声明（Promote 锚定） |
+
+要点：
+
+- **输出槽**声明在 `tensor_view_shapes` 内（shape 为 `None`，下标进 `output_tensor_indexes`）；非输出位的 `None` 槽 = 省略的 Optional 输入（尾部省略语义）；
+- **属性**即 ONNX 节点属性（`attributes` 列，一律按名传参）；opset 取环境 onnx 包注册表最高（onnx 包须满足 `onnx.defs.onnx_opset_version() ≤ 18`，与 CANN atc 插件注册上限对齐）；
+- `tensor_formats` / `tensor_storage_shapes` / `tensor_view_strides` / `tensor_view_offsets` 布局列不支持（ND 连续语义），填写报 `ONNX_LAYOUT_UNSUPPORTED`；
+- 模式等价：onnx 的 eager ≡ 静态图（om 恒为静态图），`--eager -c` 双开单次执行、两列同值；`-d` / aclgraph 快速失败（`ONNX_DYNAMIC_GRAPH_UNSUPPORTED` / `ONNX_ACLGRAPH_UNSUPPORTED`）；
+- Optional 输出的算子（MaxPool.Indices / Dropout.mask / GRU 等）边界：atc 拒转声明了 Optional 输出的模型，建模只声明非 Optional 输出（全 Optional 输出算子建模期显式报错）；
+- 数据依赖 shape 的算子（NonZero / TopK 等）在 OmSession 建立时报 `ONNX_DYNAMIC_OUTPUT_UNSUPPORTED`；
+- 环境要求：onnx ≥ 1.13（ReferenceEvaluator）、ml-dtypes（bf16）、CANN atc；perf 为墙钟计时（kernel 明细为空，已知限制）。
+
+```bash
+python3 -m ttk e2e -i $E/onnx_cases.csv            # 仅 eager（默认）
+python3 -m ttk e2e -i $E/onnx_cases.csv --eager -c # 双开：单次执行，EAGER/GRAPH CST 两列同值
+```
+
+通路指南（环境准备/执行链路/失败码/缓存机制）见 [ONNX算子测试指南](../../../docs/Operator_Test_Guides/ONNX_Test_Guide.md)。
+
+dtype 覆盖：float16 / float32 / float64 / bfloat16 / int8 / int16 / int32 / int64 / uint8 / bool / complex64 / float8_e5m2 / float8_e4m3fn / float8_e8m0fnu（torch）、float16 / float32 / bfloat16 / int32 / quint8（tf）、float16 / float32 / bfloat16 / int32（onnx 样例矩阵；TensorProto 全量 dtype 面见 `ttk/utilities/dtypes.py` 的 `ONNX_DTYPE_MAP`）。fp4 / int4 为 torch 存储态 dtype（无计算内核），经 Kernel/GEIR 通路覆盖（`pad_float4` / `avgpool_update_int4`）。
 
 用例编写与命令行细节见 `.claude/skills/ttk-how-write-case/` 与 `ttk-how-run-test`；E2E 字段定义见 [E2E 用例编写](../../../docs/Operator_Test_Guides/E2E_Case_Writing.md)。

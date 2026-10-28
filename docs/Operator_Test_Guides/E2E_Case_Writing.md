@@ -2,7 +2,7 @@
 
 适用于 `python3 -m ttk e2e`，使用 `TestcaseE2e`，共 23 个字段（含[公共字段](../Test_Case_Generation.md#公共字段所有模式通用)；不含 `attributes1`~`attributes9` 扩展列，全量 32 个）。
 
-**参数来源**：E2E用例的参数（张量数量/顺序/dtype、关键字参数等）来自框架API的函数签名。查看PyTorch官方文档或torch_npu扩展文档获取参数定义。
+**参数来源**：E2E用例的参数（张量数量/顺序/dtype、关键字参数等）来自框架API的函数签名。torch / torch_npu 查看官方文档；tf 查看 TensorFlow 文档；onnx 查看环境 onnx 包的算子 schema（`onnx.defs`，环境注册表即权威）。
 
 **API类型**：
 
@@ -12,6 +12,7 @@
 | `torch.nn.functional.relu` | 子模块函数 | 调用子模块中的函数 |
 | `torch.Tensor.relu_` | Tensor方法 | 通过Tensor实例调用（原地操作） |
 | `torch.ops.cann_ops_transformer.causal_conv1d_fn` | torch.ops 自定义算子 | torch extension 包注册的算子 |
+| `onnx.Add` | ONNX 算子 | `onnx.<OpType>` 声明单算子（不带 opset 版本）：TTK 组模 → atc 编译 .om → NPU aclmdl 执行，与 onnx ReferenceEvaluator 比对 |
 
 ## 用例标识
 
@@ -58,7 +59,7 @@
 
 ## 参考用例
 
-`examples/case_store/e2e/` 目录下的示例（按框架分文件：`tf_cases.csv` / `torch_cases.csv`，按测试项分行，`remark` 列注明测试项；清单与运行方式见该目录 README）：
+`examples/case_store/e2e/` 目录下的示例（按框架分文件：`tf_cases.csv` / `torch_cases.csv` / `onnx_cases.csv`，按测试项分行，`remark` 列注明测试项；清单与运行方式见该目录 README）：
 
 | 用例 | 框架 | 验证特性 | 关键列 |
 |------|------|---------|--------|
@@ -80,3 +81,16 @@
 | `torch_cases.csv` — `add_out` | torch | `out=` 输出参数位（CSV 声明输出槽） | `output_tensor_indexes` |
 | `torch_cases.csv` — `npu_gelu_f16` | torch_npu | NPU 专属算子 + `golden_api` 交叉参照（CPU golden 用 `F.gelu`；CPU 环境预期 FAIL-fast） | `golden_api` |
 | `torch_cases.csv` — `causal_conv1d_fn_basic` | torch.ops | `torch.ops` 自定义算子（torch-extension 包注册）+ 整型索引输入混排；`golden_api=disable` 执行验证 | `api_name`、`golden_api` |
+| `onnx_cases.csv` — `onnx_add_f32` / `onnx_add_f16` / `onnx_add_broadcast` | onnx | 基础双输入 f32 基线 / f16 + 输出槽声明（Promote 锚定）/ 广播（输出 shape 由 atc 推导） | `tensor_view_shapes`、`tensor_dtypes`、`output_tensor_indexes` |
+| `onnx_cases.csv` — `onnx_concat_i32` / `onnx_split_f32` / `onnx_matmul_bf16` | onnx | Variadic 输入 + 必选属性 axis / Optional 输入尾部省略 + 3 输出槽声明（Variadic 输出）/ bf16 精度档 | `tensor_view_shapes`（嵌套/None 槽）、`attributes`、`output_tensor_indexes` |
+
+## ONNX 域约定
+
+执行链路、环境约束与失败码详见 [ONNX算子测试指南](./ONNX_Test_Guide.md)。
+
+- **输出槽**：声明在 `tensor_view_shapes` 内（shape 填 `None`，下标进 `output_tensor_indexes`），供对账 / dump / 精度判据（`flat_output_dtypes`）锚定；建模侧输出 shape 由 atc shape inference 推导。非输出位的 `None` 槽 = 省略的 Optional 输入（尾部省略；非尾部省略建模期报错）；
+- **属性**：`attributes` 列即 ONNX 节点属性（一律按名传参，必选属性缺失在建模期显式报错）；含 TENSOR/GRAPH 载荷的属性算子解析期拒绝（`ONNX_ATTR_TYPE_UNSUPPORTED`）；
+- **布局列**（formats/storage_shapes/strides/offsets）不支持（ND 连续语义），填写报 `ONNX_LAYOUT_UNSUPPORTED`；
+- **模式等价**：onnx 的 eager ≡ 静态图（om 恒为静态图），`--eager -c` 双开单次执行、EAGER 与 GRAPH CST 两列同值；`-d` / aclgraph 快速失败；
+- **失败码**：`ATC_NOT_FOUND` / `ATC_COMPILE_FAILED`（atc 原文透传）/ `OM_LOAD_FAILED` / `OM_EXECUTE_FAILED` / `ONNX_DYNAMIC_OUTPUT_UNSUPPORTED`（数据依赖 shape 算子）/ `ONNX_DYNAMIC_GRAPH_UNSUPPORTED`（`-d`）/ `ONNX_ACLGRAPH_UNSUPPORTED`；
+- **环境约束**：onnx 包须满足 `onnx.defs.onnx_opset_version() ≤ 18`（对齐 CANN atc 插件注册上限）；bf16 依赖 ml-dtypes。

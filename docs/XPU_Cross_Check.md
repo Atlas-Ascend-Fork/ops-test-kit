@@ -223,6 +223,9 @@ python3 -m ttk kernel -i cases.csv \
 | Kernel | 支持 | 支持 |
 | ACLNN | 支持 | 支持 |
 | GEIR | 支持 | 支持 |
-| E2E | 支持 | 支持 |
+| E2E（torch/tf 域） | 支持 | 支持 |
+| E2E（onnx 域） | 启动期拒绝（`ONNX_XPU_UNSUPPORTED`） | 启动期拒绝（`ONNX_XPU_UNSUPPORTED`） |
 
 > E2E 模式下，若 `op_name` 为点分 API 路径（如 `torch.add`）且未配置 `third_party`，server 会直接按 dotted 路径解析执行，无需额外 spec。
+>
+> E2E 的 **onnx 域**（`onnx.<OpType>`）不支持三方 XPU 通路：远端按框架 dotted path 分发，无 onnx 解析通道，且 onnx 域 Golden 恒为 ReferenceEvaluator 同构参照——`--golden-mode XPU` / `--xpu-perf` / `--compare cross_check`（含 manual_xpu_binaries 本地回放，首期边界）在启动期整批拒绝；`--dump xpu` 告警跳过。见 [ONNX算子测试指南](./Operator_Test_Guides/ONNX_Test_Guide.md)。

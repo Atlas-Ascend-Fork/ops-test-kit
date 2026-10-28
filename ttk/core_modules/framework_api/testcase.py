@@ -369,18 +369,30 @@ class TestcaseE2e(ApiTestcaseBase):
 
         与 result_to_numpy 的输出顺序对齐（按 output_tensor_indexes 声明序），
         供 unpack_4bit_outputs 等按输出位消费（口径对齐 TestcaseAclnn）。
+
+        None 位回落 CSV 声明 dtype：onnx 域输出槽为 None-shape
+        （shape 由 atc 推断，CSV 槽仅声明 dtype），槽表对 None-shape 槽不物化张量
+        对象 → 槽视图取 None；而 worker._needs_golden_promote 等判据解析以声明
+        输出 dtype 为锚点，声明通道失联会使 golden Promote 静默跳过。声明列经
+        `_flat_decl_by_dist`（与槽表物化 dtypes 列同源）按 flat 位对齐回填。
         """
         flat_dtypes = self.flat_tensor_dtypes
         if not flat_dtypes or not self.output_tensor_indexes:
             return ()
         dist = self.tensor_list_dist
+        # 常态（无 None 位）零开销：仅当槽视图出现 None 位时构造声明回填列。
+        declaration = self._flat_decl_by_dist(self._tensor_dtypes, dist) if any(d is None for d in flat_dtypes) else ()
         result = []
         for idx in self.output_tensor_indexes:
             if not 0 <= idx < len(dist):
                 continue
             flat_idx = self.flat_index_of(idx)
             count = dist[idx] if dist[idx] > 0 else 1
-            result.extend(flat_dtypes[flat_idx : flat_idx + count])
+            for offset, slot_dtype in enumerate(flat_dtypes[flat_idx : flat_idx + count]):
+                position = flat_idx + offset
+                result.append(
+                    declaration[position] if slot_dtype is None and position < len(declaration) else slot_dtype
+                )
         return tuple(result)
 
     @property
@@ -489,6 +501,10 @@ class TestcaseE2e(ApiTestcaseBase):
             self.is_valid = False
             self.fail_reason = "API_PARSE_FAIL"
             return
+        if self._check_onnx_unknown_attrs(info):
+            return
+        if self._check_onnx_dynamic_input():
+            return
         if self._check_input_count_exceeded(info):
             return
         if self._is_factory_api(info):
@@ -496,6 +512,75 @@ class TestcaseE2e(ApiTestcaseBase):
         if self._check_all_tensors_output(info):
             return
         self._check_overload_match(info)
+
+    def _check_onnx_unknown_attrs(self, info):
+        """onnx 域：attributes 列出现 schema 未声明的属性名时显式报错。
+
+        onnx 域 attributes 列即节点属性（kw-only ParamInfo，schema 单源）；
+        build_args 会把未声明属性滤入 extra_attrs 丢弃（api_param._build_args），
+        model_builder._normalize_attrs 的 unknown 检查只看得到过滤后的 kwargs，
+        CSV 拼写错误因此静默假 PASS——违反「CSV 属性拼写错误不静默落
+        extra_attrs」。此处校验期对 schema 直查。
+        torch/tf 域 extra_attrs 有插件 kwargs 消费方（golden 的
+        _call_plugin_with_plan 经 extra 透传），不做同口径限制。
+
+        Returns:
+            True if the testcase was invalidated (unknown attributes found).
+        """
+        if not self.attributes:
+            return False
+        from ..common.backend import detect_framework
+
+        if detect_framework(self.api_name) != "onnx":
+            return False
+        declared = {p.name for ov in info.overloads for p in ov.params if p.is_keyword_only}
+        unknown = sorted(set(self.attributes) - declared)
+        if not unknown:
+            return False
+        self.is_valid = False
+        self.fail_reason = "UNKNOWN_ATTRIBUTE"
+        logging.error(
+            f"[{self.testcase_name}] API [{self.api_name}] has unknown attribute(s) {unknown} "
+            f"in testcase attributes; declared attribute(s) are {sorted(declared)}. "
+            f"onnx node attributes are schema-declared — misspelled names fail "
+            f"instead of being silently ignored. (source: {info.source})"
+        )
+        return True
+
+    def _check_onnx_dynamic_input(self):
+        """onnx 域：输入槽含 dim<0（-1 动态标记）时校验期显式拒绝。
+
+        动态 shape 是设计非目标（om 恒为静态图，仅支持静态 shape dim ≥ 0）。
+        分层：-2/TensorList 内 -1/输出位与原地位的 -1 已由通用校验层
+        （api_base._check_dyn_shape_slots）全域拒绝；普通输入位的 -1 在 torch
+        域经 npu_preprocess hook 物化（worker._check_preconditions 门），而
+        onnx 域不存在该通道——不在此拦截则落到 worker 门报
+        DYN_SHAPE_REQUIRES_NPU_PREPROCESS，措辞指向 onnx 域不存在的机制。
+        与 -d 模式的 ONNX_DYNAMIC_GRAPH_UNSUPPORTED 同体系（设计 §9）。
+
+        Returns:
+            True if the testcase was invalidated (dynamic dims found).
+        """
+        from ..common.backend import detect_framework
+
+        if detect_framework(self.api_name) != "onnx":
+            return False
+        dyn_slots = tuple(
+            idx
+            for idx, shape in enumerate(self.flat_tensor_view_shapes or ())
+            if shape is not None and any(dim < 0 for dim in shape)
+        )
+        if not dyn_slots:
+            return False
+        self.is_valid = False
+        self.fail_reason = "ONNX_DYNAMIC_INPUT_UNSUPPORTED"
+        logging.error(
+            f"[{self.testcase_name}] API [{self.api_name}] declares dynamic dim(s) (<0) in "
+            f"tensor_view_shapes flat slot(s) {dyn_slots}; the onnx domain supports static "
+            "shapes only (dim >= 0, om is always a static graph). Remove -1/-2 slots, "
+            "or use kernel/aclnn modes for dynamic-shape coverage."
+        )
+        return True
 
     def _check_input_count_exceeded(self, info):
         """Fail if non-output tensor count exceeds API's max input tensor parameters.

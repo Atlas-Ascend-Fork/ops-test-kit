@@ -11,7 +11,7 @@ python3 -m ttk {kernel,aclnn,e2e,geir,info,list,help} [选项]
 | `kernel` | AscendC 算子内核编译 + NPU 执行 + 精度比对 |
 | `geir` | GE 图编译 + 执行 + 精度比对 |
 | `aclnn` | aclnn\* C API 调用 + 精度比对 |
-| `e2e` | 框架 API 端到端测试 |
+| `e2e` | 框架 API 端到端测试（torch/torch_npu、tensorflow；`api_name` 为 `onnx.<OpType>` 的用例走 onnx 域：atc 编译 .om + aclmdl 执行） |
 | `info` | 查询本机 Ascend NPU 设备信息 |
 | `list` | 预览用例文件中的测试用例列表 |
 | `help` | 命令帮助与参数深潜（`ttk help [COMMAND] [PARAM]`，亦可用 `ttk <mode> help [PARAM]`） |
@@ -105,7 +105,7 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2
 | `--compare` | | 未指定 | 精度对比方法。可选：`close`/`stat_rel_err`/`mixed`/`cosine`/`binary`/`requant`/`cross_check`。未指定时按 Spec.tolerance 路由（需 `--plugin`）；无 Spec 声明时按输出 dtype 路由：浮点→`mixed`，整数/布尔→`binary`，complex→`close`，hifloat8→`requant`，float8_e8m0→`binary` | `--compare cosine` |
 | `--input-dist` | | `uniform` | 输入数据分布，可选：`uniform`/`normal` | `--input-dist normal` |
 | `--seed` | | 随机 | 随机种子：固定后同一份 CSV 连跑两次，每条用例的输入/golden 逐位一致（与进程数、执行顺序无关），可直接做改动前后的逐用例 A/B 对比；batch 一致性场景的同 shape 同值行为不受影响 | `--seed 42` |
-| `--golden-mode` | | `Enable` | Golden生成模式，可选：`Enable`/`Disable`/`Promote`（CPU 高精度）/`XPU`（三方 XPU 输出作为 golden）/`NPU`（golden 在 NPU 上执行并采集性能，torch 载体上板、numpy 载体 CPU 现算）。`Disable` 时不生成标杆、不做精度比对，用例精度结论为 `SKIP`（未验证，计入汇总的 SKIP/NA 桶，不计为通过） | `--golden-mode NPU` |
+| `--golden-mode` | | `Enable` | Golden生成模式，可选：`Enable`/`Disable`/`Promote`（CPU 高精度）/`XPU`（三方 XPU 输出作为 golden）/`NPU`（golden 在 NPU 上执行并采集性能，torch 载体上板、numpy 载体 CPU 现算）。`Disable` 时不生成标杆、不做精度比对，用例精度结论为 `SKIP`（未验证，计入汇总的 SKIP/NA 桶，不计为通过）。e2e 的 onnx 域：`XPU` 启动期拒绝（`ONNX_XPU_UNSUPPORTED`，远端无 onnx 分发通道），`NPU` 退化同 `Enable`（Golden 恒为 CPU 侧 ReferenceEvaluator） | `--golden-mode NPU` |
 | `--deterministic-level` | `--dl` | `0` | 确定性等级：`0`=关闭，`1`=确定性计算，`2`=强一致，`3`=确定性执行；FA 完整 batch relation 的切片比对在第二阶段完成 | `--dl=1` |
 
 > 精度比对方法的公式、容差及选择建议详见[精度比对方法](./Precision_Comparison.md)。确定性计算详见[确定性计算与批一致性](./Deterministic_Compute.md)。
@@ -139,6 +139,7 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2
 - **Kernel编译控制**（`-d`/`-c`/`-b`/`--co`/`--compile-opts`等）：[Kernel测试指南](./Operator_Test_Guides/Kernel_Test_Guide.md)
 - **E2E后端选择**（`--backend cpu`/Backend抽象层）：[E2E测试指南](./Operator_Test_Guides/E2E_Test_Guide.md)
 - **GEIR编译模式**（`-c`/`-d`/`-b`）：[GEIR测试指南](./Operator_Test_Guides/GEIR_Test_Guide.md)
+- **ONNX域模式等价**（e2e 的 onnx 域：`--eager -c` 双开单次执行、`-d`/`--aclgraph` 快速失败、`--backend cpu` 仅 Golden/输入生成）：[ONNX测试指南](./Operator_Test_Guides/ONNX_Test_Guide.md)
 - ACLNN复用通用参数，无专属选项
 
 # 高阶使用场景

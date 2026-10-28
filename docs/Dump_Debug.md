@@ -91,7 +91,7 @@ python3 -m ttk e2e -i cases.csv --dump full
 | 通路 | segment | 说明 |
 |------|---------|------|
 | Kernel | output: `dyn` / `cst` / `bin`；input: 仅 `dyn` | 三模式共用一份输入 |
-| E2E | output: `eager` / `graph_cst` / `graph_dyn` / `graph_aclgraph` | 与 result 列前缀对应 |
+| E2E | output: `eager` / `graph_cst` / `graph_dyn` / `graph_aclgraph` | 与 result 列前缀对应；onnx 域仅 `eager`（om 恒为静态图，`--eager -c` 双开时单次执行、EAGER 与 GRAPH CST 两列同值，dump 落 `output_eager_*`） |
 | GEIR | output: `const` / `dynamic`；input 同 | 两编译模式 |
 | ACLNN | 无 segment | — |
 | XPU | 不适用本协议（远端输出直接写 `NPU_DUMP_PATH`/`root_path`，文件名 `{case}_xpu_golden_{index}.{ext}`，`{ext}` 仅 `npy`/`bin`：`npy` 格式写 `.npy`，其余格式（含 `pt`/`print`）写 `.bin`，见 3.1 与下方示例） | — |
@@ -189,5 +189,5 @@ python3 -m ttk kernel -i cases.csv -t add_01 --dump full --dump-format npy --see
 
 ## 7. 通路支持
 
-所有通路（Kernel / ACLNN / GEIR / E2E）均支持 `--dump` 和 `--dump-on-fail`；
-各通路均可显式使用 `--dump xpu` 保存成功返回的远端第三方输出。
+所有通路（Kernel / ACLNN / GEIR / E2E，含 E2E 的 onnx 域）均支持 `--dump` 和 `--dump-on-fail`；
+各通路均可显式使用 `--dump xpu` 保存成功返回的远端第三方输出（E2E 的 onnx 域除外：无远端 onnx 分发通道，告警跳过）。

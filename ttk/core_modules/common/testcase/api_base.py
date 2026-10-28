@@ -108,6 +108,7 @@ class ApiTestcaseBase(TestcaseBase):
         "_pure_output_indexes",
         "_is_torch_dtype_support",
         "_is_tf_dtype_support",
+        "_is_onnx_dtype_support",
         # === 私有：签名解析缓存（终稿挂载，随 pickle 进 worker）=== #
         "_param_plan_cache",
     )
@@ -167,6 +168,7 @@ class ApiTestcaseBase(TestcaseBase):
         self._pure_output_indexes = None
         self._is_torch_dtype_support = None
         self._is_tf_dtype_support = None
+        self._is_onnx_dtype_support = None
         # ── 签名解析缓存 ──
         self._param_plan_cache = None
 
@@ -706,6 +708,23 @@ class ApiTestcaseBase(TestcaseBase):
         self._is_tf_dtype_support = result
         return result
 
+    def is_onnx_dtype_support(self) -> bool:
+        """Check if all dtypes in testcase have onnx TensorProto counterparts.
+
+        解析期放行（映射命中即 True），真不支持由 atc/ReferenceEvaluator 报错。
+        """
+        if self._is_onnx_dtype_support is not None:
+            return self._is_onnx_dtype_support
+        from ttk.utilities.dtypes import is_onnx_native_dtype
+
+        result = True
+        for dtype in self.flat_tensor_dtypes:
+            if dtype is not None and not is_onnx_native_dtype(dtype):
+                result = False
+                break
+        self._is_onnx_dtype_support = result
+        return result
+
     def is_dtype_support(self) -> bool:
         """Framework-aware dtype support check."""
         from ..backend import detect_framework
@@ -713,6 +732,8 @@ class ApiTestcaseBase(TestcaseBase):
         framework = detect_framework(self.api_name)
         if framework == "tf":
             return self.is_tf_dtype_support()
+        if framework == "onnx":
+            return self.is_onnx_dtype_support()
         return self.is_torch_dtype_support()
 
     # ========== Legacy per-flat-index accessors (kept for backward compat) ==========

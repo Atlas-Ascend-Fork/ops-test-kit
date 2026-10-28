@@ -8,7 +8,7 @@
 TTK使用表格文件（CSV 或 Excel .xlsx/.xlsm）批量定义测试用例。第一行为表头（列名），后续每行代表一个测试用例。不同测试模式使用不同的列定义。
 
 **模式选择**（由子命令唯一决定，TTK 不按表头自动切换模式）：
-- 表头包含 `api_name` 且值以 `aclnn` 开头 → 用 `ttk aclnn`（**ACLNN模式**）；`api_name` 不以 `aclnn` 开头 → 用 `ttk e2e`（**E2E模式**）
+- 表头包含 `api_name` 且值以 `aclnn` 开头 → 用 `ttk aclnn`（**ACLNN模式**）；`api_name` 不以 `aclnn` 开头（含 torch/tensorflow API 与 `onnx.<OpType>`）→ 用 `ttk e2e`（**E2E模式**，onnx 域见 [ONNX算子测试指南](./Operator_Test_Guides/ONNX_Test_Guide.md)）
 - 表头不包含 `api_name` → 用 `ttk kernel`（**Kernel模式**）或 `ttk geir`（**GEIR模式**）
 
 模式选错会导致用例解析失败。各模式的执行命令见 [任务执行](./Task_Execution.md)。
@@ -72,6 +72,8 @@ TTK 支持两种等价的输入文件格式，表头与字段定义完全相同�
 | E2E | `ttk e2e` | 10 | `api_name`、`tensor_view_shapes`、`golden_api` | [E2E用例编写](./Operator_Test_Guides/E2E_Case_Writing.md) |
 
 > GEIR 继承 Kernel 的字段，额外多 `dyn_input_shapes` 用于控制图编译时的动态 shape 描述。
+
+> E2E 内分 torch/tensorflow/onnx 三个域，由 `api_name` 值区分（`onnx.<OpType>` 即 onnx 域），**同一 CSV 不得混域**（worker 进程预载互斥：torch 进程预载 torch 系模块、tf 进程预载 tensorflow、onnx 进程预载 numpy + onnx）。onnx 域不支持布局列（`tensor_formats` / `tensor_storage_shapes` / `tensor_view_strides` / `tensor_view_offsets`，填写报 `ONNX_LAYOUT_UNSUPPORTED`）与动态 shape（dim < 0，即 -1 槽位，校验期报 `ONNX_DYNAMIC_INPUT_UNSUPPORTED`；仅支持静态 shape，dim ≥ 0），专属约定详见 [ONNX用例编写约定](./Operator_Test_Guides/ONNX_Test_Guide.md#测试用例编写)。
 
 ---
 

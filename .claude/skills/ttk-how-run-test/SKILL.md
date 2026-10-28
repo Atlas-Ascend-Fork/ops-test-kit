@@ -31,7 +31,7 @@ python3 -m ttk list -i cases.csv --op add  # 按算子名筛选
 | Kernel | 无 `api_name` 字段 | `python3 -m ttk kernel` |
 | GEIR | 无 `api_name` 字段（复用 Kernel 的 CSV 与 golden 资产） | `python3 -m ttk geir` |
 | ACLNN | 有 `api_name`，值以 `aclnn` 开头 | `python3 -m ttk aclnn` |
-| E2E | 有 `api_name`，值非 `aclnn` 开头 | `python3 -m ttk e2e` |
+| E2E | 有 `api_name`，值非 `aclnn` 开头（torch / tf / `onnx.<OpType>`） | `python3 -m ttk e2e` |
 
 ## Step 3: 构造命令
 
@@ -69,7 +69,7 @@ ACLNN 子命令无模式专属选项（`--no-prof`、`--xpu-perf` 等均为四�
 python3 -m ttk e2e -i cases.csv
 ```
 
-E2E 默认自动探测 NPU；`--backend cpu` 强制 CPU 执行。详见 `references/e2e-params.md`。
+E2E 默认自动探测 NPU；`--backend cpu` 强制 CPU 执行（onnx 域 CPU 仅用于 golden/输入生成，设备执行需 NPU）。支持 torch / tf / onnx 三个框架域（同一表内不得混用，进程预载互斥）；onnx 域（`onnx.<OpType>`）经 TTK 组模 → atc 编译 .om → aclmdl 执行，eager ≡ 静态图。详见 `references/e2e-params.md`。
 
 ### NPUSim 仿真模式（无卡跑算子）
 
@@ -152,6 +152,7 @@ python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadc
 python3 -m ttk geir -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast
 python3 -m ttk aclnn -i examples/case_store/aclnn/cases.csv -t add_fp16_broadcast
 python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv
+python3 -m ttk e2e -i examples/case_store/e2e/onnx_cases.csv
 
 # 调试单个失败用例（每用例日志自动落 log/<mode>/<用例名>/ttk.log）
 python3 -m ttk kernel -i cases.csv -t case_name --dump-on-fail

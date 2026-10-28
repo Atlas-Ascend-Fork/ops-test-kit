@@ -43,9 +43,13 @@ class FrameworkApiInstance(InstanceBase):
     def __init__(self):
         super().__init__()
         switches = get_global_storage()
+        framework = getattr(switches, "framework", "torch")
+        if framework == "onnx":
+            # onnx 域专属开关 fail-fast：须先于 camodel 环境注入（npusim 拒绝
+            # 后不得污染 LD_LIBRARY_PATH）
+            self._reject_onnx_exclusive_options(switches)
         if switches.backend == "npusim":
             self._inject_camodel_env(switches)
-        framework = getattr(switches, "framework", "torch")
         self.backend = get_backend(switches.force_cpu, framework=framework)
         if not self.backend.has_device():
             switches.proc_no_reuse = True
@@ -61,6 +65,47 @@ class FrameworkApiInstance(InstanceBase):
                 "use --golden-mode Enable for CPU golden"
             )
         logging.info(f"Framework API mode: backend={self.backend.device_type()}, framework={framework}")
+
+    @staticmethod
+    def _reject_onnx_exclusive_options(switches) -> None:
+        """onnx 域专属开关 fail-fast（启动期整批拒绝，不拖到逐用例）。
+
+        - ``--backend npusim``：om 执行需真机（atc 编译 + aclmdl 装载执行），
+          camodel 不覆盖该链路——无卡环境回落 CPU 后逐用例报
+          ``ONNX_CPU_EXECUTION_UNSUPPORTED``（误导），有卡环境 DSMI 仍见真卡
+          而**静默真机执行**（违背仿真意图），两态都必须启动期拒绝；
+        - ``--golden-mode XPU`` / ``--xpu-perf`` / ``--compare cross_check``：
+          三方远端按框架 dotted path（如 ``torch.add``）分发，``onnx.<OpType>``
+          无解析通道；且 onnx 域 golden 恒为 ReferenceEvaluator 同构参照
+          （golden.py onnx 分支），无三方语义。manual_xpu_binaries 本地回放
+          一并按首期边界拒绝；
+        - ``--dump xpu``：同上无远端通道，但对齐 normalize_xpu_options 的
+          既有降级范式——告警后关闭（显式请求才有数据可落，无数据则跳过）。
+        """
+        if switches.backend == "npusim":
+            raise ValueError(
+                "ONNX_NPUSIM_UNSUPPORTED: onnx 域不支持 --backend npusim"
+                "（om 执行需真机 NPU：atc 编译 + aclmdl 装载执行，仿真不覆盖该链路）；"
+                "请使用 --backend npu，或该算子改用 kernel/aclnn 模式覆盖"
+            )
+        xpu_reasons = []
+        if getattr(switches, "golden_mode", None) == "XPU":
+            xpu_reasons.append("--golden-mode XPU")
+        if getattr(switches, "xpu_perf", False):
+            xpu_reasons.append("--xpu-perf")
+        if getattr(switches, "compare_method", None) == "cross_check":
+            xpu_reasons.append("--compare cross_check")
+        if xpu_reasons:
+            raise ValueError(
+                f"ONNX_XPU_UNSUPPORTED: onnx 域不支持三方 XPU 通路（{', '.join(xpu_reasons)}）："
+                "远端按框架 dotted path 分发（如 torch.add），无 onnx 解析通道，"
+                "且 onnx 域 golden 恒为 ReferenceEvaluator 同构参照；"
+                "请去掉这些开关，或改用 torch/tf 域用例"
+            )
+        dump_config = getattr(switches, "dump_config", None)
+        if dump_config is not None and getattr(dump_config, "dump_xpu", False):
+            logging.warning("onnx 域不支持 --dump xpu（远端无 onnx 分发通道），XPU dump 已跳过")
+            dump_config.dump_xpu = False
 
     @staticmethod
     def _inject_camodel_env(switches):

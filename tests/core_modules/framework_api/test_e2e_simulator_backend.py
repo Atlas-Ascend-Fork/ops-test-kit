@@ -131,6 +131,107 @@ class TestFrameworkApiInstanceNpusim:
             FrameworkApiInstance._inject_camodel_env(sw)
 
 
+class TestFrameworkApiInstanceOnnxGates:
+    """onnx 域专属开关 fail-fast：npusim / 三方 XPU（golden-XPU / xpu-perf / cross_check）。
+
+    onnx 用例声明 ``--backend npusim`` 时有卡环境会静默真机执行（DSMI 仍见
+    真卡）、无卡环境逐用例报误导性的 ONNX_CPU_EXECUTION_UNSUPPORTED——两类
+    都必须在启动期拒绝，且拒绝须先于 camodel 环境注入（不污染
+    LD_LIBRARY_PATH）。三方 XPU 远端按框架 dotted path 分发，无 onnx 通道。
+    """
+
+    def _switches(self, tmp_path):
+        """构造一份 onnx 域 SWITCHES（backend 默认 npu）。"""
+        sw = SWITCHES()
+        sw.framework = "onnx"
+        sw.backend = "npu"
+        sw.sim_output_dir = str(tmp_path / "sim_output")
+        sw.force_cpu = False
+        return sw
+
+    def test_npusim_onnx_rejected_and_torch_injects(self, tmp_path, monkeypatch):
+        """onnx + npusim 启动期拒绝且 camodel 环境零注入；torch 域 npusim 不受
+        onnx 门禁影响（camodel 照常注入）——同一初始化路径的对比钉住。"""
+        injected = []
+        monkeypatch.setattr(
+            FrameworkApiInstance,
+            "_inject_camodel_env",
+            staticmethod(injected.append),
+        )
+
+        sw = self._switches(tmp_path)
+        sw.backend = "npusim"
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+        original = get_global_storage()
+        try:
+            set_global_storage(sw)
+            with pytest.raises(ValueError, match="ONNX_NPUSIM_UNSUPPORTED"):
+                FrameworkApiInstance()
+        finally:
+            set_global_storage(original)
+        assert injected == []  # 拒绝先于 camodel 注入
+        assert "LD_LIBRARY_PATH" not in os.environ  # 环境零污染
+
+        monkeypatch.setattr(
+            "ttk.core_modules.framework_api.instance.get_backend",
+            lambda force_cpu, framework="torch", profile=None: _FakeBackend(),
+        )
+        sw = SWITCHES()
+        sw.backend = "npusim"
+        sw.sim_soc_version = "Ascend950"
+        sw.sim_output_dir = str(tmp_path / "sim_output")
+        sw.force_cpu = False
+        original = get_global_storage()
+        try:
+            set_global_storage(sw)
+            FrameworkApiInstance()  # 不抛：torch 域 npusim 语义不变
+        finally:
+            set_global_storage(original)
+        assert len(injected) == 1
+
+    @pytest.mark.parametrize(
+        ("field", "value", "reason"),
+        [
+            ("golden_mode", "XPU", "--golden-mode XPU"),
+            ("xpu_perf", True, "--xpu-perf"),
+            ("compare_method", "cross_check", "--compare cross_check"),
+        ],
+    )
+    def test_xpu_switches_rejected(self, tmp_path, field, value, reason):
+        """三方 XPU 开关逐项拒绝，错误信息带开关名与 ONNX_XPU_UNSUPPORTED 码。"""
+        sw = self._switches(tmp_path)
+        setattr(sw, field, value)
+        with pytest.raises(ValueError, match="ONNX_XPU_UNSUPPORTED") as excinfo:
+            FrameworkApiInstance._reject_onnx_exclusive_options(sw)
+        assert reason in str(excinfo.value)
+
+    def test_xpu_reasons_listed_together(self, tmp_path):
+        """多个 XPU 开关同时开启时错误信息逐一列出。"""
+        sw = self._switches(tmp_path)
+        sw.golden_mode = "XPU"
+        sw.xpu_perf = True
+        sw.compare_method = "cross_check"
+        with pytest.raises(ValueError, match="ONNX_XPU_UNSUPPORTED") as excinfo:
+            FrameworkApiInstance._reject_onnx_exclusive_options(sw)
+        message = str(excinfo.value)
+        for reason in ("--golden-mode XPU", "--xpu-perf", "--compare cross_check"):
+            assert reason in message
+
+    def test_dump_xpu_degraded_and_clean_switches_pass(self, tmp_path, caplog):
+        """非致命路径：--dump xpu 告警降级（对齐 normalize_xpu_options 范式）；
+        无冲突开关的 onnx 配置照常放行（门禁无误伤）。"""
+        sw = self._switches(tmp_path)
+        sw.dump_config = SimpleNamespace(dump_xpu=True)
+        with caplog.at_level("WARNING"):
+            FrameworkApiInstance._reject_onnx_exclusive_options(sw)
+        assert sw.dump_config.dump_xpu is False
+        assert any("dump xpu" in rec.message for rec in caplog.records)
+
+        sw = self._switches(tmp_path)
+        sw.dump_config = SimpleNamespace(dump_xpu=False)
+        FrameworkApiInstance._reject_onnx_exclusive_options(sw)  # 不抛即通过
+
+
 class TestFrameworkApiInstanceCpuFallback:
     """torch_npu/npu_device 缺失探测回落 CPU 时，实例把运行定格为 CPU（force_cpu）。"""
 

@@ -11,11 +11,16 @@
 
 - torch/ 与 tf/ 互不 import（双向断言，含函数内惰性 import）；
 - tf/ 顶层零 torch/torch_npu import（torch_npu 与 TF C 扩展同进程冲突）；
+- onnx/ 全树零 torch/torch_npu/tensorflow import（numpy 直通域）；
+- onnx_backend 零 ACL（无 ctypes import / CDLL 调用 / 通路层 import——so
+  加载属通路层职责，设备探测走 DSMI）；
 - common/ 不得 import 通路（framework_hooks 注册表为唯一合法反向通道，且其
   自身不含通路 import——由通路侧主动注册）；
 - 通路共享层（worker/execute/compare/utils/golden/input_generate/instance/
   testcase/result/adapter 之外的共享文件）不得出现裸 tf 前缀判断——框架路由
-  单源于 detect_framework / adapter。
+  单源于 detect_framework / adapter；
+- e2e 通路不消费 invoke._framework_of/_FRAMEWORK_ROOTS（onnx 名不在分类器
+  注册表内，路由经 adapter 单源，grep 收口钉住）。
 """
 
 import ast
@@ -75,6 +80,39 @@ def test_tf_package_top_level_avoids_torch():
         abs_mods, _ = _scan_imports(path)
         assert "torch" not in abs_mods, f"{path.name} imports torch"
         assert "torch_npu" not in abs_mods, f"{path.name} imports torch_npu"
+
+
+def test_onnx_package_avoids_torch_and_tf():
+    """onnx/ 全树零 torch / torch_npu / tensorflow import（含方法内惰性）。
+
+    onnx 域是 numpy 直通域：eager/golden 均不触框架 tensor；torch_npu 与
+    onnx worker 内 libascendcl 的 ACL 生命周期互斥，torch 生态设施不得经
+    onnx 链路进入 worker 进程。
+    """
+    for path in _py_files(FRAMEWORK_API / "onnx"):
+        abs_mods, _ = _scan_imports(path)
+        assert "torch" not in abs_mods, f"{path.name} imports torch"
+        assert "torch_npu" not in abs_mods, f"{path.name} imports torch_npu"
+        assert "tensorflow" not in abs_mods, f"{path.name} imports tensorflow"
+
+
+def test_onnx_backend_zero_acl():
+    """common/backend/onnx_backend.py 零 ACL：so 加载属通路层职责。
+
+    ast 扫描代码（不受 docstring 说明文字误报）：无 ctypes import、无 CDLL
+    调用、无通路层 import。设备探测走 DSMI（common/device 既有设施）。
+    """
+    path = COMMON / "backend" / "onnx_backend.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name.split(".")[0] != "ctypes", f"{path} imports ctypes"
+        if isinstance(node, ast.ImportFrom) and node.module:
+            assert node.module.split(".")[0] != "ctypes", f"{path} imports ctypes"
+            assert "framework_api" not in node.module, f"{path} imports pathway module: {node.module}"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "CDLL":
+            raise AssertionError(f"{path} calls CDLL directly")
 
 
 def test_common_does_not_import_pathway():
@@ -183,3 +221,25 @@ def test_relative_imports_resolve():
                         assert (base / "__init__.py").is_file(), (
                             f"{path}: stale relative import {'.' * node.level}{alias.name}"
                         )
+
+
+def test_framework_api_does_not_consume_framework_of():
+    """e2e 通路（含 onnx 链路）不消费 invoke._framework_of / _FRAMEWORK_ROOTS。
+
+    框架归属分类器按调用方 root package 前缀匹配（numpy/torch/tf），无 onnx
+    条目——onnx api（onnx.<OpType>）的执行/比对/装配走 adapter 路由，不经
+    该分类器（grep 收口的结构化钉住；_framework_of 的消费方仅
+    kernel/aclnn 的 golden 层，按各自通路 api_name 消费，onnx 名不可达）。
+    """
+    for path in _py_files(FRAMEWORK_API):
+        text = path.read_text(encoding="utf-8")
+        assert "_framework_of" not in text, f"{path}: e2e shared layer must not consume invoke._framework_of"
+        assert "_FRAMEWORK_ROOTS" not in text, f"{path}: e2e shared layer must not reference _FRAMEWORK_ROOTS"
+
+
+def test_onnx_cache_is_runtime_output():
+    """onnx_cache 是运行产物目录（root_path 下、内容寻址）：源码树不追踪。"""
+    from pathlib import Path as _Path
+
+    gitignore = _Path(__file__).resolve().parents[3] / ".gitignore"
+    assert "/onnx_cache/" in gitignore.read_text(encoding="utf-8")

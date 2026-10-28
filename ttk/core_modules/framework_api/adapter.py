@@ -9,10 +9,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 """
-FrameworkAdapter —— torch / tf 框架适配协议 + 运行级注册表。
+FrameworkAdapter —— torch / tf / onnx 框架适配协议 + 运行级注册表。
 
-每个框架子包（framework_api/torch、framework_api/tf）提供自己的 Adapter，
-自治三件套：
+每个框架子包（framework_api/torch、framework_api/tf、framework_api/onnx）提供
+自己的 Adapter，自治三件套：
   - load_api        模块加载：api_name → (callable | 方法名, is_tensor_method)
   - extract_params  参数解析：api_name → APIParamInfo | None
   - bind_tensors    tensor 绑定（L2 特化）：format_cast / ref 复位 / const 位
@@ -26,11 +26,12 @@ FrameworkAdapter —— torch / tf 框架适配协议 + 运行级注册表。
 """
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from ..common.backend import detect_framework
 
 _ADAPTERS = {}
-_ADAPTER_PACKAGE = {"torch": ".torch", "tf": ".tf"}
+_ADAPTER_PACKAGE = {"torch": ".torch", "tf": ".tf", "onnx": ".onnx"}
 
 
 class FrameworkAdapter(ABC):
@@ -62,9 +63,16 @@ class FrameworkAdapter(ABC):
         """eager 调用包装（默认原样返回）。
 
         tf：CPU 侧 Resource* handle 转换 / NPU 侧 tf.function 包装（npu_device
-        只对 tf.function 内的 op 触发 GE 编译）。
+        只对 tf.function 内的 op 触发 GE 编译）；onnx：backend 注入点（soc/dev_id）。
         """
         return resolved
+
+    def eager_graph_alias(self) -> Optional[str]:
+        """eager 与图模式的等价声明：'cst' 表示该框架的 eager 执行即静态图执行
+        （onnx：om 恒为静态图）。双开（--eager + -c）时 worker 只执行一次，
+        结果镜像到 EAGER 与 GRAPH CST 两列。None = 无等价（torch/tf）。
+        """
+        return None
 
     @abstractmethod
     def run_graph(

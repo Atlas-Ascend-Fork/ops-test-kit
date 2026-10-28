@@ -37,6 +37,14 @@ python3 -m ttk e2e -i cases.csv --warmup false --run 1 -o cold.csv
 - **采集**：`--run` 次迭代全部进入 torch profiler 采集窗口，取平均值
 - **冷启动**：`--warmup false` 跳过预热，`--run 1` 只跑 1 次
 
+### e2e onnx 域（atc→om→aclmdl）
+
+- **warmup**：warmup 轮完成一次性 setup（om 编译命中缓存后的装载、HBM 分配、H2D），轮尾重置计时窗
+- **采集**：**墙钟计时**（aclmdl 执行不经 torch dispatcher，无 torch_npu profiler 采集窗）——计时轮只走 `aclmdlExecute` + D2H，对 `--run` 轮取平均；**kernel 明细为空**（已知限制，算子级明细请用 kernel/aclnn/geir 通路）
+- **冷启动**：`--warmup false` 时计时窗含 om 装载与 H2D 的一次性开销
+
+详见 [ONNX算子测试指南](./Operator_Test_Guides/ONNX_Test_Guide.md#性能测试)。
+
 ### kernel（AscendC 算子内核）
 
 - **warmup**：launch 空 helper kernel `warmup.o` 1 次（每个 core 仅 `tik_return`，无实际计算），预热 SMMU/BIU/TLB/cores
@@ -66,6 +74,7 @@ python3 -m ttk e2e -i cases.csv --warmup false --run 1 -o cold.csv
 | aclnn | CANN msprof | `api_statistic_*.csv` / `op_statistic_*.csv` | `Avg(us)` / `Avg Time(us)` | msprof 内部按采集次数取平均 | `--run - 1` 次（`--run > 1`）；`1` 次（`--run = 1`） |
 | e2e（torch） | torch_npu.profiler | `kernel_details.csv` | `Duration(us)` | 累加后 `/ run_count`（平均值） | `--run` 次 |
 | e2e（tf） | CANN msprof | `op_statistic_*.csv` | `Avg Time(us)` | msprof 内部按采集次数取平均，求和所有 op | `--run` 次 |
+| e2e（onnx） | 墙钟（SteppedWallClockProfiler） | — | — | warmup 后计时窗 `/ run_count`（平均值） | `--run` 次 |
 
 > kernel/geir 读取 `op_summary_*`/`task_time_*` 时按 `Task Type`/`kernel_type` 过滤，仅保留 `KERNEL_AICORE`/`KERNEL_AIVEC` 等实际 NPU kernel 执行记录，排除 `MODEL_EXECUTE`/`NOTIFY_*` 等框架开销；aclnn 读取 `api_statistic_*`/`op_statistic_*` 聚合表（api 行按 `Level=acl` 过滤）。
 
@@ -78,6 +87,6 @@ python3 -m ttk e2e -i cases.csv --warmup false --run 1 -o cold.csv
 | kernel | `dyn_perf_us`、`cst_perf_us`、`bin_perf_us` |
 | geir | `cst_perf_us`、`dyn_perf_us`（二进制模式为 `cst_bin_perf_us`、`dyn_bin_perf_us`） |
 | aclnn | `api_perf_us`、`op_perf_us` |
-| e2e | eager 列：`eager_device_perf_us`、`eager_cpu_perf_us`、`eager_kernel_count`、`eager_kernel_details`；图模式另有 `graph_cst_*`、`graph_dyn_*`、`graph_aclgraph_*` 对应列族（device_perf_us/cpu_perf_us/kernel_count/kernel_details） |
+| e2e | eager 列：`eager_device_perf_us`、`eager_cpu_perf_us`、`eager_kernel_count`、`eager_kernel_details`；图模式另有 `graph_cst_*`、`graph_dyn_*`、`graph_aclgraph_*` 对应列族（device_perf_us/cpu_perf_us/kernel_count/kernel_details）。onnx 域 `eager_device_perf_us` 为墙钟、kernel 明细列为空；`--eager -c` 双开时 EAGER 与 GRAPH CST 两列同值（单次执行镜像） |
 
 `kernel_details` 为 JSON 数组，含每个 kernel 的 `name`/`total`/`avg`/`max`/`min`/`calls` 字段，可用于分析单 kernel 耗时与调用次数。

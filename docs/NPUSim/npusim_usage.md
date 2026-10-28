@@ -68,6 +68,8 @@ python3 -m ttk kernel --backend npusim -i examples/case_store/kernel/cases.csv -
 
 CSV 用例格式与真实芯片模式**完全一致**，无需增加任何字段，仅在命令后追加 `--backend npusim`。
 
+> E2E 的仿真执行仅覆盖 **torch 域**（camodel 直跑 torch_npu）。onnx 域（`onnx.<OpType>`）不支持 `--backend npusim`——om 执行需真机 NPU（atc 编译 + aclmdl 装载执行），启动期报 `ONNX_NPUSIM_UNSUPPORTED`；tf 域同理不接仿真后端。
+
 ---
 
 ## 4. 参数说明

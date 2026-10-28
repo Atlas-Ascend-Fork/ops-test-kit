@@ -130,6 +130,21 @@ def _has_npu_device() -> bool:
         return False
 
 
+def _npu_onnx_available() -> bool:
+    """onnx 侧 NPU 探测：DSMI 计数 > 0。
+
+    **不加载 libascendcl**——so 加载属通路层职责（framework_api/onnx/runtime），
+    get_backend 阶段（父进程/探测期）零 ACL 触碰。DSMI 缺失/异常告警回落 CPU。
+    """
+    try:
+        from ..device.dsmi.interface import DSMIInterface
+
+        return DSMIInterface().get_device_count() > 0
+    except Exception as e:
+        _log.warning("onnx NPU probe failed, falling back to CPU: %s", e)
+        return False
+
+
 def get_backend(force_cpu: bool = False, framework: str = "torch") -> Backend:
     """Resolve a hardware Backend.
 
@@ -138,6 +153,7 @@ def get_backend(force_cpu: bool = False, framework: str = "torch") -> Backend:
       whose ``torch_lib`` is 'cpu' (CPU is the fallback below), ``_probe`` each;
       first hit is ``_build``. Nothing detected -> CpuTorchBackend fallback.
     - tf：npu_device 包安装探测，失败回落 CPU（告警）
+    - onnx：DSMI 设备计数探测（不触 libascendcl），失败回落 CPU（告警）
 
     实例不缓存，每次新建。三方标杆采集（--golden-mode XPU / --xpu-perf）走
     remote endpoints（common/xpu.collect_third_party → ttk.remote.client），
@@ -151,6 +167,15 @@ def get_backend(force_cpu: bool = False, framework: str = "torch") -> Backend:
         from .cpu_tf_backend import CpuTfBackend
 
         return CpuTfBackend()
+
+    if framework == "onnx":
+        if not force_cpu and _npu_onnx_available():
+            from .onnx_backend import NpuOnnxBackend
+
+            return NpuOnnxBackend()
+        from .onnx_backend import CpuOnnxBackend
+
+        return CpuOnnxBackend()
 
     if force_cpu:
         from .cpu_torch_backend import CpuTorchBackend

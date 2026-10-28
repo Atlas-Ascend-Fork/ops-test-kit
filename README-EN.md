@@ -4,7 +4,7 @@ TTK (ops Test Tool Kit) is a full-pipeline, automated, batch operator testing fr
 
 > Hardware vendor names appearing in this document are for illustration only; TTK is configuration-driven and supports any hardware accelerator that conforms to the interface.
 
-* **Full-stack test paths**: Kernel (AscendC) / GEIR (GE graph) / ACLNN (aclnn\* C API) / E2E (torch/torch_npu) — covering operator to framework layers
+* **Full-stack test paths**: Kernel (AscendC) / GEIR (GE graph) / ACLNN (aclnn\* C API) / E2E (torch/torch_npu, tensorflow, and onnx domains) — covering operator to framework layers
 * **Multi-device + simulation**: Real devices support NPU / MLU / CPU; simulation mode mimics NPU behavior on CPU, enabling development and debugging without real hardware
 * **Multi-card parallel**: Multi-NPU parallel testing
 * **Multiple comparison methods**: Mixed tolerance (ecosystem open-source standard, default), statistical relative error, cosine similarity, binary exact, requantization, cross-check
@@ -18,7 +18,7 @@ TTK (ops Test Tool Kit) is a full-pipeline, automated, batch operator testing fr
 ┌──────────────────────────────────────────────────┐
 │  Framework Layer  ✅ Torch · TensorFlow · ...    │  ← E2E (end-to-end, full pipeline)
 ├──────────────────────────────────────────────────┤
-│  Engine Layer     ✅ GEIR · ✅ ACLNN             │  ← GEIR (GE graph compile + execute) / ACLNN (engine API)
+│  Engine Layer     ✅ GEIR · ✅ ACLNN · ✅ ONNX    │  ← GEIR (GE graph compile + execute) / ACLNN (engine API) / ONNX (atc→om, via the e2e onnx domain)
 ├──────────────────────────────────────────────────┤
 │  Operator Layer   ✅ AiCore · AiCpu              │  ← Kernel (operator kernel, compile + execute)
 └──────────────────────────────────────────────────┘
@@ -30,6 +30,7 @@ TTK (ops Test Tool Kit) is a full-pipeline, automated, batch operator testing fr
 - Python 3.8+ recommended
 - The GEIR path requires the system toolchain `g++` (for GE graph compilation; verify with `g++ --version`)
 - The ACLNN path additionally requires `torch` (input generation/golden computation); the E2E path additionally requires `torch`/`torch_npu` (neither in `requirements.txt`; install the pair matching your local CANN version, see the [torch_npu installation guide](https://gitee.com/ascend/pytorch))
+- The E2E onnx domain (`api_name` = `onnx.<OpType>`) needs no torch/tensorflow: it requires the `onnx` package (≥1.13 with `onnx.defs.onnx_opset_version() ≤ 18`; onnx 1.13.x pairs with CANN 9.2.x) plus the CANN `atc` compiler and `libascendcl` runtime — see the [ONNX Operator Test Guide](./docs/Operator_Test_Guides/ONNX_Test_Guide.md) (Chinese)
 
 ```shell
 git clone https://gitcode.com/cann/ops-test-kit.git
@@ -56,6 +57,9 @@ python3 -m ttk aclnn -i examples/case_store/aclnn/cases.csv --plugin examples/ca
 
 # E2E: framework end-to-end (--backend cpu forces CPU backend)
 python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv
+
+# E2E onnx domain: single ONNX op (atc-compiled .om + aclmdl execution, no torch/tensorflow needed)
+python3 -m ttk e2e -i examples/case_store/e2e/onnx_cases.csv
 ```
 
 Per-case precision status and overall pass rate are printed to the terminal. Add `-o` to output a result CSV. Run `python3 -m ttk kernel --help` for parameters.
@@ -70,14 +74,15 @@ Per-case precision status and overall pass rate are printed to the terminal. Add
 
 ### Test Paths
 
-Four test paths map to different layers of the Ascend stack.
+Four test paths map to different layers of the Ascend stack (E2E hosts three domains — torch/tensorflow/onnx; the onnx domain runs at the engine layer via atc→om and has its own row).
 
 | Path | Layer | Guide |
 |------|-------|-------|
 | Kernel | Operator (AiCore/AiCpu), compile + execute | [Kernel Operator Test Guide](./docs/Operator_Test_Guides/Kernel_Test_Guide.md) |
 | GEIR | Engine, GE graph compile + execute | [GEIR Operator Test Guide](./docs/Operator_Test_Guides/GEIR_Test_Guide.md) (Chinese) |
 | ACLNN | Engine, aclnn\* C API | [ACLNN Operator Test Guide](./docs/Operator_Test_Guides/ACLNN_Test_Guide.md) |
-| E2E | Framework (torch/torch_npu), end-to-end | [E2E Operator Test Guide](./docs/Operator_Test_Guides/E2E_Test_Guide.md) |
+| E2E | Framework (torch/torch_npu, tensorflow), end-to-end | [E2E Operator Test Guide](./docs/Operator_Test_Guides/E2E_Test_Guide.md) |
+| E2E-onnx | Engine, single ONNX op via atc-compiled .om + aclmdl execution | [ONNX Operator Test Guide](./docs/Operator_Test_Guides/ONNX_Test_Guide.md) (Chinese) |
 
 ### Advanced Scenarios
 

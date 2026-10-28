@@ -21,6 +21,7 @@ kernel_meta/
 # 三方腿熔断器状态 + 各 endpoint 健康快照, 每次跑批重写
 .ttk/
 /geir/
+/onnx_cache/
 msprof/
 dump/
 sim_output/

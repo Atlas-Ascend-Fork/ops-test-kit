@@ -7,13 +7,17 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""dtypes 公开面行为锚点：27 个对外接口逐一覆盖。
+"""dtypes 公开面行为锚点：30 个对外接口逐一覆盖（MX 量化算法在 mx_quant.py，
+用例见 test_mx_quant.py）。
 
 用例原则：一条用例锚一个契约——别名归一、双向不变量（round-trip/表互逆）、
-修复点回归（e8m0 别名、width(None)、double 浮点分类）、拒绝路径（KeyError/RuntimeError）。
+修复点回归（e8m0 别名、width(None)、double 浮点分类、fp16/bf16 取值域别名）、
+拒绝路径（KeyError/RuntimeError/未映射返回 0-False）。
 """
 
+import ast
 import importlib.util
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -24,20 +28,23 @@ from ttk.utilities.dtypes import (
     ACL_ID_TO_DTYPE,
     DTYPE_PROMOTE_MAP,
     DTYPE_WIDTH_MAP,
+    ONNX_DTYPE_MAP,
+    ONNX_ID_TO_DTYPE,
     acl_to_torch_dtype,
     dtype_to_name,
     get_dtype_range,
     get_dtype_width,
     is_4bit_dtype,
     is_float_dtype,
+    is_onnx_native_dtype,
     is_torch_native_dtype,
     map_dtypes,
-    mx_quantize,
     normalize_dtype,
     numpy_to_torch_tensor,
     pack_4bits,
     resolve_numpy_dtype,
     resolve_numpy_dtypes,
+    str_to_onnx_dtype,
     str_to_torch_dtype,
     torch_to_numpy_tensor,
     unpack_4bits,
@@ -199,14 +206,32 @@ def test_get_dtype_width_rejects_unknown():
     [
         ("int8", -128, 127),
         ("int4", -8, 7),
+        ("uint4", 0, 15),
         ("bool", 0, 1),
         ("float8_e8m0", 2**-127, 2**127),
         ("bfloat16", -float.fromhex("0x1.FEp127"), float.fromhex("0x1.FEp127")),
         ("float16", np.finfo(np.float16).min, np.finfo(np.float16).max),
+        ("complex32", np.finfo(np.float16).min, np.finfo(np.float16).max),
     ],
 )
 def test_get_dtype_range(dtype, low, high):
     assert get_dtype_range(dtype) == (low, high)
+
+
+def test_get_dtype_range_normalization():
+    """别名/拼写/dtype 对象归一（修复锚点：fp16/bf16 此前落到 numpy.dtype 直接
+    TypeError）后命中同一取值域。"""
+    assert get_dtype_range("fp16") == get_dtype_range("float16")
+    assert get_dtype_range("bf16") == (-float.fromhex("0x1.FEp127"), float.fromhex("0x1.FEp127"))
+    assert get_dtype_range("float8_e8m0fnu") == get_dtype_range("float8_e8m0")
+    assert get_dtype_range(torch.bfloat16) == get_dtype_range("bfloat16")
+    assert get_dtype_range(np.dtype("float16")) == get_dtype_range("float16")
+
+
+def test_get_dtype_range_rejects_unknown():
+    """未知名交给 numpy.dtype 报 TypeError，不静默兜底。"""
+    with pytest.raises(TypeError):
+        get_dtype_range("flaot16")
 
 
 # ── 自定义 dtype 解析 ───────────────────────────────────────────────────────
@@ -387,33 +412,149 @@ def test_is_torch_native_dtype(name, expected):
     assert is_torch_native_dtype(name) is expected
 
 
-# ── MX 量化 ────────────────────────────────────────────────────────────────
+# ── ONNX 桥接 ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.skipif(_missing_en_dtypes(), reason="en_dtypes is not installed")
-def test_mx_quantize_zero_block():
-    """全零块：share_exp=-inf 被 clamp 到 -127 → 最小 scale，ele 全零。"""
-    scale, ele = mx_quantize(np.zeros((1, 32), dtype=np.float16), "float4_e2m1")
-    assert scale.shape == (1, 1, 2)
-    assert float(scale.ravel()[0]) == 2.0**-127
-    assert not ele.any()
+def test_onnx_dtype_map_integrity():
+    """裸 int 数值表与 onnx 官方 proto 编号一致（17+ 段为前向登记）；
+    id → canonical 单射（double 别名不占 id 槽，11 归 float64）。"""
+    expected = {
+        "float32": 1,
+        "uint8": 2,
+        "int8": 3,
+        "uint16": 4,
+        "int16": 5,
+        "int32": 6,
+        "int64": 7,
+        "bool": 9,
+        "float16": 10,
+        "float64": 11,
+        "double": 11,
+        "uint32": 12,
+        "uint64": 13,
+        "complex64": 14,
+        "complex128": 15,
+        "bfloat16": 16,
+        "float8_e4m3fn": 17,
+        "float8_e5m2": 19,
+        "int4": 22,
+        "float4_e2m1": 23,
+        "float8_e8m0": 24,
+        "uint2": 25,
+        "int2": 26,
+    }
+    assert expected == ONNX_DTYPE_MAP
+    assert len(ONNX_ID_TO_DTYPE) == len(ONNX_DTYPE_MAP) - 1
+    for name, tid in ONNX_DTYPE_MAP.items():
+        if name != "double":
+            assert ONNX_ID_TO_DTYPE[tid] == name
+    assert ONNX_ID_TO_DTYPE[11] == "float64"
+    assert "double" not in ONNX_ID_TO_DTYPE.values()
 
 
-@pytest.mark.skipif(_missing_en_dtypes(), reason="en_dtypes is not installed")
-def test_mx_quantize_saturated_block():
-    """块内全为 e2m1 max(6.0)：share_exp=0 → scale=1.0，ele 精确表示。"""
-    scale, ele = mx_quantize(np.full((1, 32), 6.0, dtype=np.float16), "float4_e2m1")
-    assert float(scale.ravel()[0]) == 1.0
-    assert np.all(ele.astype(np.float32) == 6.0)
+def test_onnx_map_agrees_with_installed_onnx():
+    """装机 onnx（1–16 段存在的版本）TensorProto 枚举逐项对表锚定。"""
+    onnx = pytest.importorskip("onnx")
+    enum_attrs = {
+        "float32": "FLOAT",
+        "uint8": "UINT8",
+        "int8": "INT8",
+        "uint16": "UINT16",
+        "int16": "INT16",
+        "int32": "INT32",
+        "int64": "INT64",
+        "bool": "BOOL",
+        "float16": "FLOAT16",
+        "float64": "DOUBLE",
+        "uint32": "UINT32",
+        "uint64": "UINT64",
+        "complex64": "COMPLEX64",
+        "complex128": "COMPLEX128",
+        "bfloat16": "BFLOAT16",
+    }
+    for canonical, attr in enum_attrs.items():
+        assert ONNX_DTYPE_MAP[canonical] == getattr(onnx.TensorProto, attr), canonical
 
 
-def test_mx_element_dtypes_gate():
-    """MX_ELEMENT_DTYPES 与 mx_quantize 支持集一致，非成员直接拒绝。"""
-    from ttk.utilities.dtypes import MX_ELEMENT_DTYPES
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("float16", 10),
+        ("fp16", 10),
+        ("f16", 10),
+        ("bfloat16", 16),
+        ("bf16", 16),
+        ("float32", 1),
+        ("f32", 1),
+        ("int32", 6),
+        ("s32", 6),
+        ("double", 11),
+        ("f64", 11),
+        ("bool", 9),
+        ("f8_e4m3fn", 17),
+        ("float8_e8m0fnu", 24),
+        ("int4", 22),
+        ("uint2", 25),
+    ],
+)
+def test_str_to_onnx_dtype_aliases(raw, expected):
+    assert str_to_onnx_dtype(raw) == expected
 
-    assert "float4_e2m1" in MX_ELEMENT_DTYPES
-    with pytest.raises(NotImplementedError):
-        mx_quantize(np.zeros((2, 32), dtype=np.float16), mx_ele_dtype="float16")
+
+def test_str_to_onnx_dtype_unmapped_and_dtype_objects():
+    """不映射面（uint1/hifloat8/hifloat4/float4_e1m2/complex32/STRING）与非
+    str/未知名返回 0(UNDEFINED)；dtype 对象经 dtype_to_name 归一后走同一张表。"""
+    unmapped = ("uint1", "int1", "hifloat8", "hifloat4", "float4_e1m2", "complex32", "string", "not-a-dtype", "")
+    for raw in unmapped:
+        assert str_to_onnx_dtype(raw) == 0
+    assert str_to_onnx_dtype(None) == 0
+    assert str_to_onnx_dtype(3) == 0
+
+    assert str_to_onnx_dtype(np.dtype("float16")) == 10
+    assert str_to_onnx_dtype(np.dtype("int32")) == 6
+    assert str_to_onnx_dtype(torch.float16) == 10
+    assert str_to_onnx_dtype(torch.float8_e8m0fnu) == 24
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("float16", True),
+        ("fp16", True),
+        ("bfloat16", True),
+        ("double", True),
+        ("int4", True),
+        ("uint2", True),
+        # torch 属性拼写与 str_to_onnx_dtype 同口径折叠
+        ("float8_e8m0fnu", True),
+        ("hifloat8", False),
+        ("hifloat4", False),
+        ("complex32", False),
+        ("uint1", False),
+        ("bogus", False),
+    ],
+)
+def test_is_onnx_native_dtype(name, expected):
+    assert is_onnx_native_dtype(name) is expected
+
+
+# ── 结构约束 ────────────────────────────────────────────────────────────────
+
+
+def test_dtypes_module_never_imports_onnx():
+    """结构约束：ONNX 映射是裸 int 数值表，dtypes 全文不得 import onnx。
+
+    懒导出机制下 dtypes 被各层大量 import，未安装 onnx 的环境必须可用；
+    扫描覆盖函数体内惰性 import（对齐 framework_api/test_structure.py 纪律）。
+    """
+    import ttk.utilities.dtypes as dtypes_module
+
+    tree = ast.parse(Path(dtypes_module.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(alias.name.split(".")[0] != "onnx" for alias in node.names), ast.dump(node)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            assert node.module.split(".")[0] != "onnx", ast.dump(node)
 
 
 # ── TF 桥接（torch_npu 与 tf C 扩展同进程冲突，按仓内惯例跳过） ─────────────

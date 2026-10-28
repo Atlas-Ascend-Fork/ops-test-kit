@@ -12,6 +12,7 @@
 | GEIR | `abs`（CSV `op_name`） | 算子 `def.cpp` 形参 | numpy.ndarray | 回退内置映射（`KERNEL_GOLDEN` → numpy 同名 API，如 `abs`），无命中才报 UNSUPPORTED |
 | ACLNN | `aclnnAbs`（CSV `api_name`） | `aclnn_abs.h` 形参 | torch.Tensor | 自动从 torch 同名 API 映射 |
 | E2E | `torch.abs`（CSV `api_name`） | torch API 签名 | torch.Tensor | 框架自动在 CPU 跑同 API 作 golden |
+| E2E onnx 域 | `onnx.Abs`（CSV `api_name`） | onnx schema（`onnx.defs`，环境注册表即权威） | numpy.ndarray | onnx ReferenceEvaluator 跑同一组模产物（同构参照） |
 
 > 注册名即 `get_spec_attr` 的查找 key：Kernel/GEIR 用 `op_name`，ACLNN/E2E 用 `api_name`。GEIR 复用 Kernel 的 spec，无需额外编写。类名按 PascalCase+TestSpec 约定或通过 `__spec__` dict 显式注册。
 
@@ -85,7 +86,7 @@ class TorchAbsTestSpec:
 | 函数 | `def golden(x, *, axis=-1):` | 中等复杂度，`*` 前=输入，`*` 后=属性 |
 | 类 | `class Golden: def __call__(self, x):` | 需要状态管理，`__init__`（可选）+ `__call__`（必须） |
 
-> golden 在 CPU 计算，Kernel/GEIR 传入 numpy.ndarray，ACLNN/E2E 传入 CPU（host）侧 torch.Tensor（`torch.from_numpy` 构造，先于设备执行生成；设备侧张量仅 `npu_preprocess` hook 可见）。
+> golden 在 CPU 计算，Kernel/GEIR 与 E2E onnx 域传入 numpy.ndarray，ACLNN/E2E（torch/tf）传入 CPU（host）侧 torch.Tensor（`torch.from_numpy` 构造，先于设备执行生成；设备侧张量仅 `npu_preprocess` hook 可见）。
 
 `third_party` 三种形式：
 
@@ -145,7 +146,7 @@ class AclnnSelfOpImpl:
 |------|---------|-----------|
 | Kernel / GEIR | numpy.ndarray | **必须返回**修改后的输入序列（TensorList 可嵌套可平铺，展平后数量须与输入槽一致；只原地改而不返回会报错） |
 | ACLNN | torch.Tensor（非 torch 原生 dtype 时为 numpy 视图） | 返回序列按输入张量槽回写（纯输出槽除外，`None` 槽保持原值）；整体返回 `None` 表示原地写法 |
-| E2E | torch.Tensor（numpy 回退场景为 ndarray） | 返回值被忽略，**仅原地写法**（`x[:] = value` / `x.copy_(...)`） |
+| E2E | torch.Tensor（numpy 回退场景为 ndarray；onnx 域恒为 ndarray） | 返回值被忽略，**仅原地写法**（`x[:] = value` / `x.copy_(...)`） |
 
 ```python
 def customize_inputs(x, min_val, max_val, **kwargs):

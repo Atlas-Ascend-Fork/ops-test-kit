@@ -26,6 +26,7 @@ description: 编写/定义算子测试规范（TestSpec，尚未跑或要新增 
 | GEIR | `abs`（CSV `op_name`） | 算子 `def.cpp` 形参 | numpy.ndarray | 同 Kernel（复用同一回退链） |
 | ACLNN | `aclnnAbs`（CSV `api_name`） | `aclnn_abs.h` 形参 | torch.Tensor | 自动从 torch 同名 API 映射 |
 | E2E | `torch.abs`（CSV `api_name`） | torch API 签名 | torch.Tensor | 框架自动在 CPU 跑同 API 作 golden |
+| E2E onnx 域 | `onnx.Abs`（CSV `api_name`） | onnx schema（`onnx.defs`，环境注册表即权威） | numpy.ndarray | ReferenceEvaluator 跑同一组模产物（同构参照） |
 
 > 注册名即 `get_spec_attr` 的查找 key：Kernel/GEIR 用 `op_name`，ACLNN/E2E 用 `api_name`。GEIR 复用 Kernel 的 spec，无需额外编写。
 
@@ -52,6 +53,7 @@ class AbsTestSpec:
   |------|---------|------|
   | Kernel / GEIR | numpy.ndarray | 需内部 `torch.from_numpy()` 转 torch 计算后 `.numpy()` 转回 |
   | ACLNN / E2E | torch.Tensor | CPU（host）侧张量（`torch.from_numpy` 构造，先于设备执行生成），直接用 torch 计算 |
+  | E2E onnx 域 | numpy.ndarray | numpy 直通域（零 torch 依赖），插件 golden 直接收 numpy 数组 |
 
 - **`third_party`**：调用三方 API（如 torch）
 
@@ -64,7 +66,7 @@ class AbsTestSpec:
 
 > 字符串形式（`golden = "torch.abs"`）由框架自动处理 numpy↔torch 转换，所有路径通用。
 
-> E2E 默认由框架在 CPU 跑同 API 作 Golden；如需控制输入范围用 CSV 的 `input_data_ranges` 字段。
+> E2E 默认由框架在 CPU 跑同 API 作 Golden；onnx 域默认由 ReferenceEvaluator 跑同一 model_builder 产物作参照；如需控制输入范围用 CSV 的 `input_data_ranges` 字段。
 
 ## NPU Golden（`--golden-mode NPU`）
 

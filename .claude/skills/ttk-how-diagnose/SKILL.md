@@ -24,6 +24,7 @@ TTK 启动时自动检测并 source CANN 环境（`setenv.bash`），通常无�
 | **执行** | `timeout`、`OOM`、`HBM`、`runtime` | 内存/超时参数 |
 | **精度** | `precision`、`cosine`、`close`、`compare` | Step 4 精度调试 |
 | **插件** | `plugin`、`register`、`golden` | 注册名/插件路径 |
+| **E2E onnx** | `ATC_`、`OM_`、`ONNX_` | ONNX 通路错误表（见 `references/error-patterns.md`） |
 | **仿真** | `npusim`、`sim`、`SIM_`、`wrapper`、`cannsim` | NPUSim 仿真排障（见 `references/npusim-errors.md`） |
 
 ## Step 3: 锁定单个用例调试

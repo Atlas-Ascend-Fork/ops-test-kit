@@ -122,6 +122,41 @@ python3 -m ttk info
 python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast
 ```
 
+# ONNX 通路问题
+
+## onnx 用例报 `ONNX_OPSET_VERSION_UNSUPPORTED`？
+
+环境 onnx 包的 opset 版本超过 CANN atc ONNX 插件注册上限（18）。TTK 要求 onnx ≥ 1.13（Golden 依赖 ReferenceEvaluator）且 `onnx.defs.onnx_opset_version() ≤ 18`——CANN 9.2.x 配套 onnx 1.13.x：
+
+```shell
+python3 -c "import onnx.defs; print(onnx.defs.onnx_opset_version())"   # 须 <= 18
+pip install "onnx==1.13.1"
+```
+
+## onnx 用例能用 `--backend cpu` 跑吗？
+
+不能。`--backend cpu` 下执行被测腿报 `ONNX_CPU_EXECUTION_UNSUPPORTED`——om 执行必须经 NPU（atc 编译 .om → aclmdl 执行），CPU 侧仅用于 Golden（ReferenceEvaluator）与输入生成。
+
+## `-d` 或 `--aclgraph` 报 `ONNX_DYNAMIC_GRAPH_UNSUPPORTED` / `ONNX_ACLGRAPH_UNSUPPORTED`？
+
+onnx 域 om 恒为静态图：eager ≡ 静态图。去掉这两个开关即可；需要双列结果时用 `--eager -c`（单次执行，EAGER 与 GRAPH CST 两列同值）。
+
+## NonZero / TopK 等算子报 `ONNX_DYNAMIC_OUTPUT_UNSUPPORTED`？
+
+这类算子的输出 shape 依赖输入数据，atc 会静默产出动态 dim 的 om，输出 shape 无法恢复——属通路边界，此类算子请改用 kernel/aclnn 模式覆盖。
+
+## 怀疑 atc 编译缓存脏了怎么办？
+
+onnx om 编译缓存位于 ttk 仓库根目录的 `onnx_cache/<op_type>/`（即 `<ttk 仓库根>/onnx_cache/<op_type>/`），缓存键已含 atc ONNX 插件指纹——atc 插件 .so 变更（如 CANN 升级/重装）后自动失效。仍怀疑缓存脏时删除该目录重编即可：
+
+```shell
+rm -rf onnx_cache/<op_type>/
+```
+
+## onnx 用例与 torch/tf 用例能混在同一个 CSV 吗？
+
+不能。同一 CSV 内不得混用不同框架 API（框架检测会拒绝；onnx worker 进程预载 numpy + onnx，与 torch/tf 进程互斥）。按域分文件存放，示例见 `examples/case_store/e2e/`（`torch_cases.csv` / `tf_cases.csv` / `onnx_cases.csv`）。
+
 # 精度问题
 
 ## 精度比对失败如何排查？

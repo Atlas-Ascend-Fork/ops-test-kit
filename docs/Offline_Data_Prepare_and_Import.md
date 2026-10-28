@@ -88,6 +88,18 @@ python3 -m ttk e2e \
 
 E2E 落盘可以增加 `--backend cpu` 强制 CPU backend；load 是设备阶段，不能使用 `--backend cpu`。
 
+E2E 的 onnx 域（`onnx.<OpType>`）两阶段同样可用：dump 侧 Golden 由 ReferenceEvaluator 在 CPU 生成（`--backend cpu` 语义上等价，无需额外开关）；load 侧经 atc→aclmdl 真机执行。onnx 域不支持 `--dump xpu`（告警跳过，见 [ONNX算子测试指南](./Operator_Test_Guides/ONNX_Test_Guide.md)）。
+
+```bash
+# onnx 域 dump（落盘输入 + Golden）
+python3 -m ttk e2e -i onnx_cases.csv -t onnx_add_f32 \
+  --no-prof --dump in,golden --manual-data-dirs /data/manual
+
+# onnx 域 load（恢复输入，真机执行）
+python3 -m ttk e2e -i onnx_cases.csv -t onnx_add_f32 \
+  --manual-data-dirs /data/manual
+```
+
 ### 2.2 ACLNN
 
 ```bash

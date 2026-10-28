@@ -154,3 +154,15 @@ class WallClockProfiler(FrameworkProfiler):
             wall_us=elapsed_us,
             source="wallclock",
         )
+
+
+class SteppedWallClockProfiler(WallClockProfiler):
+    """step() 重置计时窗的墙钟 profiler：warmup 轮（含一次性 setup）剔除。
+
+    torch 系经 schedule(warmup, active) 剔除 warmup；墙钟无调度器，以
+    step()（warmup 轮尾调用）为窗口起点对齐该语义。onnx e2e 消费
+    （aclmdl 执行不经 torch dispatcher，kernel 明细为空、perf 降级墙钟）。
+    """
+
+    def step(self):
+        self._start = time.perf_counter()

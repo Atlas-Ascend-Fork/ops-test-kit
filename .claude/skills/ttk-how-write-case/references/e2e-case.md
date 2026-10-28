@@ -9,6 +9,7 @@ E2E 用例的参数（张量数量/顺序/dtype、关键字参数等）来自框
 1. **PyTorch 官方文档**：https://pytorch.org/docs/stable/ 查找对应 API 的参数定义
 2. **torch_npu 扩展文档**：torch_npu 特有 API（如 `torch_npu.npu_conv2d`）查看其扩展文档
 3. **源码签名**：直接查看 API 的 Python 定义或 C++ binding
+4. **onnx 算子 schema**：onnx 域查看环境 onnx 包的算子 schema（`onnx.defs`，环境注册表即权威，无多级回退）
 
 张量参数按 API 签名顺序排列到 `tensor_view_shapes` / `tensor_dtypes`，非张量参数放入 `attributes`。
 
@@ -20,6 +21,7 @@ E2E 用例的参数（张量数量/顺序/dtype、关键字参数等）来自框
 | `torch.nn.functional.relu` | 子模块函数 | 调用子模块中的函数 |
 | `torch.Tensor.relu_` | Tensor 方法 | 通过 Tensor 实例调用（原地操作） |
 | `torch.ops.cann_ops_transformer.causal_conv1d_fn` | torch.ops 自定义算子 | torch extension 包注册的算子 |
+| `onnx.Add` | ONNX 算子 | `onnx.<OpType>` 声明单算子（不带 opset 版本）：TTK 组模 → atc 编译 .om → NPU aclmdl 执行，与 onnx ReferenceEvaluator 比对 |
 
 ## 必填字段
 
@@ -102,6 +104,21 @@ tensor_storage_shapes,"((3,6),)"
 tensor_view_shapes,"(((3,3),(3,2)),(3,5))"
 ```
 
+## ONNX 域约定
+
+`api_name` 写 `onnx.<OpType>`（如 `onnx.Add`、`onnx.Concat`），不带 domain/opset 限定。执行链路：TTK 自动组装单算子 ONNX 模型 → atc 离线编译 .om → NPU 经 aclmdl 执行，与 CPU 侧 onnx ReferenceEvaluator 参考实现比对。onnx 域是 numpy 直通域（零 torch/tf 依赖）。
+
+- **参数来源**：环境 onnx 包的算子 schema（`onnx.defs`，环境注册表即权威）；opset 取环境注册表最新，环境须满足 `onnx.defs.onnx_opset_version() ≤ 18`（对齐 CANN atc 插件注册上限，如 onnx 1.13.x 配 CANN 9.2.x）
+- **输出槽**：声明在 `tensor_view_shapes` 内（shape 填 `None`，dtype 照常声明，下标进 `output_tensor_indexes`），供对账/dump/精度判据锚定；输出 shape 由 atc shape inference 推导，无需填写
+- **Optional 输入省略**：非输出位的 `None` 槽 = 省略的 Optional 输入（仅支持尾部省略；非尾部省略建模期报 `ONNX_OPTIONAL_INPUT_UNSUPPORTED`）
+- **属性**：`attributes` 列即 ONNX 节点属性，一律按名传参（如 `{'axis':1}`）；必选属性（如 Concat 的 axis）缺失建模期报错；schema 未声明的属性名解析期报 `UNKNOWN_ATTRIBUTE`（拼写错误不静默忽略）；含 TENSOR/GRAPH 载荷的属性算子解析期拒绝（`ONNX_ATTR_TYPE_UNSUPPORTED`）
+- **布局列不支持**：`tensor_formats` / `tensor_storage_shapes` / `tensor_view_strides` / `tensor_view_offsets` 均为 ND 连续语义，填写报 `ONNX_LAYOUT_UNSUPPORTED`
+- **模式等价**：onnx 的 eager ≡ 静态图（om 恒为静态图），`--eager -c` 双开单次执行、EAGER 与 GRAPH CST 两列同值；`-d` / aclgraph 快速失败
+- **边界**：输入槽 dim<0（-1 动态标记）校验期报 `ONNX_DYNAMIC_INPUT_UNSUPPORTED`（仅静态 shape，dim ≥ 0）；数据依赖 shape 的算子（NonZero/TopK 等）报 `ONNX_DYNAMIC_OUTPUT_UNSUPPORTED`；全 Optional 输出的算子建模期报错
+- **环境**：onnx ≥ 1.13（ReferenceEvaluator）、ml-dtypes（bf16）、CANN atc；同一 CSV 表内不得混用 torch/tf/onnx API（框架检测拒绝）
+
+完整失败码清单见 `ttk-how-diagnose/references/error-patterns.md` 的 ONNX 通路表。
+
 ## 示例
 
 ### 基本示例
@@ -125,4 +142,18 @@ testcase_name,api_name,tensor_view_shapes,tensor_dtypes,attributes
 add_broadcast,torch.add,"((4,1,3),(1,5,3))","('float32','float32')","{'alpha':2.0}"
 ```
 
-更多示例见 `examples/case_store/e2e/`。
+### ONNX 用例
+
+```csv
+testcase_name,api_name,tensor_view_shapes,tensor_dtypes,attributes,output_tensor_indexes
+onnx_add_f32,onnx.Add,"((2,3),(2,3))","('float32','float32')",,
+onnx_add_f16,onnx.Add,"((128,256),(128,256),None)","('float16','float16','float16')",,"(2,)"
+onnx_concat_i32,onnx.Concat,"(((2,3),(2,4)),None)","('int32','int32')","{'axis':1}","(1,)"
+onnx_split_f32,onnx.Split,"((6,4),None,None,None)","('float32','float32','float32','float32')","{'axis':0,'num_outputs':3}","(1,2,3)"
+```
+
+- `onnx_add_f16`：第 3 槽 `None` = 输出槽声明（dtype 声明 float16，shape 由 atc 推导）
+- `onnx_concat_i32`：Variadic 输入（TensorList 嵌套）+ 必选属性 axis + 单输出槽
+- `onnx_split_f32`：Optional 输入 split 不声明即省略（少输入匹配按参数模型补 `None` 占位，`None` 槽非此语义）+ 3 个 `None` 槽 = 输出槽声明（Variadic 输出 × num_outputs=3）
+
+更多示例见 `examples/case_store/e2e/onnx_cases.csv`。

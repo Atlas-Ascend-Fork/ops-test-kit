@@ -188,6 +188,35 @@ def test_needs_promote_false_under_npu():
     assert needs_golden_promote(object(), _Switches(golden_mode="NPU")) is False
 
 
+def _onnx_none_shape_slot_case(out_dtype, in_dtype="float16"):
+    """onnx 形态用例：输出槽 None-shape（槽视图 None），声明列携带输出 dtype。"""
+    from ttk.core_modules.framework_api.testcase import TestcaseE2e
+
+    case = TestcaseE2e()
+    case.testcase_name = "ut_onnx_none_slot"
+    case.api_name = "onnx.Add"
+    case.is_valid = True
+    case.fail_reason = None
+    case.attributes = {}
+    case.tensor_view_shapes = ((128, 256), (128, 256), None)
+    case.tensor_dtypes = (in_dtype, in_dtype, out_dtype)
+    case.output_tensor_indexes = (2,)
+    _ = case.tensor_slots  # 生产访问序：判据解析时槽表已物化（None 槽视图走声明回填）
+    return case
+
+
+def test_needs_promote_onnx_none_shape_output_slots():
+    """回归：None-shape 输出槽经声明回填点亮 Promote（修复前 flat_output_dtypes=(None,)
+    恒 False）；对照整数输出判据为 binary_equal，回落声明后不触发 Promote。"""
+    case = _onnx_none_shape_slot_case("float16")
+    assert case.flat_output_dtypes == ("float16",)
+    assert needs_golden_promote(case, _Switches()) is True
+
+    case = _onnx_none_shape_slot_case("int32", in_dtype="float32")
+    assert case.flat_output_dtypes == ("int32",)
+    assert needs_golden_promote(case, _Switches()) is False
+
+
 def test_generate_golden_data_xpu_placeholder(monkeypatch):
     """XPU 模式本地不生成 golden：统一返回 GOLDEN_FAILURE 占位（真值由远端三方回路给出）。"""
     from types import SimpleNamespace

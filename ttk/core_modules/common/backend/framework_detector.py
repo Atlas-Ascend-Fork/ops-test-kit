@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""框架探测：api_name 前缀 → torch/tf（backend 与 api_param 的 dtype 谓词共用）。"""
+"""框架探测：api_name 前缀 → torch/tf/onnx（backend 与 api_param 的 dtype 谓词共用）。"""
 
 from typing import Optional
 
@@ -21,18 +21,25 @@ TF_API_PREFIXES = ("tf.", "tensorflow.", "npu_device.", "npu_bridge.")
 # 须走插件 golden 或 golden_api（e2e golden 三级回退的快速失败判据）。
 TF_NPU_ONLY_PREFIXES = ("tf.npu_", "npu_device.", "npu_bridge.")
 
+# onnx 通路的 api_name 前缀（onnx.<OpType>，不带 opset 版本——环境注册表最新即权威）。
+# torch.onnx.* 以 "torch." 开头不在此列。
+ONNX_API_PREFIXES = ("onnx.",)
+
 
 def detect_framework(api_name: str) -> str:
-    """Detect framework ('torch' or 'tf') from api_name prefix.
+    """Detect framework ('torch'/'tf'/'onnx') from api_name prefix.
 
     Routing rule:
         TF_API_PREFIXES 前缀 -> "tf"
+        ONNX_API_PREFIXES 前缀 -> "onnx"
         everything else (torch., torch_npu., torch.ops., torch.Tensor.) -> "torch"
     """
     if not api_name:
         return "torch"
     if api_name.startswith(TF_API_PREFIXES):
         return "tf"
+    if api_name.startswith(ONNX_API_PREFIXES):
+        return "onnx"
     return "torch"
 
 
@@ -40,11 +47,11 @@ def is_inplace_tensor_method(api_name: str, framework: Optional[str] = None) -> 
     """Check if api_name is an inplace tensor method.
 
     torch: torch.Tensor.xxx_ (trailing underscore)
-    tf: never (TF has no inplace tensor methods)
+    tf / onnx: never (无原地 Tensor 方法)
     """
     if framework is None:
         framework = detect_framework(api_name)
-    if framework == "tf":
+    if framework != "torch":
         return False
     if not api_name:
         return False

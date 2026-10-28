@@ -1,0 +1,7 @@
+testcase_name,api_name,tensor_view_shapes,tensor_dtypes,tensor_formats,tensor_storage_shapes,tensor_view_strides,tensor_view_offsets,attributes,output_tensor_indexes,golden_api,input_data_ranges,precision_tolerances,absolute_precision,remark
+onnx_add_f32,onnx.Add,"((2,3),(2,3))","('float32','float32')",,,,,,,,,,,基础双输入算子：f32 基线精度（输出槽声明缺省，返回值自动对账）
+onnx_add_f16,onnx.Add,"((128,256),(128,256),None)","('float16','float16','float16')",,,,,,"(2,)",,,,,dtype 覆盖：float16 + 输出槽声明（flat_output_dtypes 锚定 golden Promote 抬 fp32 真值）
+onnx_add_broadcast,onnx.Add,"((4,1,3),(5,3))","('float32','float32')",,,,,,,,,,,广播语义：4×1×3 与 5×3 输入，输出 4×5×3 由 atc shape inference 推导
+onnx_concat_i32,onnx.Concat,"(((2,3),(2,4)),None)","('int32','int32')",,,,,{'axis':1},"(1,)",,,,,Variadic 输入（TensorList 嵌套）+ 必选属性 axis + 单输出槽声明（int32 binary_equal）
+onnx_split_f32,onnx.Split,"((6,4),None,None,None)","('float32','float32','float32','float32')",,,,,"{'axis':0,'num_outputs':3}","(1,2,3)",,,,,Optional 输入 split 不声明即省略（少输入匹配补 None 占位，None 槽非此语义）；3 个 None 槽=输出槽声明（Variadic 输出 × num_outputs=3，axis=0 三等分各 2×4）
+onnx_matmul_bf16,onnx.MatMul,"((32,64),(64,16),None)","('bfloat16','bfloat16','bfloat16')",,,,,,"(2,)",,,,,bf16 精度档 + 输出槽声明（flat_output_dtypes 锚定 golden Promote 抬 fp32 真值）

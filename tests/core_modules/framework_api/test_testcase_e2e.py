@@ -109,6 +109,36 @@ class TestFlatOutputDtypes:
         )
         assert case.flat_output_dtypes == ()
 
+    def test_none_shape_output_slots_fall_back_to_declaration(self, make_testcase):
+        """onnx 输出槽 None-shape 槽视图为 None → 逐一回落 CSV 声明 dtype（声明序
+        对齐，Split 多输出形态同适用）；对照真实 shape 输出槽不受回落影响。"""
+        case = make_testcase(
+            api_name="onnx.Add",
+            tensor_view_shapes=((128, 256), (128, 256), None),
+            tensor_dtypes=("float16", "float16", "float16"),
+            output_tensor_indexes=(2,),
+        )
+        _ = case.tensor_slots  # 生产访问序：槽表先物化（None-shape 槽 → 槽视图 dtype None）
+        assert case.flat_tensor_dtypes == ("float16", "float16", None)
+        assert case.flat_output_dtypes == ("float16",)
+
+        case = make_testcase(
+            api_name="onnx.Split",
+            tensor_view_shapes=((6, 4), None, None, None),
+            tensor_dtypes=("float32", "float32", "float32", "float32"),
+            output_tensor_indexes=(1, 2, 3),
+        )
+        _ = case.tensor_slots
+        assert case.flat_output_dtypes == ("float32", "float32", "float32")
+
+        case = make_testcase(
+            tensor_view_shapes=((2, 3), (2, 3)),
+            tensor_dtypes=("float16", "int32"),
+            output_tensor_indexes=(1,),
+        )
+        _ = case.tensor_slots
+        assert case.flat_output_dtypes == ("int32",)
+
     def test_feeds_unpack_4bit_outputs(self, make_testcase):
         pytest.importorskip("ml_dtypes")
         from ttk.core_modules.framework_api.utils import unpack_4bit_outputs
@@ -311,6 +341,121 @@ class TestCheckTensorConfiguration:
         case.validate()
         assert not case.is_valid
         assert case.fail_reason == "API_PARSE_FAIL"
+
+    def test_onnx_attr_validation(self, make_testcase):
+        """onnx 域属性校验：未知属性校验期拒绝；声明属性放行。"""
+        self._register_api(
+            "onnx.TestAttr",
+            [
+                ParamInfo(name="X", type="Tensor"),
+                ParamInfo(name="Y", type="Tensor"),
+                ParamInfo(name="alpha", type="float", is_keyword_only=True, is_optional=True),
+            ],
+        )
+        case = make_testcase(
+            api_name="onnx.TestAttr",
+            tensor_view_shapes=((2, 3), (2, 3)),
+            tensor_dtypes=("float32", "float32"),
+            attributes={"alphaX": 1.0},
+        )
+        case.validate()
+        assert not case.is_valid
+        assert case.fail_reason == "UNKNOWN_ATTRIBUTE"
+
+        self._register_api(
+            "onnx.TestAttrOk",
+            [
+                ParamInfo(name="X", type="Tensor"),
+                ParamInfo(name="Y", type="Tensor"),
+                ParamInfo(name="alpha", type="float", is_keyword_only=True, is_optional=True),
+            ],
+        )
+        case = make_testcase(
+            api_name="onnx.TestAttrOk",
+            tensor_view_shapes=((2, 3), (2, 3)),
+            tensor_dtypes=("float32", "float32"),
+            attributes={"alpha": 1.5},
+        )
+        case.validate()
+        assert case.is_valid
+
+    def test_onnx_dynamic_input_gate(self, make_testcase):
+        """onnx 域 -1 动态槽校验期拒绝（不得落通用 npu_preprocess 门）；
+        静态 shape + None 输出槽声明不误伤。"""
+        self._register_api(
+            "onnx.TestDyn",
+            [
+                ParamInfo(name="X", type="Tensor"),
+                ParamInfo(name="Y", type="Tensor"),
+            ],
+        )
+        case = make_testcase(
+            api_name="onnx.TestDyn",
+            tensor_view_shapes=((-1, 3), (2, 3)),
+            tensor_dtypes=("float32", "float32"),
+        )
+        case.validate()
+        assert not case.is_valid
+        assert case.fail_reason == "ONNX_DYNAMIC_INPUT_UNSUPPORTED"
+
+        case = make_testcase(
+            api_name="onnx.TestDyn",
+            tensor_view_shapes=((2, 3), (2, 3), None),
+            tensor_dtypes=("float32", "float32", "float32"),
+            output_tensor_indexes=(2,),
+        )
+        case.validate()
+        assert case.is_valid
+
+    def test_onnx_dynamic_in_nested_tensorlist_rejected_by_generic_gate(self, make_testcase):
+        """TensorList 内 -1 由通用校验层先行拒绝（DYN_SHAPE_IN_TENSORLIST，
+        全域语义非 onnx 特有）；onnx 门禁只接管普通输入位的 -1 残余场景。"""
+        self._register_api(
+            "onnx.TestDynTl",
+            [ParamInfo(name="tensors", type="tuple of Tensors")],
+        )
+        case = make_testcase(
+            api_name="onnx.TestDynTl",
+            tensor_view_shapes=(((-1, 3), (3, 4)),),
+            tensor_dtypes=("float32",),
+        )
+        case.validate()
+        assert not case.is_valid
+        assert case.fail_reason == "DYN_SHAPE_IN_TENSORLIST"
+
+    def test_torch_domain_unaffected_by_onnx_gates(self, make_testcase):
+        """torch 域对照：-1 槽不受 onnx 门禁影响（npu_preprocess 通道保留）；
+        extra_attrs 有插件 kwargs 消费方，未知属性不做校验期拒绝。"""
+        self._register_api(
+            "torch.test_dyn_torch",
+            [
+                ParamInfo(name="X", type="Tensor"),
+                ParamInfo(name="Y", type="Tensor"),
+            ],
+        )
+        case = make_testcase(
+            api_name="torch.test_dyn_torch",
+            tensor_view_shapes=((-1, 3), (2, 3)),
+            tensor_dtypes=("float32", "float32"),
+        )
+        case.validate()
+        assert case.is_valid
+
+        self._register_api(
+            "torch.test_extra_attr",
+            [
+                ParamInfo(name="input", type="Tensor"),
+                ParamInfo(name="other", type="Tensor"),
+            ],
+        )
+        case = make_testcase(
+            api_name="torch.test_extra_attr",
+            tensor_view_shapes=((2, 3), (2, 3)),
+            tensor_dtypes=("float32", "float32"),
+            attributes={"plugin_kwarg": 1.0},
+        )
+        case.validate()
+        assert case.is_valid
 
     def test_none_element_for_tensorlist_skipped(self, make_testcase):
         self._register_api(

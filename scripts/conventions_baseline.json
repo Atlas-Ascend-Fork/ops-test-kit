@@ -339,8 +339,7 @@
     "ttk/remote/xpu_collector.py": {
       "PLR0913": 1
     },
-    "ttk/utilities/dtypes.py": {
-      "C901": 1,
+    "ttk/utilities/mx_quant.py": {
       "PLR0913": 1
     },
     "ttk/utilities/string.py": {
@@ -350,6 +349,9 @@
       "PLR0913": 1
     },
     "ttk/core_modules/common/golden/npu_golden.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/onnx/__init__.py": {
       "PLR0913": 1
     }
   },

@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-TTK（ops Test Tool Kit）是昇腾 NPU 单算子测试框架：以 CSV 描述用例，一条命令批量完成编译、执行、精度比对。支持四种测试模式——Kernel（TBE/AscendC 算子内核）、GEIR（GE 图编译+执行）、ACLNN（`aclnn*` C API）、E2E（torch/torch_npu 等框架 API）。
+TTK（ops Test Tool Kit）是昇腾 NPU 单算子测试框架：以 CSV 描述用例，一条命令批量完成编译、执行、精度比对。支持四种测试模式——Kernel（TBE/AscendC 算子内核）、GEIR（GE 图编译+执行）、ACLNN（`aclnn*` C API）、E2E（torch/torch_npu、tensorflow 框架 API，及 `onnx.<OpType>` 的 onnx 域：atc 编译 .om + aclmdl 执行）。
 
 ## 常用命令
 
@@ -14,8 +14,9 @@ python3 -m ttk kernel -i examples/case_store/kernel/cases.csv --plugin examples/
 python3 -m ttk geir   -i examples/case_store/kernel/cases.csv --plugin examples/case_store/kernel/golden.py
 python3 -m ttk aclnn  -i examples/case_store/aclnn/cases.csv --plugin examples/case_store/aclnn/golden.py
 python3 -m ttk e2e    -i examples/case_store/e2e/torch_cases.csv  # --backend cpu 强制 CPU 后端
+python3 -m ttk e2e    -i examples/case_store/e2e/onnx_cases.csv  # onnx 域：atc→om→aclmdl，无需 torch/tensorflow
 
-# NPUSim 仿真后端（kernel/aclnn/e2e 均支持，无真机即可跑）
+# NPUSim 仿真后端（kernel/aclnn/e2e 均支持，无真机即可跑；e2e 的 onnx 域除外：启动期报 ONNX_NPUSIM_UNSUPPORTED）
 python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t add_fp16_broadcast --backend npusim --sim-report
 
 # 只列出用例名（不跑设备、不做字段校验；校验用对应模式 `--validate`）
@@ -68,7 +69,8 @@ pre-commit run --all-files       # ruff + codespell + 基础检查（v4，非 pr
 ### 比对、E2E Backend 与远程执行
 
 - 比对方法集中在 `ttk/core_modules/common/comparison/`；`cross_check` 三方交叉校验需配合 `third_party`。
-- E2E 的硬件中立 Backend 抽象与 api_resolver 在 `ttk/core_modules/common/backend/`（torch/npu/cpu/xpu backend），profiler 在 `ttk/core_modules/common/profiler/`；eager/graph 执行在 `ttk/core_modules/framework_api/torch/`（eager_runner、graph_runner）。
+- E2E 的硬件中立 Backend 抽象与 api_resolver 在 `ttk/core_modules/common/backend/`（torch/npu/cpu/xpu/onnx backend），profiler 在 `ttk/core_modules/common/profiler/`；eager/graph 执行在 `ttk/core_modules/framework_api/torch/`（eager_runner、graph_runner）。
+- E2E 的 onnx 域在 `ttk/core_modules/framework_api/onnx/`（param_extractor → model_builder → om_compiler → runner/OmSession，全树零 torch/tf import，numpy 直通）；参数来源是环境 onnx 包的算子 schema（`onnx.defs`），Golden 走 `onnx.reference.ReferenceEvaluator`（与被测共用同一组模产物）。om 恒为静态图（eager ≡ 静态图），`-d`/`--aclgraph` 快速失败。指南见 `docs/Operator_Test_Guides/ONNX_Test_Guide.md`。
 - 远端 XPU 执行（mTLS、server/client、heartbeat）在 `ttk/remote/`，客户端配置见 `ttk/config/default.yaml` 的 `remote:` 段；server 侧框架/硬件配置见 `ttk/remote/server/xpu_server.yaml`（运行时探测）。
 
 ### NPUSim 仿真后端（`ttk/core_modules/common/simulator/`）

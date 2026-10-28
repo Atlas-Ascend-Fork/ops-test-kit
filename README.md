@@ -4,7 +4,7 @@ TTK（ops Test Tool Kit）是[CANN](https://hiascend.com/software/cann)算子库
 
 > 文档中出现的硬件厂商名仅作示例，TTK 通过配置驱动支持任意符合接口的硬件加速器。
 
-* **全栈测试通路**：Kernel（AscendC）/ GEIR（GE图）/ ACLNN（aclnn* C API）/ E2E（torch/torch_npu），覆盖算子到框架各层
+* **全栈测试通路**：Kernel（AscendC）/ GEIR（GE图）/ ACLNN（aclnn* C API）/ E2E（torch/torch_npu、tensorflow、onnx 域），覆盖算子到框架各层
 * **多设备 + 仿真**：真实设备支持 NPU / MLU / CPU；仿真模式基于 CPU 模拟 NPU 行为，无需真实硬件即可开发调试
 * **多卡并行**：多 NPU 设备并行测试
 * **多种精度对比**：混合容差（生态算子开源精度标准，默认）、统计相对误差、余弦相似度、二进制精确、重量化、三方交叉校验
@@ -18,7 +18,7 @@ TTK（ops Test Tool Kit）是[CANN](https://hiascend.com/software/cann)算子库
 ┌──────────────────────────────────────────────────┐
 │  应用框架层  ✅ Torch · TensorFlow · ...          │  ← E2E（端到端，覆盖全链路）
 ├──────────────────────────────────────────────────┤
-│  引擎层     ✅ GEIR · ✅ ACLNN                   │  ← GEIR（GE图编译+执行）/ ACLNN（引擎 API）
+│  引擎层     ✅ GEIR · ✅ ACLNN · ✅ ONNX          │  ← GEIR（GE图编译+执行）/ ACLNN（引擎 API）/ ONNX（atc→om，经 e2e 的 onnx 域）
 ├──────────────────────────────────────────────────┤
 │  算子层     ✅ AiCore · AiCpu                     │  ← Kernel（算子内核，覆盖编译+执行）
 └──────────────────────────────────────────────────┘
@@ -32,6 +32,7 @@ TTK（ops Test Tool Kit）是[CANN](https://hiascend.com/software/cann)算子库
 - GEIR 通路依赖系统工具链 `g++`（GE 图编译，可用 `g++ --version` 检查）
 - ACLNN 通路额外依赖 `torch`（输入生成/Golden计算），E2E 通路额外依赖 `torch`/`torch_npu`（均不在 `requirements.txt` 中，需按本地 CANN 版本配套安装，参见 [torch_npu 安装指引](https://gitee.com/ascend/pytorch)）。**torch 与 torch_npu 必须主次版本配套**：`pip install ".[e2e-npu]"` 已带上限约束防止解析到配套矩阵之外的组合，并排除已实测不配套的 `torch_npu 2.12.0.post3`（配 torch 2.12.0 import 崩溃退出码 134）；经测试组合 `torch==2.12.0` + `torch-npu==2.12.0.post2`（CANN 9.3.0）。若 `import torch_npu` 崩溃退出码 134 并报 `Duplicated key 'pinned_reserve_segment_size_mb'`，即版本不配套，按 [torch_npu 配套矩阵](https://gitee.com/ascend/pytorch) 重装配套版本
 - float4（`float4_e2m1`）dtype 用例额外依赖 [en-dtypes](https://pypi.org/project/en-dtypes/)（`pip3 install en-dtypes`，不在 `requirements.txt` 中；缺失时 GEIR 通路报 `EN_DTYPES IS NEEDED TO SUPPORT FLOAT4_E2M1 DTYPE`）
+- E2E 的 onnx 域（`api_name` 为 `onnx.<OpType>`）无需 torch/tensorflow，依赖 `onnx` 包（≥1.13 且 `onnx.defs.onnx_opset_version() ≤ 18`，CANN 9.2.x 配套 onnx 1.13.x）与 CANN 的 `atc`/`libascendcl`，详见 [ONNX算子测试指南](./docs/Operator_Test_Guides/ONNX_Test_Guide.md)
 - 自带示例用例（`examples/case_store/`）包含 fp8/fp4 等前沿 dtype 覆盖用例，其通过依赖本地 CANN 版本的算子支持面；不支持时报 `E80008`/`EZ1001`/`EZ3002` 等 dtype 不支持类错误，属预期行为而非环境装错，详见[示例用例说明](./examples/case_store/README.md)
 
 ```shell
@@ -59,6 +60,9 @@ python3 -m ttk aclnn -i examples/case_store/aclnn/cases.csv --plugin examples/ca
 
 # E2E：框架端到端（--backend cpu 强制 CPU 后端）
 python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv
+
+# E2E-onnx：ONNX 单算子（atc 编译 .om + aclmdl 执行，无需 torch/tensorflow）
+python3 -m ttk e2e -i examples/case_store/e2e/onnx_cases.csv
 ```
 
 运行后终端输出每个用例的精度状态和整体通过率，加 `-o` 可输出结果 CSV。参数帮助执行 `python3 -m ttk kernel --help`。
@@ -73,14 +77,15 @@ python3 -m ttk e2e -i examples/case_store/e2e/torch_cases.csv
 
 ### 测试通路
 
-四条测试通路对应昇腾技术栈不同层级，详见各通路指南。
+四条测试通路对应昇腾技术栈不同层级（E2E 内含 torch/tensorflow/onnx 三个域，onnx 域经 atc→om 走引擎层，单列一行），详见各通路指南。
 
 | 通路 | 覆盖层级 | 指南 |
 |------|---------|------|
 | Kernel | 算子层（AiCore/AiCpu），覆盖编译+执行 | [Kernel算子测试指南](./docs/Operator_Test_Guides/Kernel_Test_Guide.md) |
 | GEIR | 引擎层，GE 图编译+执行 | [GEIR算子测试指南](./docs/Operator_Test_Guides/GEIR_Test_Guide.md) |
 | ACLNN | 引擎层，aclnn\* C API | [ACLNN算子测试指南](./docs/Operator_Test_Guides/ACLNN_Test_Guide.md) |
-| E2E | 应用框架层（torch/torch_npu），端到端 | [E2E算子测试指南](./docs/Operator_Test_Guides/E2E_Test_Guide.md) |
+| E2E | 应用框架层（torch/torch_npu、tensorflow），端到端 | [E2E算子测试指南](./docs/Operator_Test_Guides/E2E_Test_Guide.md) |
+| E2E-onnx | 引擎层，ONNX 单算子经 atc 编译 .om + aclmdl 执行 | [ONNX算子测试指南](./docs/Operator_Test_Guides/ONNX_Test_Guide.md) |
 
 ### 高阶使用场景
 
