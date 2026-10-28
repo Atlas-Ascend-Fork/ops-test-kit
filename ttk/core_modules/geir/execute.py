@@ -149,7 +149,7 @@ class _GeirServe:
         return self.proc.poll() is None
 
     def _read_exact(self, n: int, deadline: float) -> bytes:
-        buf = b""
+        buf = bytearray()
         while len(buf) < n:
             remaining = deadline - time.time()
             if remaining <= 0:
@@ -163,7 +163,7 @@ class _GeirServe:
                     "GEIR serve process exited unexpectedly: " + self._stderr_tail[-2000:].decode("utf-8", "replace")
                 )
             buf += chunk
-        return buf
+        return bytes(buf)
 
     def run_case(self, testcase, plan: GraphExecPlan, switches) -> list:
         """喂一行 config，读一例完整帧，返回解析后的输出列表。"""
