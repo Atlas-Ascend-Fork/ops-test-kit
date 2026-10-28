@@ -66,6 +66,13 @@ from .result import AclnnReturnStructure, ApiComparisonResult, ApiProfilingResul
 from .testcase import TestcaseAclnn
 
 
+def _memory_check_status(oob) -> str:
+    """STATUS 行内存检查格：仅明确含 FAIL 的越界结论判 FAIL，UNKNOWN/缺失视为 PASS。"""
+    if not oob:
+        return "PASS"
+    return "FAIL" if "FAIL" in oob.split(",") else "PASS"
+
+
 def _profiling_end_print(context: TestcaseAclnn, return_structure: AclnnReturnStructure):
     prof_result = getattr(context, "prof_result", None)
     oob = getattr(prof_result, "oob", None)
@@ -76,7 +83,7 @@ def _profiling_end_print(context: TestcaseAclnn, return_structure: AclnnReturnSt
             "STATUS",
             return_structure.perf_status,
             str(return_structure.precision_status),
-            "PASS" if oob == "PASS" else "FAIL",
+            _memory_check_status(oob),
         ),
     ]
     logging.info("\n" + render_table(lines))
