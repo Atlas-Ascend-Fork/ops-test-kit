@@ -275,6 +275,22 @@ def test_pack_4bits_layout_and_roundtrip():
     assert pack_4bits(odd).tolist() == [0 | 2 << 4, 4 | 5 << 4, 6]  # e2m1(4) 编码为 0x6
 
 
+@pytest.mark.skipif(_missing_ml_dtypes(), reason="ml_dtypes is not installed")
+@pytest.mark.parametrize("src_dtype", [np.uint8, np.int8, np.int32])
+def test_unpack_4bits_accepts_wide_dtype_source(src_dtype):
+    """unpack_4bits 接受宽 dtype 打包源：统一先 view(uint8) 再拆——uint8/int8
+    每字节 2 个 4bit（存量行为），int32 等 32bit 元素 8 个 4bit（低字节小端）。"""
+    from ml_dtypes import int4
+
+    src = np.array([0x21, 0x43], dtype=src_dtype)
+    out = unpack_4bits(src, int4)
+    assert out.dtype == int4
+    if src_dtype in (np.uint8, np.int8):
+        assert out.tolist() == [1, 2, 3, 4]
+    else:
+        assert out.tolist() == [1, 2, 0, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0, 0, 0, 0]
+
+
 # ── numpy ↔ torch 转换 ──────────────────────────────────────────────────────
 
 

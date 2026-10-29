@@ -566,8 +566,12 @@ def pack_4bits(src: numpy.ndarray):
 
 def unpack_4bits(src: numpy.ndarray, dst_dtype):
     """
-    Unpack uint8 numpy array to int4 array
+    Unpack numpy array to int4/float4 array.
+
+    src 为打包形态：uint8/int8（每字节 2 个 4bit 值）或 int32/fp32 等更宽
+    dtype（每 32bit 元素 8 个 4bit 值），统一先 view 成 uint8 再拆包。
     """
+    src = src.view(numpy.uint8)
     if isinstance(dst_dtype, str):
         dst_dtype = resolve_numpy_dtype(dst_dtype)
     shift = numpy.array([0, 4], dtype=numpy.uint8)

@@ -37,7 +37,7 @@
 |------|------|---------|--------|------|
 | `output_tensor_indexes` | INT_CONTAINER | 否 | `()` | 输出张量索引。默认为空（输出从 API 返回值收集）；仅 Inplace Tensor 方法（`torch.Tensor.xxx_`）自动填充 `(0,)`；带 `out` 参数的API需手动指定输出位置索引 |
 | `inplace_input_indexes` | INT_CONTAINER | 否 | `()` | 需要比对输入被原地改写的张量索引（框架按此备份输入并参与比对） |
-| `attributes` | DICT | 否 | `{}` | 框架API关键字参数。如 `{'alpha': 1.0}`。API签名中的必选非张量参数**必须**提供 |
+| `attributes` | DICT | 否 | `{}` | 框架API关键字参数。如 `{'alpha': 1.0}`。API签名中的必选非张量参数**必须**提供。torch 用例可携带保留键 `CubeMathType`（int 0-4，不传入API）：执行前设置 `torch_npu.npu.matmul/conv` 立方计算精度模式（0 KEEP_DTYPE / 1 ALLOW_FP32_DOWN_PRECISION / 2 USE_FP16 / 3 USE_HF32 / 4 高精度档），用于 matmul/conv 类算子的精度模式场景验证；携带该键的用例先复位基线（KEEP_DTYPE + `allow_hf32=False`）再覆盖，未携带时保持 torch_npu 进程默认（同进程前序用例改写过则复位基线），仅 NPU + torch 框架生效 |
 | `golden_api` | STRING | 否 | `""` | 替代Golden计算的API。如 `torch.nn.functional.conv2d`。设为 `"disable"` 可禁用Golden生成 |
 
 ## 批一致性字段

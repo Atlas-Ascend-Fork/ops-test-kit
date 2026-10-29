@@ -41,9 +41,9 @@ from ttk.core_modules.common.testcase.batch import resolve_deterministic_level
 from ttk.core_modules.common.testcase.input_data import reseed_per_testcase
 from ttk.switches import get_global_storage
 from ttk.utilities import render_table
-from ttk.utilities.dtypes import resolve_numpy_dtypes
+from ttk.utilities.dtypes import is_4bit_dtype, resolve_numpy_dtypes, unpack_4bits
 
-from ..common.backend import get_backend
+from ..common.backend import detect_framework, get_backend
 from ..common.comparison.batch_consistency import assemble_batch_summary
 from ..common.comparison.resolve import needs_promote_golden, resolve_tolerance
 from ..common.invoke import golden_mode
@@ -1049,6 +1049,9 @@ def _prepare_golden(
             grant_event=(device_grant_events or {}).get(dev_id),
             granted_idx=(device_granted_indices or {}).get(dev_id),
         ):
+            # golden 也上板执行时与被测段共用同一 CubeMathType 精度模式（避免
+            # 沿用上一用例的进程级状态造成 golden/结果模式错位）
+            _setup_cube_math_type(backend, testcase, process_ctx)
             nps = _generate_golden(
                 testcase,
                 raw_inputs,
@@ -1111,6 +1114,69 @@ def _run_graph_phase(mode_label, graph_fn, *args, **kwargs):
         return [], None, None, _attach_plog_errors(f"Graph {mode_label} execution failed: {exc}")
 
 
+def _cube_math_type_value(testcase):
+    """读取用例 attributes 的 CubeMathType 精度模式（torch 框架专属；TF 通路
+    无此概念，恒 None——见 torch_npu.npu.matmul.cube_math_type 接口说明）。"""
+    if detect_framework(testcase.api_name) != "torch":
+        return None
+    attributes = getattr(testcase, "attributes", None) or {}
+    return attributes.get("CubeMathType")
+
+
+def _setup_cube_math_type(backend, testcase, process_ctx):
+    """按用例 CubeMathType 配置 torch_npu 立方计算精度模式（matmul/conv 类算子）。
+
+    进程级 torch_npu 状态、幂等。基线复位按需执行：KEEP_DTYPE +
+    allow_hf32=False 基线与 torch_npu 进程默认并不恒同（conv.allow_hf32
+    默认 True；910A 上 fp32 matmul 默认内部 USE_FP16），且 option 只写不清
+    ——未携带该键的用例若也写基线会改动其默认数值通路。故仅当本用例携带
+    该键、或本 worker 前序用例已改写过（storage 标记，防跨用例状态泄漏）
+    时才写基线再按值覆盖；否则不触碰 torch_npu（亦不导入）：
+      0: KEEP_DTYPE（保持原始 dtype）/ 1: ALLOW_FP32_DOWN_PRECISION /
+      2: USE_FP16 / 3: USE_HF32（同时置 matmul/conv allow_hf32=True）/
+      4: 高精度档（FORCE_GRP_ACC_FOR_FP32，新版本为 USE_FP32_ADD——按枚举值
+      取成员，对成员改名版本兼容）。
+    conv.cube_math_type 在无此配置项的 torch_npu 版本为静默 no-op，赋值保留
+    以兼容支持版本。仅 NPU + torch 框架生效（TF/xpu 不涉及，亦不导入
+    torch_npu）。
+    """
+    if not backend.is_npu() or detect_framework(testcase.api_name) != "torch":
+        return
+
+    cube_math_type_val = _cube_math_type_value(testcase)
+    # 未携带该键且前序用例未改写过：保持 torch_npu 进程默认（不导入、不写入）
+    if cube_math_type_val is None and not process_ctx.storage.get("_cube_math_type_dirty", False):
+        return
+
+    import torch_npu
+
+    cmt_value = torch_npu.npu.CubeMathType.KEEP_DTYPE
+    torch_npu.npu.matmul.cube_math_type = cmt_value
+    torch_npu.npu.conv.cube_math_type = cmt_value
+    torch_npu.npu.matmul.allow_hf32 = False
+    torch_npu.npu.conv.allow_hf32 = False
+    # 一旦写入即无法恢复 torch_npu 未设置态（option 只写不清），标记此后恒须复位
+    process_ctx.storage["_cube_math_type_dirty"] = True
+
+    # 复位路径：前序改写过、本用例未携带该键——基线已就位，静默返回
+    if cube_math_type_val is None:
+        return
+
+    try:
+        cmt = torch_npu.npu.CubeMathType(int(cube_math_type_val))
+    except (ValueError, TypeError):
+        logging.warning(
+            "[CubeMathType] invalid value %r, expect int in 0-4; keep KEEP_DTYPE baseline",
+            cube_math_type_val,
+        )
+        return
+    torch_npu.npu.matmul.cube_math_type = cmt
+    torch_npu.npu.conv.cube_math_type = cmt
+    if cmt == torch_npu.npu.CubeMathType.USE_HF32:
+        torch_npu.npu.matmul.allow_hf32 = True
+        torch_npu.npu.conv.allow_hf32 = True
+
+
 def _device_profiling(
     testcase,
     backend,
@@ -1159,6 +1225,9 @@ def _device_profiling(
         granted_idx=device_granted_indices.get(dev_id),
     ):
         process_ctx.notify_status("OnProfilingPrint")
+        # CubeMathType 精度模式先于一切执行段配置（eager + 三种图形态共享进程级
+        # torch_npu 状态；npusim 仿真同为 NPU 语义一并生效，非 torch 框架不导入）
+        _setup_cube_math_type(backend, testcase, process_ctx)
         _profiling_print(testcase, backend, dev_id, switches)
 
         # 模式等价去重（adapter 钩子驱动、无框架分支）：onnx 的 eager ≡ 静态图
@@ -1544,10 +1613,58 @@ def _collect_xpu(
     return third_parties, xpu_results, golden_nps, False
 
 
+def _normalize_output_dtype_for_4bit_golden(output_nps, golden_nps):
+    """golden 为 4bit dtype 而输出 dtype 更宽时的比对前对齐。
+
+    两种封装形态统一先 view 成 uint8 再 unpack 到 golden 的 4bit dtype：
+      1. 输出 uint8/int8 —— 每字节 2 个 4bit 值；
+      2. 输出 int32/fp32 等宽 dtype —— 每 32bit 元素 8 个 4bit 值。
+    消除纯封装 dtype 差异，让数值比对与容差解析落在 golden 的 4bit dtype 上。
+    奇数元素数时打包尾部的填充 nibble（pack_4bits 奇数补零约定）裁齐 golden
+    元素数；仅当多出尾部在打包粒度内（< 2*itemsize 个 nibble，即只可能是末
+    元素填充位）且全为零时才裁——超出粒度或尾部非零属输出尺寸异常，保留
+    unpack 结果让长度比对诚实暴露（无条件截断会把尺寸 bug 放行成假 PASS）。
+    CSV 已声明 4bit 输出的场景在执行段 unpack_4bit_outputs 完成，此处为
+    golden 侧驱动的兜底（golden 来自插件/回放时 dtype 以 golden 为准）。
+    """
+    if not output_nps or not golden_nps:
+        return output_nps
+
+    for i in range(min(len(output_nps), len(golden_nps))):
+        res, gld = output_nps[i], golden_nps[i]
+        if res is None or gld is None:
+            continue
+        if not isinstance(res, np.ndarray) or not isinstance(gld, np.ndarray):
+            continue
+        if not is_4bit_dtype(gld.dtype) or res.dtype == gld.dtype:
+            continue
+        try:
+            unpacked = unpack_4bits(res, gld.dtype)
+        except Exception as exc:
+            # 解包失败保留原样送比对（比对必挂，此处留指向性线索）
+            logging.debug(f"[4bit golden normalize] unpack output#{i} as {gld.dtype} failed: {exc}")
+            continue
+        surplus = unpacked.size - gld.size
+        if 0 < surplus < 2 * res.itemsize and not unpacked[gld.size :].any():
+            unpacked = unpacked[: gld.size]
+        output_nps[i] = unpacked
+    return output_nps
+
+
 def _compare_and_finalize(
     testcase, switches, process_ctx, raw_inputs, outputs, golden_nps, third_parties, api, return_struct, backend
 ):
     """比对收尾：eager / graph 各形态 dump + 精度评估 + 终态屏显。"""
+    # golden 为 4bit dtype 时各输出腿先做封装对齐（eager + 三种图形态）
+    if golden_nps:
+        for output_nps in (
+            outputs.result_nps,
+            outputs.graph_cst_nps,
+            outputs.graph_dyn_nps,
+            outputs.graph_aclgraph_nps,
+        ):
+            if output_nps:
+                _normalize_output_dtype_for_4bit_golden(output_nps, golden_nps)
     if outputs.result_nps is None:
         # eager 模式被显式关闭（--eager=false）时不占 NO_OUTPUT 语义——
         # 主判据由图模式承载（ref_nps 回退链）；仅当 eager 本应执行却无产出时报错。

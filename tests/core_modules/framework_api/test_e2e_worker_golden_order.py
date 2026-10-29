@@ -31,7 +31,7 @@ from ttk.switches import SWITCHES
 
 
 def _process_context():
-    return SimpleNamespace(notify_status=lambda *_: None, change_name=lambda *_: None)
+    return SimpleNamespace(notify_status=lambda *_: None, change_name=lambda *_: None, storage={})
 
 
 def _e2e_case(name, first_view_shape=(2,)):
