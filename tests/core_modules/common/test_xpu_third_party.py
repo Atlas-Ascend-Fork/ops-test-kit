@@ -23,7 +23,6 @@ from ttk.core_modules.common.xpu import (
     MANUAL_XPU_PROVIDER,
     ManualXpuLoadError,
     XpuDispatch,
-    dump_manual_xpu_archive,
     load_manual_third_parties,
     manual_xpu_results,
     overlap_deadline_s,
@@ -540,23 +539,3 @@ class TestDumpManualXpuArchive:
         import ttk.switches as switches_mod
 
         return SimpleNamespace(dump_config=SimpleNamespace(dump_xpu=dump_xpu)), switches_mod
-
-    def test_dump_disabled_writes_nothing(self, tmp_path, monkeypatch):
-        sw, switches_mod = self._switches(False)
-        monkeypatch.setattr(switches_mod, "get_global_storage", lambda: sw)
-        monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
-
-        dump_manual_xpu_archive(_manual_xpu_case(None), [np.arange(8, dtype=np.float32)])
-
-        assert list(tmp_path.iterdir()) == []
-
-    def test_dump_enabled_writes_replay_contract_filenames(self, tmp_path, monkeypatch):
-        sw, switches_mod = self._switches(True)
-        monkeypatch.setattr(switches_mod, "get_global_storage", lambda: sw)
-        monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
-
-        arrays = [np.arange(8, dtype=np.float32), None]
-        dump_manual_xpu_archive(_manual_xpu_case(None), arrays)
-
-        files = sorted(p.name for p in tmp_path.iterdir())
-        assert files == ["manual_xpu_case_xpu_golden_0.bin"]  # None 槽跳过；命名即回放契约

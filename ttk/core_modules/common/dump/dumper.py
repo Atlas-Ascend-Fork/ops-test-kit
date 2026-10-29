@@ -26,7 +26,7 @@ E2E 多模式分调），本类做"按配置判断 + 遍历 + 落盘"。
     idx 与 CSV 槽位对齐：None/str 占位槽位跳过不落盘、不移位后续索引
 """
 
-__all__ = ["DataDumper", "dump_xpu_archive"]
+__all__ = ["DataDumper"]
 
 # Standard Packages
 import hashlib
@@ -35,7 +35,6 @@ import os
 import re
 from typing import Optional, Sequence, Union
 
-from ....utilities import deep_flatten
 from ....utilities.dtypes import dtype_to_name
 from .config import DumpConfig
 from .formatter import get_formatter
@@ -51,53 +50,6 @@ def _safe_dump_token(value, default: str) -> str:
     return token or default
 
 
-def _dump_xpu_archive_output(output, target_dir, file_name, file_format):
-    """单个三方输出按格式落盘（归档协议：bin 裸字节 / npy 直存）。"""
-    if file_format == "npy":
-        import numpy
-
-        numpy.save(os.path.join(target_dir, file_name + ".npy"), output)
-    else:
-        with open(os.path.join(target_dir, file_name + ".bin"), "wb") as f:
-            f.write(output.tobytes() if hasattr(output, "tobytes") else bytes(output))
-
-
-def dump_xpu_archive(xpu_results, testcase_name: str, switches) -> None:
-    """--dump xpu 的三方归档落盘：``{case}_xpu_golden_{index}.bin``（上传归档
-    平台契约，可直接作 manual_xpu_binaries 回放）。
-
-    与 DataDumper.dump_xpu（case 目录槽位协议，--manual-data-dirs 回放消费）
-    并列的第二套协议——目录/命名由归档契约定义。实现归属 dump/（单一落盘
-    模块）：remote.client.dump_xpu_outputs 与 common.xpu.dump_manual_xpu_archive
-    均委托本函数。
-    """
-    if not switches.dump_config.dump_xpu or not xpu_results:
-        return
-    dump_path = os.getenv("NPU_DUMP_PATH") or getattr(switches, "root_path", os.getcwd())
-    file_format = getattr(getattr(switches, "dump_config", None), "file_format", "bin")
-    case_token = _safe_dump_token(testcase_name, "testcase")
-
-    def _has_outputs(entry):
-        return isinstance(entry, dict) and entry.get("status") == "PASS" and entry.get("outputs") is not None
-
-    multiple = sum(1 for entry in xpu_results.values() if _has_outputs(entry)) > 1
-
-    for provider, entry in xpu_results.items():
-        if not _has_outputs(entry):
-            continue
-        provider_token = _safe_dump_token(provider, "xpu")
-        target_dir = os.path.join(dump_path, provider_token) if multiple else dump_path
-        os.makedirs(target_dir, exist_ok=True)
-        for index, output in enumerate(deep_flatten(entry["outputs"])):
-            if output is None or isinstance(output, str):
-                continue
-            file_name = f"{case_token}_xpu_golden_{index}"
-            _dump_xpu_archive_output(output, target_dir, file_name, file_format)
-            logging.info("[%s] Dumped XPU output: %s/%s", testcase_name or "testcase", target_dir, file_name)
-
-
-_NONE_DTYPE = "none"
-
 # xpu 槽位文件名回放口径：provider 含 _<纯数字> 段（如 a_12_b / cuda_0）时，
 # 读侧 _XPU_FILE_NAME 的非贪婪切分会把数字段解析为 idx、真 idx+dtype 拼入
 # dtype 位。落盘前校验拒绝此类 provider 名。
@@ -111,6 +63,9 @@ def _validate_xpu_provider(provider) -> None:
             f"XPU provider name {name!r} cannot be encoded in dump slot filenames; "
             "rename the provider (alphanumerics with no digit-only underscore segments)"
         )
+
+
+_NONE_DTYPE = "none"
 
 
 def _dtype_name(dtype) -> str:

@@ -143,10 +143,10 @@ absolute_precision,1e-8
 - 精度调试详解：`references/precision-debug.md`
 - NPUSim 仿真排障：`references/npusim-errors.md`
 
-完整文档：`docs/FAQ/faq_guide.md`（路径相对于 ops-test-kit 仓库根目录）
+完整文档：`docs/faq/faq_guide.md`（路径相对于 ops-test-kit 仓库根目录）
 
 ## 相关 Skill
 
-- CSV 格式有误？→ `ttk-how-write-case`
-- 重新跑测试？→ `ttk-how-run-test`
-- Golden 不对需要自定义？→ `ttk-how-write-plugin`
+- CSV 格式有误 → `ttk-how-write-case`
+- 重新运行测试 → `ttk-how-run-test`
+- Golden 需要自定义 → `ttk-how-write-plugin`

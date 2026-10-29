@@ -49,7 +49,6 @@ from ..common.xpu import (
     MANUAL_XPU_PROVIDER,
     XpuDispatch,
     collect_third_party,
-    dump_manual_xpu_archive,
     dump_xpu_slot_files,
     load_manual_third_parties,
     manual_xpu_results,
@@ -615,7 +614,6 @@ def _dispatch_xpu(testcase, switches, process_ctx, manual_case, need_3party) -> 
         manual = load_manual_third_parties(testcase, manual_case)
         if manual is not None:
             process_ctx.notify_status("OnLoadManualXpu")
-            dump_manual_xpu_archive(testcase, manual)
             return XpuDispatch.ready((manual, manual_xpu_results(), MANUAL_XPU_PROVIDER))
     if not xpu_mode(switches, need_data):
         return XpuDispatch.ready((None, None, None))

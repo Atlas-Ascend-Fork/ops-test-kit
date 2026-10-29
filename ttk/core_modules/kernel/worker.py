@@ -444,7 +444,6 @@ def _dispatch_xpu(context: TestcaseKernel, need_3party, manual_case=None):
     from ..common.xpu import (
         MANUAL_XPU_PROVIDER,
         XpuDispatch,
-        dump_manual_xpu_archive,
         load_manual_third_parties,
         manual_xpu_results,
         overlap_deadline_s,
@@ -464,7 +463,6 @@ def _dispatch_xpu(context: TestcaseKernel, need_3party, manual_case=None):
         # 双来源短路：CSV manual_xpu_binaries 显式路径 / manual-data case 目录槽位
         process_ctx.notify_status("OnLoadManualXpu")
         context.xpu_results = manual_xpu_results()
-        dump_manual_xpu_archive(context, manual)
         return XpuDispatch.ready((manual, context.xpu_results, MANUAL_XPU_PROVIDER))
 
     mode = xpu_mode(switches, need_data)

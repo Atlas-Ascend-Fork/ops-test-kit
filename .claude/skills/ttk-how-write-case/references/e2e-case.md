@@ -9,7 +9,7 @@ E2E 用例的参数（张量数量/顺序/dtype、关键字参数等）来自框
 1. **PyTorch 官方文档**：https://pytorch.org/docs/stable/ 查找对应 API 的参数定义
 2. **torch_npu 扩展文档**：torch_npu 特有 API（如 `torch_npu.npu_conv2d`）查看其扩展文档
 3. **源码签名**：直接查看 API 的 Python 定义或 C++ binding
-4. **onnx 算子 schema**：onnx 域查看环境 onnx 包的算子 schema（`onnx.defs`，环境注册表即权威，无多级回退）
+4. **onnx 算子 schema**：onnx查看环境 onnx 包的算子 schema（`onnx.defs`，环境注册表即权威，无多级回退）
 
 张量参数按 API 签名顺序排列到 `tensor_view_shapes` / `tensor_dtypes`，非张量参数放入 `attributes`。
 
@@ -48,7 +48,7 @@ E2E 用例的参数（张量数量/顺序/dtype、关键字参数等）来自框
 |------|------|------|------|
 | `output_tensor_indexes` | 否 | *(自动)* | 输出张量索引。Inplace Tensor 方法（`torch.Tensor.xxx_`）自动填充 `(0,)`；带 `out` 参数的 API 需手动指定输出位置索引。未设置且 API 无 `out` 参数时，框架自动处理返回值 |
 | `inplace_input_indexes` | 否 | `()` | 原地改写输入张量的索引（图模式捕获前备份、重放后还原这些输入；Inplace Tensor 方法自动填充的是 `output_tensor_indexes=(0,)`，此字段需手动声明） |
-| `attributes` | 否 | `{}` | 框架 API 关键字参数。如 `{'alpha': 1.0}`。API 签名中的必选非张量参数**必须**提供，否则用例校验不通过 |
+| `attributes` | 否 | `{}` | 框架 API 关键字参数。如 `{'alpha': 1.0}`。API 签名中的必选非张量参数**必须**提供，否则用例校验不通过。torch 用例可携带保留键 `CubeMathType`（int 0-4，不传入 API）：执行前设置 `torch_npu.npu.matmul/conv` 立方计算精度模式（0 KEEP_DTYPE / 1 ALLOW_FP32_DOWN_PRECISION / 2 USE_FP16 / 3 USE_HF32 / 4 高精度档），携带时先复位基线再覆盖，仅 NPU + torch 生效 |
 | `golden_api` | 否 | `""` | 替代 Golden 计算的 API（详见常见模式） |
 
 ## 常见模式
@@ -104,9 +104,9 @@ tensor_storage_shapes,"((3,6),)"
 tensor_view_shapes,"(((3,3),(3,2)),(3,5))"
 ```
 
-## ONNX 域约定
+## ONNX 约定
 
-`api_name` 写 `onnx.<OpType>`（如 `onnx.Add`、`onnx.Concat`），不带 domain/opset 限定。执行链路：TTK 自动组装单算子 ONNX 模型 → atc 离线编译 .om → NPU 经 aclmdl 执行，与 CPU 侧 onnx ReferenceEvaluator 参考实现比对。onnx 域是 numpy 直通域（零 torch/tf 依赖）。
+`api_name` 写 `onnx.<OpType>`（如 `onnx.Add`、`onnx.Concat`），不带 domain/opset 限定。执行链路：TTK 自动组装单算子 ONNX 模型 → atc 离线编译 .om → NPU 经 aclmdl 执行，与 CPU 侧 onnx ReferenceEvaluator 参考实现比对。onnx 是 numpy 直通（零 torch/tf 依赖）。
 
 - **参数来源**：环境 onnx 包的算子 schema（`onnx.defs`，环境注册表即权威）；opset 取环境注册表最新，环境须满足 `onnx.defs.onnx_opset_version() ≤ 18`（对齐 CANN atc 插件注册上限，如 onnx 1.13.x 配 CANN 9.2.x）
 - **输出槽**：声明在 `tensor_view_shapes` 内（shape 填 `None`，dtype 照常声明，下标进 `output_tensor_indexes`），供对账/dump/精度判据锚定；输出 shape 由 atc shape inference 推导，无需填写

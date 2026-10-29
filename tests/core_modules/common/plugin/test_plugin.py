@@ -31,7 +31,7 @@ from ttk.core_modules.common.plugin import (
 from ttk.core_modules.common.plugin.custom_plugin_scanner import PluginScanner
 from ttk.core_modules.common.plugin.loader import clear_plugin_cache
 
-_EXAMPLES = Path(__file__).resolve().parents[4] / "ttk" / "core_modules" / "common" / "plugin" / "examples"
+_EXAMPLES = Path(__file__).resolve().parents[4] / "examples" / "plugin"
 _EXAMPLES_STR = str(_EXAMPLES)
 
 

@@ -38,6 +38,9 @@ source $ASCEND_CUSTOM_PATH/bin/setenv.bash
 | `op not found` | op_name 拼写错误 | 检查算子名称是否与 CANN 注册名一致 |
 | tiling 失败 | shape 不支持或属性缺失 | 检查 attributes 字段，确认 shape 合法性 |
 | 编译超时 | 算子过大或 `--proc-timeout` 太小 | 减小 shape；或加大 `--proc-timeout` 值（默认 3600 秒） |
+| GEIR `EZ1001` | `concat_d`（DYNAMIC_INPUT 聚合）在 `-d` 动态编译下 GE 侧 shape 校验失败（已知限制） | 该用例改用 `-c` 静态编译；其余 TensorList 算子全模式可用 |
+| GEIR 编译 C++ 源码失败 / 无 `g++` | 系统缺工具链（GEIR 生成 C++ 源码后需 `g++` 编译） | `g++ --version` 确认；缺失时 `yum install gcc-c++` 或 `apt install g++` |
+| GEIR 动态 shape 未生效 | GEIR 默认开启静态编译 `-c`，与 Kernel 默认 `-d` 相反；`dyn_input_shapes` 仅在 `-d` 下生效 | 显式传 `-d`（可 `-c=false -d` 仅动态） |
 
 ## 执行错误
 
@@ -49,7 +52,7 @@ source $ASCEND_CUSTOM_PATH/bin/setenv.bash
 
 ## E2E ONNX 通路错误
 
-onnx 域（`onnx.<OpType>`）链路：TTK 组模 → atc 编译 .om → aclmdl 执行。专属失败码：
+onnx（`onnx.<OpType>`）链路：TTK 组模 → atc 编译 .om → aclmdl 执行。专属失败码：
 
 | 报错码 | 原因 | 修复 |
 |--------|------|------|
@@ -59,16 +62,16 @@ onnx 域（`onnx.<OpType>`）链路：TTK 组模 → atc 编译 .om → aclmdl �
 | `ATC_COMPILE_FAILED` | atc 编译失败（stdout+stderr 尾部原文透传） | 看透传的 atc 日志定位：常见为算子/shape/属性/dtype 不支持或 opset 超限 |
 | `OM_LOAD_FAILED` / `OM_EXECUTE_FAILED` | om 加载、desc 查询或 aclmdl 执行失败 | 查日志中透传的 ACL 错误信息；确认环境 libascendcl 正常 |
 | `ONNX_DYNAMIC_OUTPUT_UNSUPPORTED` | 数据依赖 shape 的算子（NonZero/TopK 等）产出动态 dim om | 通路边界，此类算子改用 kernel/aclnn 模式覆盖 |
-| `ONNX_DYNAMIC_GRAPH_UNSUPPORTED` | onnx 域不支持 `-d` 动态图 | 去掉 `-d`（onnx 的 eager ≡ 静态图，om 恒为静态图） |
-| `ONNX_DYNAMIC_INPUT_UNSUPPORTED` | `tensor_view_shapes` 输入槽含 dim<0（-1 动态标记） | onnx 域仅支持静态 shape（dim ≥ 0）；去掉 -1 槽，动态 shape 覆盖改用 kernel/aclnn 模式 |
-| `ONNX_ACLGRAPH_UNSUPPORTED` | onnx 域不支持 aclgraph 模式 | 去掉 `--aclgraph` |
-| `ONNX_LAYOUT_UNSUPPORTED` | onnx 用例填写了布局列（formats/storage_shapes/strides/offsets） | 清空这些列（onnx 域仅 ND 连续语义） |
+| `ONNX_DYNAMIC_GRAPH_UNSUPPORTED` | onnx不支持 `-d` 动态图 | 去掉 `-d`（onnx 的 eager ≡ 静态图，om 恒为静态图） |
+| `ONNX_DYNAMIC_INPUT_UNSUPPORTED` | `tensor_view_shapes` 输入槽含 dim<0（-1 动态标记） | onnx仅支持静态 shape（dim ≥ 0）；去掉 -1 槽，动态 shape 覆盖改用 kernel/aclnn 模式 |
+| `ONNX_ACLGRAPH_UNSUPPORTED` | onnx不支持 aclgraph 模式 | 去掉 `--aclgraph` |
+| `ONNX_LAYOUT_UNSUPPORTED` | onnx 用例填写了布局列（formats/storage_shapes/strides/offsets） | 清空这些列（onnx仅 ND 连续语义） |
 | `ONNX_OPSET_VERSION_UNSUPPORTED` | 环境 onnx 包 opset 版本 > atc 插件注册上限（18） | 安装满足 `onnx.defs.onnx_opset_version() ≤ 18` 的 onnx 包（如 onnx 1.13.x 配 CANN 9.2.x） |
 | `ONNX_DOMAIN_UNSUPPORTED` | api_name 带 domain 限定（非纯两段） | 改写 `onnx.<OpType>`（不带 domain/opset 限定） |
 | `ONNX_ATTR_TYPE_UNSUPPORTED` | 算子 schema 声明了 TENSOR/GRAPH 载荷属性，无法从 CSV 标量构造 | 该类算子不支持，换其他模式覆盖 |
 | `ONNX_OPTIONAL_INPUT_UNSUPPORTED` | Optional 输入非尾部省略 | 调整 `tensor_view_shapes` 使省略的 None 槽只在尾部 |
 | `ONNX_CPU_EXECUTION_UNSUPPORTED` | `--backend cpu` 下执行 onnx 用例（om 执行需 NPU） | 去掉 `--backend cpu`；CPU 侧仅 golden（ReferenceEvaluator）与输入生成 |
-| `UNKNOWN_ATTRIBUTE`（结果列 fail_reason） | attributes 列出现 schema 未声明的属性名 | 按环境 onnx schema 核对拼写（onnx 域不静默忽略未知属性） |
+| `UNKNOWN_ATTRIBUTE`（结果列 fail_reason） | attributes 列出现 schema 未声明的属性名 | 按环境 onnx schema 核对拼写（onnx不静默忽略未知属性） |
 
 > atc 编译缓存位于 `<root>/onnx_cache/<op_type>/`（缓存键含 atc ONNX 插件 .so 指纹，插件热替换自动失效）；怀疑缓存脏时可删除该目录重编。
 

@@ -1,6 +1,6 @@
 # ACLNN 通路示例用例
 
-单文件 `cases.csv` 覆盖 ACLNN 通路的主要功能面，每条用例的 `remark` 列即测试项；`golden.py` 为配套 golden 插件（`--plugin` 加载），承接 torch 同名自动映射不适配的 API。
+单文件 `cases.csv` 覆盖 ACLNN 通路的主要功能面，每条用例的 `remark` 列即测试项；`golden.py` 为配套 golden 插件（`--plugin` 加载），补足 torch 同名映射不适配的 API。
 
 ```bash
 A=examples/case_store/aclnn
@@ -40,7 +40,7 @@ python3 -m ttk aclnn -i $A/cases.csv --plugin $A/golden.py \
 
 | 用例 | 测试项 |
 |---|---|
-| `clamp_fp16_scalars` | 双标量参数（clipValueMin/Max）+ `scalar_data_ranges` 分界定域；golden 由 golden.py 提供（torch.clamp 关键字为 min/max） |
+| `clamp_fp16_scalars` | 双标量参数（clipValueMin/Max）+ `scalar_data_ranges` 分段设取值范围；golden 由 golden.py 提供（torch.clamp 关键字为 min/max） |
 | `inplace_fill_scalar_fp32` | 标量原地填充（`*Ref` 参数自动识别 `output_inplace_indexes`，无需手填） |
 | `inplace_fill_tensor_int32` | 0-dim 张量原地填充 + int64 上限边界值域 |
 
@@ -53,7 +53,7 @@ python3 -m ttk aclnn -i $A/cases.csv --plugin $A/golden.py \
 
 | 用例 | 测试项 |
 |---|---|
-| `indexselect_fp32_range` | 索引张量值域约束：`input_data_ranges` 限 index∈[0,3]（随机默认域会越界）；golden 由 golden.py 提供（自动映射按「张量按位、标量按名」传参，`dim` 标量夹在 self 与 index 两个张量之间会错位，须按位直传） |
+| `indexselect_fp32_range` | 索引张量值域约束：`input_data_ranges` 限 index∈[0,3]（随机默认域会越界）；golden 由 golden.py 提供（自动映射按「张量按位置、标量按名字」传参，`dim` 标量夹在 self 与 index 两个张量之间会错位，golden 需要按位置传参） |
 
 ```bash
 python3 -m ttk aclnn -i $A/cases.csv --plugin $A/golden.py -t indexselect_fp32_range
@@ -84,4 +84,4 @@ python3 -m ttk aclnn -i $A/cases.csv --plugin $A/golden.py -t convolution_fp16
 
 dtype 覆盖：float16 / float32 / float64 / bfloat16 / int8 / int16 / int32 / int64 / uint8 / bool / complex64。
 
-用例编写与命令行细节见 `.claude/skills/ttk-how-write-case/` 与 `ttk-how-run-test`；golden 编写见 `ttk-how-write-plugin`；判据详解见 `docs/Precision_Comparison.md`。
+用例编写与命令行细节见 `.claude/skills/ttk-how-write-case/` 与 `ttk-how-run-test`；golden 编写见 `ttk-how-write-plugin`；判据详解见 `docs/reference/precision_comparison.md`。

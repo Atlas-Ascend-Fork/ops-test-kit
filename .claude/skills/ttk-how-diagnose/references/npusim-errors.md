@@ -25,4 +25,4 @@
 - 仿真慢：camodel 初始化 20–30s，大 shape 用例分钟级起，建议 `--sim-cores 0` + 小 shape。
 - 并发进程默认自动设为 1（避免多 camodel 打爆 CPU）。
 
-完整排障与使用：`docs/NPUSim/npusim_usage.md` §7
+完整排障与使用：`docs/npusim/npusim_usage_guide.md` §7

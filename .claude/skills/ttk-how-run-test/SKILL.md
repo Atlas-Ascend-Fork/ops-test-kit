@@ -35,7 +35,7 @@ python3 -m ttk list -i cases.csv --op add  # 按算子名筛选
 
 ## Step 3: 构造命令
 
-每次只能执行一条 `ttk` 命令，不支持在同一个目录下并发多条（如 `python3 -m ttk kernel -i a.csv &` 和 `python3 -m ttk kernel -i b.csv &`），因为进程间会冲突。多个同模式 CSV 可打包为 zip 后一次传入（`-i cases.zip`，逐 csv 成员展开），或逐个依次拉起。
+每次只能执行一条 `ttk` 命令；同一目录下并发多条（如 `python3 -m ttk kernel -i a.csv &` 与 `python3 -m ttk kernel -i b.csv &`）会互相冲突。多个同模式 CSV 可打包为 zip 一次传入（`-i cases.zip`，逐 csv 成员展开），或逐个依次拉起。
 
 `-i` 指定 CSV 文件是唯一的必填参数。
 
@@ -69,7 +69,7 @@ ACLNN 子命令无模式专属选项（`--no-prof`、`--xpu-perf` 等均为四�
 python3 -m ttk e2e -i cases.csv
 ```
 
-E2E 默认自动探测 NPU；`--backend cpu` 强制 CPU 执行（onnx 域 CPU 仅用于 golden/输入生成，设备执行需 NPU）。支持 torch / tf / onnx 三个框架域（同一表内不得混用，进程预载互斥）；onnx 域（`onnx.<OpType>`）经 TTK 组模 → atc 编译 .om → aclmdl 执行，eager ≡ 静态图。详见 `references/e2e-params.md`。
+E2E 默认自动探测 NPU；`--backend cpu` 强制 CPU 执行（onnx CPU 仅用于 golden/输入生成，设备执行需 NPU）。支持 torch / tf / onnx 三种框架 API（同一表内不得混用，进程预载互斥）；onnx（`onnx.<OpType>`）经 TTK 组模 → atc 编译 .om → aclmdl 执行，eager ≡ 静态图。详见 `references/e2e-params.md`。
 
 ### NPUSim 仿真模式（无卡跑算子）
 
@@ -84,7 +84,7 @@ python3 -m ttk e2e    --backend npusim -i cases.csv -t add_f32_alpha
 - 参数：`--backend {npu,npusim,xpu}`（e2e 另支持 `cpu`；默认 `npu`）、`--sim-soc`（默认 `Ascend950`）、`--sim-output`（默认 `<root>/sim_output`）、`--sim-report`（出流水图 `trace_core*.json`）、`--sim-cores`、`--sim-obj`。
 - 约束：与 `--no-prof` **互斥**（仿真内部自动生成输入/golden）；**GEIR 不支持**；e2e 建议仅用 eager（graph/aclgraph 仿真未验证、可能失败）。
 - 环境：需 source 含 **Ascend-950-ops** 的 CANN（如 `9.1.0-beta.3`）；9.2.0 缺 950-ops 会编译失败。
-- 详细参数见 `references/npusim-params.md`，完整指南见 `docs/NPUSim/npusim_usage.md`。
+- 详细参数见 `references/npusim-params.md`，完整指南见 `docs/npusim/npusim_usage_guide.md`。
 
 ## 通用选项速查
 
@@ -121,7 +121,7 @@ python3 -m ttk e2e    --backend npusim -i cases.csv -t add_f32_alpha
 | `--input-dist` | `uniform`/`normal` | `uniform` |
 | `--provider` | 指定待测三方 provider（如 `torch,tf`），只收窄分发范围（作用于所有三方/XPU 采集路径，不覆盖 yaml 配置） | 自动 |
 
-> 方法选择优先级（`--compare` > `Spec.tolerance.standard` > dtype 类别默认），同一判据内容差参数以 legacy CSV 字段优先，详见 `ttk-how-diagnose/references/precision-debug.md`。CSV 字段为 legacy，`precision_tolerances` 由 `close`/`cosine`/`requant`（只读 ptol）读取、`absolute_precision` 仅 `close` 读取。
+> 方法选择优先级（`--compare` > `Spec.tolerance.standard` > dtype 类别默认），同一判据内容差参数以 legacy CSV 字段优先，详见 `../ttk-how-diagnose/references/precision-debug.md`。CSV 字段为 legacy，`precision_tolerances` 由 `close`/`cosine`/`requant`（只读 ptol）读取、`absolute_precision` 仅 `close` 读取。
 
 ### 调试
 
@@ -173,10 +173,10 @@ python3 -m ttk kernel --backend npusim -i examples/case_store/kernel/cases.csv -
 - E2E 专用参数：`references/e2e-params.md`
 - NPUSim 仿真参数（kernel/aclnn/e2e 通用）：`references/npusim-params.md`
 
-完整文档：`docs/Task_Execution.md`（路径相对于 ops-test-kit 仓库根目录）
+完整文档：`docs/task_execution_guide.md`（路径相对于 ops-test-kit 仓库根目录）
 
 ## 相关 Skill
 
-- 用例怎么写？→ `ttk-how-write-case`
-- 测试跑失败了？→ `ttk-how-diagnose`
-- 算子没有内置 Golden？→ `ttk-how-write-plugin`
+- 用例编写 → `ttk-how-write-case`
+- 测试失败排障 → `ttk-how-diagnose`
+- 算子没有内置 Golden → `ttk-how-write-plugin`

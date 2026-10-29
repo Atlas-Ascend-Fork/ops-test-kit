@@ -25,10 +25,8 @@ __all__ = [
     "extract_third_party",
     "dispatch_xpu",
     "collect_third_party",
-    "dump_xpu_outputs",
 ]
 
-import hashlib
 import http.client
 import logging
 import os
@@ -93,60 +91,6 @@ def extract_third_party(xpu_results, priority: Optional[str]):
     if entry.get("status") != "PASS" or "outputs" not in entry:
         return None
     return entry["outputs"]
-
-
-def _safe_dump_token(value, default: str) -> str:
-    text = str(value or default)
-    token = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
-    if token != text:
-        token = f"{token or default}_{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
-    return token or default
-
-
-def dump_xpu_output(output, target_dir, file_name, file_format):
-    """按格式落盘单个 XPU 输出（remote 独立部署：不依赖 core_modules 的 formatter 注册制）。"""
-    if file_format == "npy":
-        import numpy
-
-        numpy.save(os.path.join(target_dir, file_name + ".npy"), output)
-    else:
-        with open(os.path.join(target_dir, file_name + ".bin"), "wb") as f:
-            f.write(output.tobytes() if hasattr(output, "tobytes") else bytes(output))
-
-
-def dump_xpu_outputs(xpu_results, testcase_name: str, switches) -> None:
-    """Persist successful XPU outputs when --dump xpu is enabled.
-
-    文件名对齐归档回放契约：``{testcase}_xpu_golden_{index}.bin``，可直接作为
-    ``manual_xpu_binaries`` 上传归档平台。多个 provider 同时产出时按 provider
-    分目录避免同名覆盖，各目录内文件名保持一致。
-    """
-    if not switches.dump_config.dump_xpu or not xpu_results:
-        return
-
-    from ttk.utilities import deep_flatten
-
-    dump_path = os.getenv("NPU_DUMP_PATH") or getattr(switches, "root_path", os.getcwd())
-    file_format = getattr(getattr(switches, "dump_config", None), "file_format", "bin")
-    case_token = _safe_dump_token(testcase_name, "testcase")
-
-    def _has_outputs(entry):
-        return isinstance(entry, dict) and entry.get("status") == "PASS" and entry.get("outputs") is not None
-
-    multiple = sum(1 for entry in xpu_results.values() if _has_outputs(entry)) > 1
-
-    for provider, entry in xpu_results.items():
-        if not _has_outputs(entry):
-            continue
-        provider_token = _safe_dump_token(provider, "xpu")
-        target_dir = os.path.join(dump_path, provider_token) if multiple else dump_path
-        os.makedirs(target_dir, exist_ok=True)
-        for index, output in enumerate(deep_flatten(entry["outputs"])):
-            if output is None or isinstance(output, str):
-                continue
-            file_name = f"{case_token}_xpu_golden_{index}"
-            dump_xpu_output(output, target_dir, file_name, file_format)
-            logging.info("[%s] Dumped XPU output: %s/%s", testcase_name or "testcase", target_dir, file_name)
 
 
 # 端点短暂不可用时的恢复等待: 默认最多等 3 分钟, 环境变量可调(0 表示不等, 恢复旧行为)。
@@ -298,7 +242,6 @@ def dispatch_xpu(
         deadline_s=deadline_s,
     )
     _record_breaker(switches, **_judge_xpu_results(xpu_results))
-    dump_xpu_outputs(xpu_results, testcase_name, switches)
     return xpu_results, (specs[0].provider if specs else None)
 
 

@@ -4,7 +4,7 @@
 
 | 参数 | 说明 | 默认 |
 |------|------|------|
-| `--backend cpu` | 强制 CPU 执行（跳过 NPU 自动探测）；onnx 域仅用于 golden/输入生成，设备执行需 NPU | 关闭 |
+| `--backend cpu` | 强制 CPU 执行（跳过 NPU 自动探测）；onnx仅用于 golden/输入生成，设备执行需 NPU | 关闭 |
 | `--no-prof` | 仅准备输入/golden，不执行主 API | 关闭 |
 | `--eager` | eager（单算子直调）执行模式；`--eager=false` 跳过 eager、精度主判据锚定图模式（需搭配 -c/-d/--aclgraph） | 开启 |
 | `--fullgraph` | Graph 模式（torch.compile）；0=禁用，1=启用 | 0 |
@@ -23,8 +23,8 @@
 
 | 后端 | 依赖 |
 |------|------|
-| NPU | `torch` + `torch_npu`（默认自动探测）；onnx 域不需要 torch——numpy 直通域（atc 编译 .om + aclmdl 执行） |
-| CPU | `torch`（`--backend cpu` 强制）；onnx 域 CPU 仅用于 golden（ReferenceEvaluator）与输入生成 |
+| NPU | `torch` + `torch_npu`（默认自动探测）；onnx 不需要 torch——numpy 直通（atc 编译 .om + aclmdl 执行） |
+| CPU | `torch`（`--backend cpu` 强制）；onnx CPU 仅用于 golden（ReferenceEvaluator）与输入生成 |
 
 ## 执行流程
 
@@ -32,7 +32,7 @@
 读取 CSV → 生成输入张量 → 在待测后端调用 API → 在 CPU 调用 Golden API → 精度比对 → 输出结果
 ```
 
-onnx 域（`onnx.<OpType>`）：TTK 组模单算子 ONNX 模型 → atc 编译 .om（`--precision_mode=must_keep_origin_dtype`，缓存于 `<root>/onnx_cache/<op_type>/`，进程级会话 LRU 复用）→ aclmdl 执行；golden 走 ReferenceEvaluator 跑同一模型产物。
+onnx（`onnx.<OpType>`）：TTK 组模单算子 ONNX 模型 → atc 编译 .om（`--precision_mode=must_keep_origin_dtype`，缓存于 `<root>/onnx_cache/<op_type>/`，进程级会话 LRU 复用）→ aclmdl 执行；golden 走 ReferenceEvaluator 跑同一模型产物。
 
 ## API 类型
 
@@ -43,7 +43,7 @@ onnx 域（`onnx.<OpType>`）：TTK 组模单算子 ONNX 模型 → atc 编译 .
 | `torch.Tensor.relu_` | Tensor 方法 |
 | `onnx.Add` | ONNX 算子（`onnx.<OpType>`；环境 onnx 包 schema 即权威，opset 须 ≤ 18） |
 
-## ONNX 域模式约束
+## ONNX 模式约束
 
 - **模式等价**：eager ≡ 静态图（om 恒为静态图）。`--eager -c` 双开时单次执行，EAGER 与 GRAPH CST 两列同值（失败也镜像）
 - **快速失败**：`-d` 报 `ONNX_DYNAMIC_GRAPH_UNSUPPORTED`；`--aclgraph` 报 `ONNX_ACLGRAPH_UNSUPPORTED`；`--backend cpu` 执行报 `ONNX_CPU_EXECUTION_UNSUPPORTED`
@@ -51,11 +51,11 @@ onnx 域（`onnx.<OpType>`）：TTK 组模单算子 ONNX 模型 → atc 编译 .
 - **混表限制**：同一 CSV 表内不得混用 torch/tf/onnx API；onnx 进程预载 numpy + onnx，与 torch/tf 互斥
 - **perf**：墙钟计时（kernel 明细为空，已知限制）
 - **离线数据/dump**：两阶段（`--no-prof --dump in,golden` / `--manual-data-dirs`）与 `--dump`/`--dump-on-fail` 均可用
-- 用例编写（输出槽/属性/Optional 省略等）见 `ttk-how-write-case/references/e2e-case.md` 的 ONNX 域约定
+- 用例编写（输出槽/属性/Optional 省略等）见 `ttk-how-write-case/references/e2e-case.md` 的 ONNX 约定
 
 ## golden_api
 
 当被测 API 与 Golden 计算 API 不同时，通过 CSV 的 `golden_api` 字段指定：
 - NPU 调用 `api_name`（如 `torch_npu.npu_conv2d`）
 - CPU 调用 `golden_api`（如 `torch.nn.functional.conv2d`）
-- onnx 域：`golden_api` 也可写 `onnx.<OpType>`，经 ReferenceEvaluator 跑同一 model_builder 产物（同构参照）；无 golden_api 且无插件时同 API 分发 ReferenceEvaluator
+- onnx：`golden_api` 也可写 `onnx.<OpType>`，经 ReferenceEvaluator 跑同一 model_builder 产物（同构参照）；无 golden_api 且无插件时同 API 分发 ReferenceEvaluator

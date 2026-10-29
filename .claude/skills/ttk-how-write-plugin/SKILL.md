@@ -26,7 +26,7 @@ description: 编写/定义算子测试规范（TestSpec，尚未跑或要新增 
 | GEIR | `abs`（CSV `op_name`） | 算子 `def.cpp` 形参 | numpy.ndarray | 同 Kernel（复用同一回退链） |
 | ACLNN | `aclnnAbs`（CSV `api_name`） | `aclnn_abs.h` 形参 | torch.Tensor | 自动从 torch 同名 API 映射 |
 | E2E | `torch.abs`（CSV `api_name`） | torch API 签名 | torch.Tensor | 框架自动在 CPU 跑同 API 作 golden |
-| E2E onnx 域 | `onnx.Abs`（CSV `api_name`） | onnx schema（`onnx.defs`，环境注册表即权威） | numpy.ndarray | ReferenceEvaluator 跑同一组模产物（同构参照） |
+| E2E onnx | `onnx.Abs`（CSV `api_name`） | onnx schema（`onnx.defs`，环境注册表即权威） | numpy.ndarray | ReferenceEvaluator 跑同一组模产物（同构参照） |
 
 > 注册名即 `get_spec_attr` 的查找 key：Kernel/GEIR 用 `op_name`，ACLNN/E2E 用 `api_name`。GEIR 复用 Kernel 的 spec，无需额外编写。
 
@@ -53,7 +53,7 @@ class AbsTestSpec:
   |------|---------|------|
   | Kernel / GEIR | numpy.ndarray | 需内部 `torch.from_numpy()` 转 torch 计算后 `.numpy()` 转回 |
   | ACLNN / E2E | torch.Tensor | CPU（host）侧张量（`torch.from_numpy` 构造，先于设备执行生成），直接用 torch 计算 |
-  | E2E onnx 域 | numpy.ndarray | numpy 直通域（零 torch 依赖），插件 golden 直接收 numpy 数组 |
+  | E2E onnx | numpy.ndarray | numpy 直通（零 torch 依赖），插件 golden 直接收 numpy 数组 |
 
 - **`third_party`**：调用三方 API（如 torch）
 
@@ -66,7 +66,7 @@ class AbsTestSpec:
 
 > 字符串形式（`golden = "torch.abs"`）由框架自动处理 numpy↔torch 转换，所有路径通用。
 
-> E2E 默认由框架在 CPU 跑同 API 作 Golden；onnx 域默认由 ReferenceEvaluator 跑同一 model_builder 产物作参照；如需控制输入范围用 CSV 的 `input_data_ranges` 字段。
+> E2E 默认由框架在 CPU 跑同 API 作 Golden；onnx默认由 ReferenceEvaluator 跑同一 model_builder 产物作参照；如需控制输入范围用 CSV 的 `input_data_ranges` 字段。
 
 ## NPU Golden（`--golden-mode NPU`）
 
@@ -134,7 +134,7 @@ class AbsTestSpec:
 
 ## 函数签名约定
 
-Golden/Input 函数参数分为**输入张量、算子属性、框架元信息**三部分。框架按位置传输入张量、按关键字传属性；当**输入有可选（带默认值）且属性有必选（无默认值）**时，为避免位置参数与关键字属性歧义，用 `*` 分隔（`*` 前是输入，`*` 后是属性）：
+Golden/Input 函数的参数分三类：**输入张量**（按位置传入）、**算子属性**（按关键字传入）、**框架元信息**（经 `**kwargs` 接收）。当输入含可选参数（有默认值）、属性又含必选参数（无默认值）时，两者会互相干扰，用 `*` 分隔：`*` 前是输入，`*` 后是属性。
 
 ```python
 # 输入有可选 + 属性有必选 → 用 * 分隔
@@ -182,7 +182,7 @@ def sort_golden(x, descending=False, **kwargs):
 
 ## tolerance（精度标准）
 
-按 dtype 声明 `standard` 字段，只接受官方标准：
+按 dtype 声明 `standard` 字段，支持的值：
 
 | standard 值 | 含义 | `--compare` 传参 |
 |-------------|------|------------------|
@@ -229,7 +229,7 @@ python3 -m ttk aclnn -i cases.csv --plugin /path/to/assets_a/,/path/to/assets_b/
 
 1. **注册名必须匹配**：类名（`PascalCase+TestSpec`）或 `__spec__` 的 key 必须与 CSV 的 `op_name` / `api_name` 完全一致
 2. **参数顺序**：函数参数名和顺序与算子定义文件（def.cpp / aclnn*.h）中的输入参数一致
-3. **kwargs 始终接收**：通过 `**kwargs` 接收元信息（dtypes、shapes、formats、soc_version 等，完整字段见 `references/kernel-plugin.md` / `aclnn-plugin.md`）
+3. **kwargs 始终接收**：通过 `**kwargs` 接收元信息（dtypes、shapes、formats、soc_version 等，完整字段见 `references/kernel-plugin.md` / `aclnn-plugin.md` / `e2e-plugin.md`）
 4. **返回类型**：`golden` 返回列表（每个输出一个元素）；`customize_inputs` 返回与输入结构一致的 tuple
 5. **禁止 `register()` 手写签名**：不要在 golden 文件里 `from ttk...import ParamInfo/APIParamInfo/FrameworkApiInfoKeeper` 再调 `register()` 声明算子签名——签名应来自算子自身（E2E 的 `torch.ops` 算子从 `_schemas` 自动解析；Kernel/GEIR 从 `def.cpp`；ACLNN 从 `aclnn*.h`）。手写 `register()` 会把 golden 耦合到 ttk 内部类（ttk 改内部类时所有此类 golden 失效），且与算子真实签名漂移。`register()` 仅在算子**无 schema**（裸 `impl`、未 `define`）时作兜底。
 
@@ -259,23 +259,24 @@ input_data_ranges,"((-1, 1), (0.1, 10))"
 
 ## 详细规范
 
-完整规范见 `ttk/core_modules/common/plugin/README.md`，渐进示例见 `ttk/core_modules/common/plugin/examples/`：
+完整规范见 `docs/reference/test_spec.md`，渐进示例见 `examples/plugin/`：
 
 | 文件 | 场景 |
 |------|------|
 | `01_minimal_golden.py` | 最简 golden（单个函数） |
 | `02_golden_three_forms.py` | golden 三种形式：字符串/函数/类 |
-| `03_third_party_three_forms.py` | third_party 三种形式：字符串/dict/类 |
+| `03_third_party_forms.py` | third_party 四种形式：字符串/dict/函数/类 |
 | `04_golden_tolerance_compare.py` | golden + tolerance + compare 组合 |
 | `05_pre_compare_customize_inputs.py` | pre_compare 两种模式、customize_inputs、多输出 compare |
 | `06_golden_multi_path.py` | 同一算子在 Kernel/ACLNN/E2E 不同路径下的 golden 编写 |
 
 按流程的示例与 kwargs 字段：
-- kernel 流程（numpy）→ `references/kernel-plugin.md`
+- kernel 流程（numpy）→ `references/kernel-plugin.md`（GEIR 复用同一契约）
 - aclnn 流程（torch）→ `references/aclnn-plugin.md`
+- e2e 流程（torch，框架 API 签名）→ `references/e2e-plugin.md`
 
 ## 相关 Skill
 
-- 资产写好了怎么跑？→ `ttk-how-run-test`
-- 跑不过怎么排查？→ `ttk-how-diagnose`
-- 用例 CSV 怎么写？→ `ttk-how-write-case`
+- 资产写好后如何运行 → `ttk-how-run-test`
+- 运行失败排障 → `ttk-how-diagnose`
+- 用例 CSV 编写 → `ttk-how-write-case`

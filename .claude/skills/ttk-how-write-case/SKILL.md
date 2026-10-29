@@ -12,7 +12,7 @@ description: 编写测试用例。只要用户提到写用例、生成 CSV、构
 | 判断条件 | 模式 | 结构类 | 子命令 | 完整指南 |
 |----------|------|--------|--------|----------|
 | 无 `api_name` 列 | Kernel（算子编译链） | `TestcaseKernel` | `ttk kernel` | `references/kernel-case.md` |
-| 无 `api_name` 列（走 GE 图编译） | GEIR（GE 图编译链） | `GeirTestcase` | `ttk geir` | `references/kernel-case.md` |
+| 无 `api_name` 列（走 GE 图编译） | GEIR（GE 图编译链） | `GeirTestcase` | `ttk geir` | `references/geir-case.md` |
 | `api_name` 以 `aclnn` 开头 | ACLNN（引擎 API 链） | `TestcaseAclnn` | `ttk aclnn` | `references/aclnn-case.md` |
 | `api_name` 非 aclnn 开头（torch / tf / `onnx.<OpType>`） | E2E（框架 API 链） | `TestcaseE2e` | `ttk e2e` | `references/e2e-case.md` |
 
@@ -68,6 +68,6 @@ python3 -m ttk list -i cases.csv
 
 ## 相关 Skill
 
-- 写完用例怎么跑？→ `ttk-how-run-test`
-- 用例跑失败了？→ `ttk-how-diagnose`
-- 算子没有内置 Golden？→ `ttk-how-write-plugin`
+- 写好的用例如何运行 → `ttk-how-run-test`
+- 用例运行失败 → `ttk-how-diagnose`
+- 算子没有内置 Golden → `ttk-how-write-plugin`

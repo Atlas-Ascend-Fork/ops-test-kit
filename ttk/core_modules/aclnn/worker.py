@@ -697,7 +697,6 @@ def _dispatch_xpu(context, switches, process_ctx, need_3party, manual_case=None)
     from ..common.xpu import (
         MANUAL_XPU_PROVIDER,
         XpuDispatch,
-        dump_manual_xpu_archive,
         load_manual_third_parties,
         manual_xpu_results,
         overlap_deadline_s,
@@ -713,7 +712,6 @@ def _dispatch_xpu(context, switches, process_ctx, need_3party, manual_case=None)
         manual = load_manual_third_parties(context, manual_case)
         if manual is not None:
             process_ctx.notify_status("OnLoadManualXpu")
-            dump_manual_xpu_archive(context, manual)
             return XpuDispatch.ready((manual, manual_xpu_results(), MANUAL_XPU_PROVIDER))
     if not xpu_mode(switches, need_data):
         return XpuDispatch.ready((None, None, None))

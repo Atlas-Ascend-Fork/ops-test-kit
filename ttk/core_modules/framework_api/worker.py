@@ -1543,7 +1543,6 @@ def _collect_xpu(
     from ttk.core_modules.common.xpu import (
         MANUAL_XPU_PROVIDER,
         collect_third_party,
-        dump_manual_xpu_archive,
         dump_xpu_slot_files,
         load_manual_third_parties,
         manual_xpu_results,
@@ -1565,7 +1564,6 @@ def _collect_xpu(
             manual = load_manual_third_parties(testcase, manual_case, device_outputs=ref_nps)
             if manual is not None:
                 process_ctx.notify_status("OnLoadManualXpu")
-                dump_manual_xpu_archive(testcase, manual)
                 dump_xpu_slot_files(testcase, switches, manual, MANUAL_XPU_PROVIDER)
                 third_parties = manual
                 xpu_results = manual_xpu_results()

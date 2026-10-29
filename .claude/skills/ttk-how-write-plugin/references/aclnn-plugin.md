@@ -2,7 +2,10 @@
 
 ACLNN 流程在 torch API 层运行，`golden` / `customize_inputs` 用 **torch.Tensor**。参数名和顺序与 `aclnnXxxGetWorkspaceSize` 函数签名一致（不含 workspaceSize 和 executor）。
 
-> 当 ACLNN 接口入参名与 Python 保留名冲突（如 `self`）时：spec 类内 `golden` **方法**（函数形式）按位置绑定，参数名可任意（如改名为 `selfT`），只要出现顺序与 C header 一致即可（如 C header `self,other,alpha` 可写 `(selfT, other, alpha)`）；**类形式**（`golden = GoldenClass`）严格按名绑定，未命中且无默认值的参数直接抛 `UnknownParamError`（不做位置兜底），此时可用 `*args` 按位置接收所有未具名消费的输入/属性（`args[0]` 对应 C header 第一个参数，以此类推）。
+> ACLNN 接口入参名可能与 Python 保留名冲突（如 `self`），此时两种形式的绑定规则不同：
+>
+> - **函数形式**（类内 `golden` 方法）：按位置绑定，参数名可任意（如改名 `selfT`），顺序与 C header 一致即可（C header `self,other,alpha` 可写 `(selfT, other, alpha)`）。
+> - **类形式**（`golden = GoldenClass`）：严格按名绑定；未命中且无默认值的参数直接抛 `UnknownParamError`（不做位置兜底）。此时用 `*args` 按位置接收所有未具名消费的输入/属性，`args[0]` 对应 C header 第一个参数，以此类推。
 
 ## golden 示例
 

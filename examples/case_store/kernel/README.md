@@ -2,7 +2,7 @@
 
 单文件 `cases.csv` 覆盖 Kernel 通路的主要功能面，每条用例的 `remark` 列即测试项。GEIR 模式复用本文件（GEIR 同样支持 shape-unknown 用例）。
 
-> 前沿 dtype/算子用例（`abs_int16_3d` / `pad_float8` / `pad_float4` / `requant_float8` / `matmul_v3_optional_inputs`）的通过依赖本地 CANN 版本的算子支持面（GEIR 模式复用时同理），不支持时的预期错误签名见上级 [README 的 CANN 版本配套说明](../README.md)。Kernel 通路另依赖系统 `make`（AscendC 构建链，缺失时新版 TTK 会前置拦截提示安装）。
+> 较新 dtype/算子用例（`abs_int16_3d` / `pad_float8` / `pad_float4` / `requant_float8` / `matmul_v3_optional_inputs`）是否通过取决于本地 CANN 支持面（GEIR 复用同理），不支持时的错误签名见上级 [README 的 CANN 版本配套说明](../README.md)。另需系统 `make`。
 
 ```bash
 K=examples/case_store/kernel
@@ -45,7 +45,7 @@ python3 -m ttk kernel -i $K/cases.csv --plugin $K/golden.py -c -b release \
 
 | 用例 | 测试项 |
 |---|---|
-| `non_zero_shape_unknown` | 输出 shape 由输入取值决定（`output_shape_unknown_indexes`）；CSV 声明 shape 仅为占位；shape 元数据协议槽不进精度比对（静态 kernel 不写该槽） |
+| `non_zero_shape_unknown` | 输出 shape 由输入取值决定（`output_shape_unknown_indexes`）；CSV 声明的 shape 仅为占位；shape 元数据槽不参与精度比对（静态编译不写该槽） |
 
 ```bash
 python3 -m ttk kernel -i $K/cases.csv --plugin $K/golden.py -t non_zero_shape_unknown -c -b release
@@ -57,8 +57,8 @@ python3 -m ttk kernel -i $K/cases.csv --plugin $K/golden.py -t non_zero_shape_un
 |---|---|
 | `pad_float8` | **float8_e5m2**（通用算子 Pad 零填充）；paddings 为 ValueDepend 张量输入（attributes 指定取值） |
 | `pad_float4` | **float4_e2m1**（en_dtypes 承载，通用算子 Pad）；fp4 时尾轴 padFront 须偶数（2 元素/字节打包对齐） |
-| `quant_int8` | fp16→int8 量化输出；int8 输出按 dtype 轴默认路由 `binary_equal`，如需 quant 判据（\|a-g\|≤1）可在 TestSpec `tolerance` 中声明 `{'int8': {'standard': 'quant'}}` |
-| `requant_float8` | fp16→float8_e5m2 量化输出（dst_type=35），requant 判据（ULP≤1，仅 hifloat8 输出才自动路由，建议显式 `--compare requant`；默认 mixed 亦可通过本例） |
+| `quant_int8` | fp16→int8 量化输出；int8 输出默认按 dtype 自动切换 `binary_equal`，如需 quant（\|a-g\|≤1）可在 TestSpec `tolerance` 中声明 `{'int8': {'standard': 'quant'}}` |
+| `requant_float8` | fp16→float8_e5m2 量化输出（dst_type=35），requant（ULP≤1，仅 hifloat8 输出才会自动切换，建议显式 `--compare requant`；默认 mixed 亦可通过本例） |
 
 ```bash
 python3 -m ttk kernel -i $K/cases.csv --plugin $K/golden.py -c -b release \
@@ -70,7 +70,7 @@ python3 -m ttk kernel -i $K/cases.csv --plugin $K/golden.py -t requant_float8 --
 
 | 用例 | 测试项 |
 |---|---|
-| `matmul_v3_optional_inputs` | 可选输入 bias/offset_w None 占位 + transpose_x1/x2 + `#enable_pad`；无内置 golden（perf-only）；多 tiling key 编译（~130 子目标，分钟级/模式），限额容器自动收敛编译并行度，必要时 `--pc 1` |
+| `matmul_v3_optional_inputs` | 可选输入 bias/offset_w None 占位 + transpose_x1/x2 + `#enable_pad`；无内置 golden（perf-only）；多 tiling key 编译（约 130 个子目标，每个模式分钟级），容器资源受限时自动降低编译并行度，必要时 `--pc 1` |
 
 ```bash
 python3 -m ttk kernel -i $K/cases.csv -t matmul_v3_optional_inputs -c -b release
@@ -78,4 +78,4 @@ python3 -m ttk kernel -i $K/cases.csv -t matmul_v3_optional_inputs -c -b release
 
 dtype 覆盖：float16 / float32 / bfloat16 / int8 / int16 / int32 / int64 / complex64 / float8_e5m2 / float4_e2m1。
 
-用例编写与命令行细节见 `.claude/skills/ttk-how-write-case/` 与 `ttk-how-run-test`；判据详解见 `docs/Precision_Comparison.md`。
+用例编写与命令行细节见 `.claude/skills/ttk-how-write-case/` 与 `ttk-how-run-test`；判据详解见 `docs/reference/precision_comparison.md`。

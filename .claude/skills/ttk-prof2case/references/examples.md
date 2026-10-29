@@ -34,7 +34,7 @@ testcase_name,api_name,tensor_view_shapes,tensor_dtypes,scalar_dtypes,output_ten
 aclnnAdd_00001,aclnnAdd,"((2, 3), (2, 3), (2, 3))","('float32', 'float32', 'float32')","('float32',)","(2,)"
 ```
 
-alpha 标量 dtype 启发式 float32，值由 TTK 随机生成。**无需人工干预**。
+alpha 标量 dtype 按启发式取 float32，值由 TTK 随机生成，无需人工干预。
 
 ## 2. Inplace + dtype 转换（Cast 型 InplaceCopy）
 
@@ -48,7 +48,7 @@ Input="1330" INT64, Output="1330" INT32
 ```csv
 aclnnInplaceCopy_00001,aclnnInplaceCopy,"((1330,), (1330,))","('int32', 'int64')",,,"(0,)"
 ```
-`selfRef` 自动进 output_tensor_indexes（inplace）。**无需人工干预**。
+`selfRef` 自动进 output_tensor_indexes（inplace），无需人工干预。
 
 ## 3. GE 内部常量剔除（Transpose 型 InplaceCopy）
 
@@ -61,7 +61,7 @@ Input="128,128,1152;3" DT_BF16;INT64, Output="1152,128,128" DT_BF16
 ```csv
 aclnnInplaceCopy_00002,aclnnInplaceCopy,"((1152, 128, 128), (128, 128, 1152))","('bfloat16', 'bfloat16')",,,"(0,)"
 ```
-perm 被丢弃（remark 记 `aux-drop:K((3,),int64,ND)`）。**布局可能与真实调用不同**（真实 perm 未知，连续排布即 0,1,2 交换）——语义近似，抽查即可。
+perm 被丢弃（remark 记 `aux-drop:K((3,),int64,ND)`）。真实 perm 值 profiling 不可见，转出的用例按连续排布（0,1,2 交换）处理，布局可能与真实调用不同，属语义近似，抽查核对即可。
 
 ## 4. 含 C 参数（需补值，B 档）
 

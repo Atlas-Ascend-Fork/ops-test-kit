@@ -37,10 +37,30 @@ GEIR 模式复用 Kernel 模式的 CSV 和 golden 资产，无需额外编写。
 
 | 参数 | 缩写 | 说明 | 默认 |
 |------|------|------|------|
+| `--const` | `-c` | 静态 shape 编译（用固定 shape 编译后执行） | **开启**（与 Kernel 默认开启动态编译相反） |
+| `--dynamic` | `-d` | 动态 shape 编译（经 tiling 得到实际 shape 后执行；`dyn_input_shapes` 列仅在本模式生效） | 关闭（需显式开启） |
 | `--binary` | `-b` | 二进制复用；`-b release` 使用 CANN 预编译 kernel，`-b false` 关闭 | 关闭（在线编译） |
 | `--xpu-perf` | | 采集 XPU 远程性能；需远程 XPU 配置（`ttk.conf.yaml` 或 `--config`） | 关闭 |
 
-> **注意**：GEIR **不支持** `--backend npusim` 仿真（仿真仅 kernel/aclnn/e2e 三模式支持）。
+> [!IMPORTANT]
+> GEIR 默认开启静态编译（`-c`），与 Kernel 默认开启动态编译（`-d`）相反。`-c`/`-d` 可同时启用（`-c -d`），也可 `-c=false -d` 仅动态。
+
+```shell
+# 静态 shape 编译（默认）
+python3 -m ttk geir -i cases.csv -c
+
+# 动态 shape 编译（需显式开启）
+python3 -m ttk geir -i cases.csv -d
+
+# 静态 + 动态同时启用
+python3 -m ttk geir -i cases.csv -c -d
+
+# 关闭静态，仅动态
+python3 -m ttk geir -i cases.csv -c=false -d
+```
+
+> [!NOTE]
+> GEIR **不支持** `--backend npusim` 仿真（仿真仅 kernel/aclnn/e2e 三模式支持）。
 
 ## 调试
 

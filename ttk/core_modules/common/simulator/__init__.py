@@ -9,7 +9,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """NPUSim simulator backend for the kernel/aclnn test modes.
 
-See ``docs/NPUSim/npusim_design.md`` for the design.
+See ``docs/npusim/npusim_design.md`` for the design.
 """
 
 from .case_writer import case_dir

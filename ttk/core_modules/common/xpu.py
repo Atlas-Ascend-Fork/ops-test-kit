@@ -43,7 +43,6 @@ __all__ = [
     "load_manual_third_parties",
     "has_manual_xpu_source",
     "manual_xpu_results",
-    "dump_manual_xpu_archive",
     "dump_xpu_slot_files",
     "collect_third_party",
 ]
@@ -556,28 +555,6 @@ def _load_manual_xpu_slot(index, slot, dtype, filename_dtype, name):
             f"(storage {expected_storage})"
         )
     return array
-
-
-def dump_manual_xpu_archive(testcase, arrays) -> None:
-    """--dump xpu 开启时，manual 装载产物按归档回放协议落盘（与远端产物同命名）。
-
-    实现归属 common/dump/dumper.dump_xpu_archive（``{testcase}_xpu_golden_
-    {index}.bin``）——manual 回放的用例再 dump 出来仍是可回放形态，闭环完整。
-    manual 不经远端，此函数是 manual 侧唯一归档点。
-    """
-    from ...switches import get_global_storage
-
-    switches = get_global_storage()
-    if not getattr(getattr(switches, "dump_config", None), "dump_xpu", False):
-        return
-    from .dump.dumper import dump_xpu_archive
-
-    testcase_name = getattr(testcase, "testcase_name", None) or getattr(testcase, "op_name", None) or "case"
-    dump_xpu_archive(
-        {MANUAL_XPU_PROVIDER: {"status": "PASS", "outputs": list(arrays)}},
-        testcase_name,
-        switches,
-    )
 
 
 def dump_xpu_slot_files(testcase, switches, third_parties, provider) -> None:

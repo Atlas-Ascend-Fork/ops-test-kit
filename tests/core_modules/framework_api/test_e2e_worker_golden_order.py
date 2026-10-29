@@ -426,7 +426,6 @@ def no_remote(monkeypatch):
     monkeypatch.setattr(e2e_worker, "dump_goldens", lambda *a, **k: None)
     # manual 装载后的落盘副作用（依赖 root_path/全局 storage），非本组断言对象
     monkeypatch.setattr("ttk.core_modules.common.xpu.dump_xpu_slot_files", lambda *a, **k: None)
-    monkeypatch.setattr("ttk.core_modules.common.xpu.dump_manual_xpu_archive", lambda *a, **k: None)
 
 
 @pytest.mark.parametrize("via_slots", [False, True], ids=["csv-path", "case-dir-slots"])

@@ -1,6 +1,6 @@
 # NPUSim 仿真参数（--backend npusim）
 
-kernel / aclnn / e2e 子命令均可加 `--backend npusim`，把真机执行替换为 NPUSim（CANN 自带 cannsim + camodel，SoC 级周期精确仿真）仿真执行。golden 生成、精度比对、结果 CSV 全部复用现有链路，无卡即可验证算子精度。
+kernel / aclnn / e2e 子命令都支持 `--backend npusim`：把真机执行替换为 NPUSim 仿真（CANN 自带 cannsim + camodel，SoC 级周期精确）。golden 生成、精度比对、结果 CSV 全部复用现有链路，无卡也能验证算子精度。
 
 ## 参数
 
@@ -61,4 +61,4 @@ python3 -m ttk e2e --backend npusim -i examples/case_store/e2e/torch_cases.csv -
 - 仿真较慢：camodel 初始化 20–30s，大 shape 用例分钟级起，建议 `--sim-cores 0` + 小 shape 先行验证。
 - e2e 仿真仅支持 **aclnn 算子**：非 aclnn 的 legacy 自定义算子（如 `torch_npu.npu_conv2d`）会被 torch_npu 拒绝；部分算子（`torch.abs`、inplace relu）在 camodel 下会挂起，先小 shape 验证。
 
-完整指南与排障：`docs/NPUSim/npusim_usage.md`
+完整指南与排障：`docs/npusim/npusim_usage_guide.md`
