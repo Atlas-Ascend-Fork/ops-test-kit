@@ -11,6 +11,7 @@
 import io
 import os
 import struct
+import time
 import types
 
 import numpy as np
@@ -38,6 +39,60 @@ def _serve_with_frame(data):
     serve.proc = types.SimpleNamespace(stdin=io.BytesIO())
     serve._stderr_tail = bytearray()
     return serve
+
+
+def test_read_exact_joins_short_reads(monkeypatch):
+    serve = object.__new__(geir_execute._GeirServe)
+    read_fd, write_fd = os.pipe()
+    serve._data_r = read_fd
+    serve._stderr_tail = bytearray()
+    requested = []
+    real_read = geir_execute.os.read
+    os.write(write_fd, b"ab")
+    os.write(write_fd, b"cde")
+    os.close(write_fd)
+
+    def short_read(fd, size):
+        assert fd == read_fd
+        requested.append(size)
+        return real_read(fd, min(size, 2))
+
+    monkeypatch.setattr(geir_execute.os, "read", short_read)
+
+    try:
+        assert serve._read_exact(5, time.time() + 1) == b"abcde"
+    finally:
+        os.close(read_fd)
+    assert requested == [5, 3, 1]
+
+
+def test_read_exact_rejects_negative_length():
+    serve = object.__new__(geir_execute._GeirServe)
+    serve._data_r = None
+    serve._stderr_tail = bytearray()
+    with pytest.raises(RuntimeError, match="invalid frame length: -1"):
+        serve._read_exact(-1, time.time() + 1)
+
+
+def test_read_exact_rejects_truncated_frame():
+    serve = _serve_with_frame(b"abcd")
+    with pytest.raises(RuntimeError, match="process exited unexpectedly"):
+        serve._read_exact(5, time.time() + 1)
+    os.close(serve._data_r)
+
+
+def test_read_exact_times_out_without_allocating_declared_frame():
+    serve = object.__new__(geir_execute._GeirServe)
+    read_fd, write_fd = os.pipe()
+    serve._data_r = read_fd
+    serve._stderr_tail = bytearray()
+    os.write(write_fd, b"ab")
+    try:
+        with pytest.raises(RuntimeError, match="timeout: incomplete frame"):
+            serve._read_exact(1 << 40, time.time() + 0.01)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def test_serve_success_frame_roundtrip():
@@ -161,15 +216,23 @@ def test_pdeathsig_preexec_wiring(monkeypatch):
 
     class FakeProc:
         def __init__(self):
+            self.pid = 12345
             self.stdin = io.BytesIO()
             self.stdout = io.BytesIO()
             self.stderr = io.BytesIO()
+
+        def wait(self, timeout):
+            return 0
+
+        def kill(self):
+            return None
 
     def fake_popen(args, **kwargs):
         seen.update(kwargs)
         return FakeProc()
 
     monkeypatch.setattr(geir_execute.subprocess, "Popen", fake_popen)
-    geir_execute._GeirServe("bin", "/tmp", 0)
+    serve = geir_execute._GeirServe("bin", "/tmp", 0)
     assert seen.get("preexec_fn") is geir_execute._set_pdeathsig
+    serve.close()
     geir_execute._set_pdeathsig()

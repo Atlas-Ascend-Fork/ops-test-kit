@@ -51,6 +51,7 @@ from .perf_parse import _parse_msprof_task_duration
 from .testcase import GeirTestcase
 
 _SERVE_CASE_ERROR = "GEIR execution failed (serve):"
+_READ_CHUNK_BYTES = 1024 * 1024
 
 
 def _set_pdeathsig():
@@ -158,6 +159,8 @@ class _GeirServe:
         return self.proc.poll() is None
 
     def _read_exact(self, n: int, deadline: float) -> bytes:
+        if n < 0:
+            raise RuntimeError(f"GEIR serve invalid frame length: {n}")
         buf = bytearray()
         while len(buf) < n:
             remaining = deadline - time.time()
@@ -166,7 +169,7 @@ class _GeirServe:
             ready, _, _ = select.select([self._data_r], [], [], remaining)
             if not ready:
                 raise RuntimeError("GEIR serve timeout: incomplete frame")
-            chunk = os.read(self._data_r, n - len(buf))
+            chunk = os.read(self._data_r, min(n - len(buf), _READ_CHUNK_BYTES))
             if not chunk:
                 raise RuntimeError(
                     "GEIR serve process exited unexpectedly: " + self._stderr_tail[-2000:].decode("utf-8", "replace")
