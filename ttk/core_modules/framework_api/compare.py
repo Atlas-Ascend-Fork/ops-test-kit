@@ -123,10 +123,33 @@ def _matching_grad_dtypes(testcase, grad_count):
     return (floating * ((grad_count // max(len(floating), 1)) + 1))[:grad_count]
 
 
+def _record_output_shapes(return_struct, arrays):
+    """Record the real shapes of the arrays that were actually produced/compared.
+
+    The framework APIs are functional (out-of-place) ops whose output slots are
+    not declared via output_tensor_indexes; recording the observed output
+    shapes here gives result consumers nonempty-output evidence per row and
+    lets them distinguish a real comparison from the identical-empty shortcut.
+    None entries stay None: a missing output is not nonempty evidence.
+    """
+    if arrays is None:
+        return
+    try:
+        shapes = tuple(None if item is None else tuple(int(dim) for dim in item.shape) for item in arrays)
+    except (AttributeError, TypeError):
+        return
+    # 已有记录不含任何非 None 形状（空元组或全 None，即失败/空产出）时不构成
+    # 证据，允许后续真实形态覆盖；存在任一真实形状则保留最早记录。
+    existing = getattr(return_struct, "output_shapes", None)
+    if existing is None or not any(shape is not None for shape in existing):
+        return_struct.output_shapes = shapes
+
+
 def evaluate_eager_precision(
     testcase, raw_inputs, result_nps, golden_nps, switches, perf, return_struct, third_parties=None
 ):
     """Compare eager mode results against golden, set return_struct. Returns True if pass."""
+    _record_output_shapes(return_struct, result_nps)
     output_dtypes = tuple(str(g.dtype) if g is not None else None for g in result_nps)
     output_dtypes = _extend_backward_dtypes(testcase, output_dtypes)
     resolver = SpecResolver(testcase.api_name, "e2e", switches.plugin_path)
@@ -190,9 +213,12 @@ def evaluate_graph_precision(
             原固定串 `GRAPH_EXEC_FAILURE`。
     """
     if not graph_nps:
+        # 执行失败行保持 output_shapes=None（未度量），不得让空产出形态
+        # 抢先记录并遮蔽后续成功形态的真实形状。
         precision_str = f"GRAPH_EXEC_FAILURE: {err_msg}" if err_msg else "GRAPH_EXEC_FAILURE"
         return_struct.construct(precision_str, "FAIL", None, mode=mode)
         return
+    _record_output_shapes(return_struct, graph_nps)
 
     output_dtypes = tuple(str(g.dtype) if g is not None else None for g in graph_nps)
     resolver = SpecResolver(testcase.api_name, "e2e", switches.plugin_path)

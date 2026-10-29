@@ -55,6 +55,7 @@ class FrameworkApiReturnStructure(ReturnStructureBase):
         "golden_kernel_count",
         "golden_kernel_details",
         "golden_source",
+        "output_shapes",
     )
 
     # 专属列 = __slots__ 去公共槽（COMMON_SLOTS 由基类声明）派生——单源维护，
@@ -92,6 +93,10 @@ class FrameworkApiReturnStructure(ReturnStructureBase):
         self.golden_kernel_count = None
         self.golden_kernel_details = None
         self.golden_source = None
+        # 实际产出张量形状（按输出序）：eager/graph 比较入口记录被比较对象的真实
+        # 形状，供结果消费方区分"真比较"与"空张量恒等捷径"；None 表示该次未执行
+        # 到比较或输出缺失，不构成非空证据。
+        self.output_shapes = None
         # dl=3 batch 一致性：worker 切片哈希摘要（随 pipe 回传主进程，非 CSV 列——
         # cleanup 组装比对消费）
         self.batch_summary = None
