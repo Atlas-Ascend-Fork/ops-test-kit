@@ -14,6 +14,9 @@ nested tensor structure, flat properties, compression, normalize, and validate.
 """
 
 import copy
+import logging
+from contextlib import contextmanager
+from unittest.mock import Mock
 
 import numpy
 import pytest
@@ -43,6 +46,30 @@ def _make(api_name="torch.dummy", **kwargs):
 def make_testcase():
     """Local override: TestcaseE2e (overrides conftest's TestcaseAclnn)."""
     return _make
+
+
+@contextmanager
+def _preserve_logging_handlers(monkeypatch):
+    from ttk.core_modules.common import logging as ttk_logging
+
+    root = logging.getLogger()
+    loggers = [root, *[v for v in root.manager.loggerDict.values() if isinstance(v, logging.Logger)]]
+    states = {logger: (logger.handlers[:], logger.level) for logger in loggers}
+    original_handlers = {handler for handlers, _ in states.values() for handler in handlers}
+    with monkeypatch.context() as patch:
+        patch.setattr(ttk_logging, "_owned_handlers", [])
+        try:
+            yield
+        finally:
+            handlers_to_close = set()
+            loggers = [root, *[v for v in root.manager.loggerDict.values() if isinstance(v, logging.Logger)]]
+            for logger in loggers:
+                handlers_to_close.update(set(logger.handlers) - original_handlers)
+                handlers, level = states.get(logger, ([], logging.NOTSET))
+                logger.handlers[:] = handlers
+                logger.setLevel(level)
+            for handler in handlers_to_close:
+                handler.close()
 
 
 class TestFlatTensorDtypesCompression:
@@ -334,13 +361,104 @@ class TestCheckTensorConfiguration:
         assert not case.is_valid
         assert case.fail_reason == "PARAM_TYPE_MISMATCH"
 
-    def test_api_not_found_skips_validation(self, make_testcase):
+    def test_api_not_found_logs_failure(self, make_testcase, caplog):
         case = make_testcase(
             api_name="nonexistent.api", tensor_view_shapes=((2, 3), (2, 3)), tensor_dtypes=("float32", "float32")
         )
-        case.validate()
+        case.testcase_name = "missing_api_case"
+        with caplog.at_level(logging.ERROR):
+            case.validate()
         assert not case.is_valid
         assert case.fail_reason == "API_PARSE_FAIL"
+        assert "missing_api_case" in caplog.text
+        assert "API_PARSE_FAIL" in caplog.text
+        assert "nonexistent.api" in caplog.text
+        assert "No module named 'nonexistent'" in caplog.text
+
+    def test_cached_parse_failure_logs_each_case(self, make_testcase, monkeypatch, caplog):
+        pytest.importorskip("torch")
+        from ttk.core_modules.framework_api.adapter import adapter_for_api_name
+
+        api = "torch.ops.ttk_missing_extension.quant_flash_mla"
+        adapter = adapter_for_api_name(api)
+        extract = Mock(wraps=adapter.extract_params)
+        load = Mock(wraps=adapter.load_api)
+        monkeypatch.setattr(adapter, "extract_params", extract)
+        monkeypatch.setattr(adapter, "load_api", load)
+        with caplog.at_level(logging.ERROR):
+            for name in ("first_case", "second_case"):
+                case = make_testcase(api_name=api, tensor_view_shapes=((2, 3),), tensor_dtypes=("float32",))
+                case.testcase_name = name
+                case.validate()
+                assert case.fail_reason == "API_PARSE_FAIL"
+                assert case.get_api_info() is None
+        assert api in caplog.text
+        assert "first_case" in caplog.text
+        assert "second_case" in caplog.text
+        assert "quant_flash_mla" in caplog.text
+        assert "has no attribute" in caplog.text
+        extract.assert_called_once_with(api)
+        load.assert_called_once_with(api)
+
+    def test_unparseable_existing_api_logs_failure(self, make_testcase, monkeypatch, caplog):
+        pytest.importorskip("torch")
+        from ttk.core_modules.framework_api.adapter import adapter_for_api_name
+
+        monkeypatch.setattr(adapter_for_api_name("torch.add"), "extract_params", lambda *args: None)
+        case = make_testcase(api_name="torch.add", tensor_view_shapes=((2, 3),), tensor_dtypes=("float32",))
+        with caplog.at_level(logging.ERROR):
+            case.validate()
+        assert case.fail_reason == "API_PARSE_FAIL"
+        assert "torch.add" in caplog.text
+        assert "parameter inspection did not produce a supported signature" in caplog.text
+
+    def test_signature_lookup_exception_is_logged(self, make_testcase, monkeypatch, caplog):
+        from ttk.core_modules.framework_api.adapter import adapter_for_api_name
+
+        adapter = adapter_for_api_name("torch.add")
+        monkeypatch.setattr(adapter, "extract_params", Mock(side_effect=RuntimeError("signature registry unavailable")))
+        load = Mock()
+        monkeypatch.setattr(adapter, "load_api", load)
+        case = make_testcase(api_name="torch.add", tensor_view_shapes=((2, 3),), tensor_dtypes=("float32",))
+        with caplog.at_level(logging.ERROR):
+            case.validate()
+        assert case.fail_reason == "API_PARSE_FAIL"
+        assert "RuntimeError: signature registry unavailable" in caplog.text
+        assert "parameter inspection did not produce a supported signature" not in caplog.text
+        assert sum(record.exc_info is not None for record in caplog.records) == 1
+        load.assert_not_called()
+
+    def test_factory_parse_failure_is_logged(self, make_testcase, caplog):
+        case = make_testcase(api_name="nonexistent.api", tensor_view_shapes=(), tensor_dtypes=("float32",))
+        with caplog.at_level(logging.ERROR):
+            case.validate()
+        assert not case.is_valid
+        assert case.fail_reason == "tensor_view_shapes is empty"
+        assert "API_PARSE_FAIL" in caplog.text
+        assert "nonexistent.api" in caplog.text
+
+    @pytest.mark.parametrize("file_handler", [False, True])
+    def test_parse_failure_prints_to_console(self, make_testcase, capsys, monkeypatch, tmp_path, file_handler):
+        from ttk.core_modules.common.logging import default_logging_config
+
+        monkeypatch.setenv("ASCEND_SLOG_PRINT_TO_STDOUT", "0")
+        named_logger = logging.getLogger("ttk.parse_failure_test")
+        handlers, level = named_logger.handlers[:], named_logger.level
+        with _preserve_logging_handlers(monkeypatch):
+            default_logging_config(file_handler=file_handler, testcase_name="parse_case", log_dir=str(tmp_path))
+            case = make_testcase(api_name="nonexistent.api", tensor_view_shapes=((2, 3),), tensor_dtypes=("float32",))
+            case.testcase_name = "parse_case"
+            case.validate()
+            output = capsys.readouterr().out
+            assert "[ERROR]" in output
+            assert "parse_case" in output
+            assert "API_PARSE_FAIL" in output
+            assert "nonexistent.api" in output
+            assert "No module named 'nonexistent'" in output
+            if file_handler:
+                assert "API_PARSE_FAIL" in (tmp_path / "ttk.log").read_text()
+        assert named_logger.handlers == handlers
+        assert named_logger.level == level
 
     def test_onnx_attr_validation(self, make_testcase):
         """onnx 域属性校验：未知属性校验期拒绝；声明属性放行。"""

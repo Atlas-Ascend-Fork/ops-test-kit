@@ -164,7 +164,14 @@ class TestcaseE2e(ApiTestcaseBase):
             )
 
             self._api_info_cache = FrameworkApiInfoKeeper().get(self.api_name)
-        except Exception:
+        except Exception as error:
+            logging.error(
+                "[%s] API_PARSE_FAIL: cannot inspect %s: %s: %s",
+                self.testcase_name,
+                self.api_name,
+                type(error).__name__,
+                error,
+            )
             self._api_info_cache = None
         return self._api_info_cache
 
@@ -468,6 +475,7 @@ class TestcaseE2e(ApiTestcaseBase):
         """Check if API is a factory function (no required input tensors)."""
         info = self.get_api_info()
         if info is None:
+            self._report_api_parse_failure()
             self.is_valid = False
             self.fail_reason = "tensor_view_shapes is empty"
             return None
@@ -498,6 +506,7 @@ class TestcaseE2e(ApiTestcaseBase):
             return
         info = self.get_api_info()
         if info is None:
+            self._report_api_parse_failure()
             self.is_valid = False
             self.fail_reason = "API_PARSE_FAIL"
             return
@@ -512,6 +521,12 @@ class TestcaseE2e(ApiTestcaseBase):
         if self._check_all_tensors_output(info):
             return
         self._check_overload_match(info)
+
+    def _report_api_parse_failure(self):
+        from .info_keeper import FrameworkApiInfoKeeper
+
+        reason = FrameworkApiInfoKeeper().get_failure_reason(self.api_name) or "API parameter inspection failed"
+        logging.error("[%s] API_PARSE_FAIL: cannot parse %s: %s", self.testcase_name, self.api_name, reason)
 
     def _check_onnx_unknown_attrs(self, info):
         """onnx 域：attributes 列出现 schema 未声明的属性名时显式报错。

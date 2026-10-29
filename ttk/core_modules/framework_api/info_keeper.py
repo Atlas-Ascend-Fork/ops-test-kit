@@ -29,10 +29,12 @@ from .api_model import APIParamInfo
 class FrameworkApiInfoKeeper(metaclass=Singleton):
     def __init__(self):
         self._cache: Dict[str, Optional[APIParamInfo]] = {}
+        self._failure_reasons: Dict[str, str] = {}
 
     def get(self, api_name: str) -> Optional[APIParamInfo]:
         if api_name in self._cache:
             return self._cache[api_name]
+        reason = None
         try:
             from .adapter import adapter_for_api_name
 
@@ -41,16 +43,33 @@ class FrameworkApiInfoKeeper(metaclass=Singleton):
             # 可选框架（torch_npu/tensorflow 等）未安装属预期环境形态：
             # 单行告警即可，不刷 ERROR 级整栈回溯污染日志。
             logging.warning("API signature parsing failed: %s: %s: %s", api_name, type(e).__name__, e)
+            reason = f"{type(e).__name__}: {e}"
             info = None
         except Exception as e:
             logging.exception("API signature parsing failed: %s: %s: %s", api_name, type(e).__name__, e)
+            reason = f"{type(e).__name__}: {e}"
             info = None
         self._cache[api_name] = info
         if info:
             logging.debug(f"Parsed {api_name}: {len(info.params)} params from {info.source}")
         elif info is None:
+            self._failure_reasons[api_name] = reason or self._inspect_failure_reason(api_name)
             logging.debug("Could not parse %s; see API signature parsing errors above", api_name)
         return info
+
+    @staticmethod
+    def _inspect_failure_reason(api_name):
+        from .adapter import adapter_for_api_name
+
+        try:
+            adapter_for_api_name(api_name).load_api(api_name)
+        except Exception as error:
+            return f"{type(error).__name__}: {error}"
+        return "API resolved, but parameter inspection did not produce a supported signature"
+
+    def get_failure_reason(self, api_name: str) -> Optional[str]:
+        """Read a cached parse failure without loading or inspecting the API."""
+        return self._failure_reasons.get(api_name)
 
     def register(self, api_name: str, params, source="manual"):
         if isinstance(params, APIParamInfo):
@@ -64,6 +83,8 @@ class FrameworkApiInfoKeeper(metaclass=Singleton):
             from .adapter import get_adapter
 
             self._cache[api_name] = get_adapter("torch").register_params(api_name, params, source)
+        self._failure_reasons.pop(api_name, None)
 
     def clear_cache(self):
         self._cache.clear()
+        self._failure_reasons.clear()
