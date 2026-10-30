@@ -80,9 +80,27 @@ def _promote_tensor(t, tgt_dt):
     return t.to(tgt_dt)
 
 
+def _upload_tensor(t, device):
+    """张量上板：strided 视图（存储>视图/非零 offset/非连续，如 FRACTAL_NZ 逻辑视图）
+    整存储拷贝到 device 并按原视图几何重建，视图外的分形尾块数据在拷贝后存活；
+    普通 contiguous 张量直接 .to(device)。
+
+    拷贝语义与被测数据隔离（与 .to() 一致）：重建视图的 storage 由本次拷贝
+    独占，回填不触及源张量。"""
+    storage_numel = t.untyped_storage().nbytes() // t.element_size()
+    if storage_numel > t.numel() or t.storage_offset() != 0 or not t.is_contiguous():
+        whole = t.as_strided((storage_numel,), (1,), 0)
+        moved = whole.to(device)
+        return moved.as_strided(tuple(t.shape), t.stride(), t.storage_offset())
+    return t.to(device)
+
+
 def _golden_value_to_device(value, device):
-    """输入上板：torch 张量 → .to(device)（拷贝，与被测数据隔离），嵌套
-    Sequence 递归，其余原样。
+    """输入上板：torch 张量 → 整存储拷贝到 device（_upload_tensor，与被测数据
+    隔离），嵌套 Sequence 递归，其余原样。
+
+    strided 视图（如 FRACTAL_NZ 逻辑视图）上板后仍保留视图外的整块物理存储，
+    插件 golden 按 untyped_storage() 解码 NZ 布局时拿得到声明的元素数。
 
     仅在 gen_npu 内使用：此时 dtype 均为 torch 原生（is_torch_dtype_support
     已判定），不做 numpy 转换。
@@ -90,7 +108,7 @@ def _golden_value_to_device(value, device):
     import torch
 
     if isinstance(value, torch.Tensor):
-        return value.to(device)
+        return _upload_tensor(value, device)
     if isinstance(value, (list, tuple)):
         return type(value)(_golden_value_to_device(v, device) for v in value)
     return value
@@ -267,7 +285,7 @@ class GoldenGenerator:
         if device is not None:
             import torch
 
-            pool = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in pool.items()}
+            pool = {k: (_upload_tensor(v, device) if isinstance(v, torch.Tensor) else v) for k, v in pool.items()}
         if class_accepts_device(cls):
             pool["device"] = device or "cpu"
         results = instantiate_and_call(cls, pool)
