@@ -10,7 +10,7 @@
 """common/profiler：性能采集与解析。
 
 采集与解析两层：
-- **框架层 profiler**（torch_profiler.py / tf_npu_profiler.py）以 context manager 包裹被测执行，
+- **框架层 profiler**（torch_profiler.py / cann_profiler.py）以 context manager 包裹被测执行，
   产出统一 ProfileResult（elapsed_us + kernel_details）——解析自己负责
   （kernel_details.csv / operator_details.csv / 事件表各家自己读），通路与
   ReturnStructure 只消费统一结果。
@@ -28,9 +28,9 @@
 - torch_profiler.py：torch 系——TorchProfiler（torch.profiler）+
   TorchNpuProfiler（torch_npu.profiler）+ resolve_activities/summarize_events
   共享引擎（E2E 与 server torch pass 同源消费）
-- tf_npu_profiler.py：tf 系 × NPU——TfNpuProfiler（内部包 MsProfiler，
-  TF 算子不走 torch dispatcher、tf.profiler 设备面不支持 NPU，只能下潜
-  CANN 层；机制失败降级 wall-clock）
+- cann_profiler.py：tf/onnx 系 × NPU 共享——CannMsProfiler（tf 算子与
+  aclmdl 执行均不经 torch dispatcher，下潜 CANN 层出 op 级 kernel 明细；
+  机制不可用结果留空，与 kernel/aclnn/geir 同口径）
 - ms_profiler.py：MsProfiler（见上）
 - types.py：ACL 错误码表 + AclProfType/TtkMsProfType/AiCoreProfMetrics 枚举
   + msprof ctypes 结构（MsprofCompactInfo 族）

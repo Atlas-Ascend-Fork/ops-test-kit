@@ -6,7 +6,7 @@
 > Kernel 通路：`kernel/cases.csv`（18 条用例，`remark` 列即测试项；`kernel/golden.py` 为配套 golden 插件，`--plugin` 加载）。
 > GEIR 通路：`geir/cases.csv`（13 条用例，`remark` 列即测试项；GEIR 专属 `dyn_input_shapes` 图编译动态 shape（含 `-2` 未知秩）+ TensorList split/foreach/scatter 家族 + int4 低比特 + 历史缺陷回归；`geir/golden.py` 为配套 golden 插件，与 Kernel 共用同一套 TestSpec 契约）。
 > ACLNN 通路：`aclnn/cases.csv`（25 条用例，dtype 与基本测试场景全覆盖，`remark` 列即测试项；`aclnn/golden.py` 为配套 golden 插件，`--plugin` 加载）。
-> E2E 通路：按框架分文件——`e2e/tf_cases.csv`（TensorFlow，13 条）、`e2e/torch_cases.csv`（torch/torch_npu，24 条，dtype 全覆盖含 fp8 族）与 `e2e/onnx_cases.csv`（ONNX，6 条，atc 编译 .om + aclmdl 执行的引擎层链路，详见 [E2E 算子测试指南](../../docs/operator_test_guides/e2e_test_guide.md)），`remark` 列即测试项；含 TF 有状态算子/量化 dtype/value-depend 等 TF 专属链路用例（详见 `e2e/README.md`）。
+> E2E 通路：按框架分文件——`e2e/tf_cases.csv`（TensorFlow，13 条）、`e2e/torch_cases.csv`（torch/torch_npu，24 条，dtype 全覆盖含 fp8 族）与 `e2e/onnx_cases.csv`（ONNX，7 条，atc 编译 .om + aclmdl 执行的引擎层链路，详见 [E2E 算子测试指南](../../docs/operator_test_guides/e2e_test_guide.md)），`remark` 列即测试项；含 TF 有状态算子/量化 dtype/value-depend 等 TF 专属链路用例（详见 `e2e/README.md`）。
 > 各通路每个用例的「验证特性 + 关键列」详见对应 Case Writing 指南：
 > [Kernel](../../docs/operator_test_guides/kernel_case_writing_guide.md) ·
 > [GEIR](../../docs/operator_test_guides/geir_case_writing_guide.md) ·

@@ -2,7 +2,7 @@
 
 ## 使用须知
 
-`ttk e2e` 通过框架 API 端到端测试算子，内含 torch / tensorflow / onnx 三种 API（由 `api_name` 区分，`onnx.<OpType>` 即 onnx）。用例 CSV 的写法见 [E2E 用例编写](./e2e_case_writing_guide.md)。
+`ttk e2e` 通过框架 API 端到端测试算子，内含 torch / tensorflow / onnx 三种 API，由 `api_name` 区分。onnx 的 `api_name` 写 `onnx.<OpType>`，可带显式 opset 段写成 `onnx.<opset>.<OpType>`。用例 CSV 的写法见 [E2E 用例编写](./e2e_case_writing_guide.md)。
 
 > [!NOTE]
 > 文档中出现的硬件厂商名仅作示例，TTK 通过配置驱动支持任意符合接口的硬件加速器。
@@ -147,7 +147,7 @@ python3 -m ttk e2e -i torch_cases.csv --run=5            # 执行次数（默认
 | `--core-limit` | | torch | 限制核数上限：`N` 仅限 AI 核，`a,v` 分别限制（如 `2,32`）；eager 不支持 | 无 |
 | `--super-kernel` | | torch | 被测算子走 SuperKernel 编译流程（功能验证），需搭配 `-c`/`-d`/`--aclgraph` | 关闭 |
 
-onnx 性能为墙上时钟计时（`eager_device_perf_us`），kernel 明细为空，详见[性能测试](../performance_testing_guide.md)。
+onnx 用例的性能数据由 CANN msprof 采集：`eager_device_perf_us` 为算子 Avg 单轮耗时，`kernel_details` 提供 avg/max/min/calls 明细。`--task-prof=false` 或 msprof 机制不可用时该列留空（`----`），详见[性能测试](../performance_testing_guide.md)。
 
 ```shell
 python3 -m ttk e2e -i torch_cases.csv --aclgraph          # 默认（二进制复用）

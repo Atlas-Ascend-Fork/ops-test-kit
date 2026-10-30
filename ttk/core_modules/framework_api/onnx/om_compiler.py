@@ -23,7 +23,8 @@ atc 离线编译（onnx → om）+ 编译缓存。
 
 缓存照抄 geir/compiler.py compile_op 范式：flock 独占 + stamp 内容比对
 （md5(onnx 字节 + soc_version + atc 参数串)），缓存目录
-<work_dir>/<md5>/（调用方传 <root_path>/onnx_cache/<op_type>）。
+<work_dir>/（调用方传 <root_path>/onnx_om/<testcase_name>/<opset>，键不入
+目录名）。
 """
 
 __all__ = ["OmniCompileError", "compile_om"]
@@ -127,7 +128,8 @@ def compile_om(onnx_path: str, input_shapes: dict, soc_version: str, work_dir: s
 
     onnx_path: 输入模型文件（内容参与缓存键，被复制进缓存目录）；
     input_shapes: {"input_0": (2,3), ...}（与模型输入名一致）；
-    work_dir: 缓存根目录（如 <root_path>/onnx_cache/<op_type>）。
+    work_dir: 缓存放置目录（如 <root_path>/onnx_om/<testcase_name>/<opset>），om
+      model.om 直接落于该目录（键经 stamp 比对参与复用判定）。
     缓存键含 atc ONNX 插件目录指纹——.so 热替换/重编后自动失效。
     """
     atc, ascend_root = _find_atc()
@@ -141,9 +143,11 @@ def compile_om(onnx_path: str, input_shapes: dict, soc_version: str, work_dir: s
         model_data = f.read()
     args_string = _atc_args_string(input_shapes)
     key = _cache_key(model_data, soc_version, args_string, _plugin_fingerprint(ascend_root))
-    case_dir = os.path.join(work_dir, key)
+    # 目录按用例+opset 归组（<root_path>/onnx_om/<testcase_name>/<opset>/model.om），
+    # 变体换装由 stamp 内容比对驱动（键不入目录名）；同目录并发由编译锁串行
+    case_dir = work_dir
     os.makedirs(case_dir, exist_ok=True)
-    lock_path = os.path.join(work_dir, f"{key}.lock")
+    lock_path = os.path.join(work_dir, "compile.lock")
     stamp_path = os.path.join(case_dir, "stamp")
 
     with open(lock_path, "w") as lock_file:

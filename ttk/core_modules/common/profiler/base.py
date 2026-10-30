@@ -14,7 +14,7 @@ Profiler ABC（context manager + result()）与统一结果数据类，以及两
 profiler 与 server XPU pass 共享的设备时间提取内核（单一实现防漂移）。
 
 warmup/repeat 由调用方控制——profiler 只在 with 块内采集。
-框架侧实现见 torch_profiler.py（torch 系）与 tf_npu_profiler.py（tf 系）；
+框架侧实现见 torch_profiler.py（torch 系）与 cann_profiler.py（tf/onnx 系）；
 CANN 采集器见 ms_profiler.py；server XPU 门面见 ttk/remote/server/xpu_profiler.py。
 """
 
@@ -133,7 +133,11 @@ class DisabledProfiler(FrameworkProfiler):
 
 
 class WallClockProfiler(FrameworkProfiler):
-    """Fallback wall-clock profiler for unknown frameworks."""
+    """兜底墙钟 profiler（非 NPU waive / 未知框架）。
+
+    step() 重置计时窗：e2e 循环在 warmup 轮尾调用（窗口自首个计时轮起）；
+    不调 step() 时窗口自 __enter__ 起。
+    """
 
     def __init__(self, backend):
         self._start = None
@@ -146,6 +150,9 @@ class WallClockProfiler(FrameworkProfiler):
     def __exit__(self, *exc):
         self._elapsed = time.perf_counter() - self._start
 
+    def step(self):
+        self._start = time.perf_counter()
+
     def result(self, repeat_count) -> ProfileResult:
         elapsed_us = (self._elapsed or 0.0) * 1e6 / max(repeat_count, 1)
         return ProfileResult(
@@ -154,15 +161,3 @@ class WallClockProfiler(FrameworkProfiler):
             wall_us=elapsed_us,
             source="wallclock",
         )
-
-
-class SteppedWallClockProfiler(WallClockProfiler):
-    """step() 重置计时窗的墙钟 profiler：warmup 轮（含一次性 setup）剔除。
-
-    torch 系经 schedule(warmup, active) 剔除 warmup；墙钟无调度器，以
-    step()（warmup 轮尾调用）为窗口起点对齐该语义。onnx e2e 消费
-    （aclmdl 执行不经 torch dispatcher，kernel 明细为空、perf 降级墙钟）。
-    """
-
-    def step(self):
-        self._start = time.perf_counter()

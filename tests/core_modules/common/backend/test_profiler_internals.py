@@ -123,35 +123,91 @@ def test_summarize_events_aggregates_and_filters():
     assert kernels[0].avg_us == 100.0
 
 
-# --- A3: TfNpuProfiler msprof 机制失败 → wall-clock 降级 ---
+# --- A3: CannMsProfiler（tf/onnx 共享）msprof 采集 ---
 
 
-def test_tf_npu_profiler_falls_back_to_wall_clock_on_msprof_init_failure(tmp_path, monkeypatch, caplog):
-    """libmsprofiler.so 缺失 / MsProfiler 构造失败不得杀掉用例——降级 wall-clock，
-    兑现 TfNpuProfiler 'Eager mode falls back to wall-clock timing' 语义。"""
+class _FakeCannMsProfiler:
+    """CannMsProfiler 内部包 MsProfiler 替身（记录调用序 + 结果桩）。"""
+
+    def __init__(self, *args, **kwargs):
+        self.entered = False
+        self.stepped = False
+        self.exited = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def step(self):
+        self.stepped = True
+
+    def __exit__(self, *exc):
+        self.exited = True
+
+    def result(self, repeat_count):
+        from ttk.core_modules.common.profiler.base import KernelDetails, KernelInfo, ProfileResult
+
+        k = KernelInfo(name="Add", device_us=2.0 * repeat_count, calls=repeat_count, avg_us=2.0, max_us=2.5, min_us=1.5)
+        return ProfileResult(
+            elapsed_us=2.0,
+            kernel_details=KernelDetails(kernels=[k], total_device_us=2.0 * repeat_count, total_cpu_us=0.0),
+            source="msprof",
+        )
+
+
+def _cann_prof(monkeypatch, tmp_path, warmup_count, fake_cls, backend=None):
     import ttk.core_modules.common.profiler.ms_profiler as ms_profiler_mod
-    from ttk.core_modules.common.profiler.tf_npu_profiler import TfNpuProfiler
+    from ttk.core_modules.common.profiler.base import ProfilerConfig
+    from ttk.core_modules.common.profiler.cann_profiler import CannMsProfiler
+
+    created = []
+    monkeypatch.setattr(ms_profiler_mod, "MsProfiler", lambda *a, **k: created.append(fake_cls(*a, **k)) or created[-1])
+    if backend is None:
+        backend = _SyncBackend()
+    return (
+        CannMsProfiler(
+            ProfilerConfig(testcase_name="cann_case", root_path=str(tmp_path), warmup_count=warmup_count), backend
+        ),
+        created,
+    )
+
+
+class _SyncBackend:
+    """CannMsProfiler 开窗前同步用的最小 backend 替身。"""
+
+    def __init__(self):
+        self.synced = 0
+
+    def synchronize(self, dev_id=0):  # noqa: ARG002
+        self.synced += 1
+
+
+def test_cann_ms_profiler_init_failure_leaves_perf_empty(tmp_path, monkeypatch, caplog):
+    """libmsprofiler.so 缺失 / MsProfiler 构造失败不得杀掉用例——结果留空
+    （disabled 空结果、无 kernel 明细），与 kernel/aclnn/geir 同口径，
+    不把墙钟数混进设备耗时列。"""
+    import ttk.core_modules.common.profiler.ms_profiler as ms_profiler_mod
+    from ttk.core_modules.common.profiler.base import ProfilerConfig
+    from ttk.core_modules.common.profiler.cann_profiler import CannMsProfiler
 
     def _boom(*args, **kwargs):
         raise OSError("libmsprofiler.so: cannot open shared object file")
 
     monkeypatch.setattr(ms_profiler_mod, "MsProfiler", _boom)
-    backend = SimpleNamespace(device_type=lambda: "npu", is_npu=lambda: True)
-    prof = TfNpuProfiler(backend, testcase_name="fb", root_path=str(tmp_path))
+    prof = CannMsProfiler(ProfilerConfig(testcase_name="fb", root_path=str(tmp_path), warmup_count=0))
     with prof:
         pass
     assert prof._prof is None
     result = prof.result(repeat_count=2)
-    assert result.kernel_details is None  # wall-clock shape（msprof 路径会带 KernelDetails）
-    assert result.elapsed_us >= 0.0
-    assert "falling back to wall-clock" in caplog.text
+    assert result.source == "disabled"
+    assert result.elapsed_us == 0.0  # 结果列落 "----"，不塞墙钟
+    assert result.kernel_details is None
+    assert "perf columns left empty" in caplog.text
 
 
-def test_tf_npu_profiler_cleans_up_partial_msprof_init(tmp_path, monkeypatch):
+def test_cann_ms_profiler_cleans_up_partial_msprof_init(tmp_path, monkeypatch):
     """step() 中途失败（如 aclprofInit 成功、CreateConfig 失败）时，部分初始化的
-    会话必须经 __exit__ 清理（__enter__ 抛异常场景 with 不会调 TfNpuProfiler.__exit__）。"""
-    import ttk.core_modules.common.profiler.ms_profiler as ms_profiler_mod
-    from ttk.core_modules.common.profiler.tf_npu_profiler import TfNpuProfiler
+    会话必须经 __exit__ 清理（异常发生在内部 _start_msprof，with 不会替它收）。"""
 
     created = []
 
@@ -169,9 +225,7 @@ def test_tf_npu_profiler_cleans_up_partial_msprof_init(tmp_path, monkeypatch):
         def __exit__(self, *exc):
             self.exited = True
 
-    monkeypatch.setattr(ms_profiler_mod, "MsProfiler", _FailingStepMsProfiler)
-    backend = SimpleNamespace(device_type=lambda: "npu", is_npu=lambda: True)
-    prof = TfNpuProfiler(backend, testcase_name="partial", root_path=str(tmp_path))
+    prof, _ = _cann_prof(monkeypatch, tmp_path, warmup_count=0, fake_cls=_FailingStepMsProfiler)
     with prof:
         pass
     assert prof._prof is None  # degraded
@@ -179,31 +233,71 @@ def test_tf_npu_profiler_cleans_up_partial_msprof_init(tmp_path, monkeypatch):
     assert created[0].exited  # partial init cleaned up
 
 
-# --- B3: op_statistic 空 OP Type 拦截 ---
+def test_cann_ms_profiler_window_open_semantics(tmp_path, monkeypatch):
+    """采集窗开启点与 e2e 循环协议对齐：开窗前先 synchronize 设备（TF 异步
+    执行下 warmup 轮 kernel 可能仍在飞），warmup>0 时 __enter__ 不开窗、
+    首个 step()（warmup 轮尾）开窗且幂等；warmup=0 时 __enter__ 即开窗。"""
+    backend = _SyncBackend()
+    prof, created = _cann_prof(monkeypatch, tmp_path, warmup_count=1, fake_cls=_FakeCannMsProfiler, backend=backend)
+    with prof:
+        assert created == []  # enter 未开窗（warmup 存在）
+        assert backend.synced == 0  # 未开窗不触发同步
+        prof.step()
+        assert created[0].entered  # warmup 轮尾开窗
+        assert created[0].stepped
+        assert backend.synced == 1  # 开窗前先同步设备
+        prof.step()
+        assert len(created) == 1  # 幂等：不重建 MsProfiler
+        assert backend.synced == 1
+    assert created[0].exited  # with 结束：aclprof 会话关闭
+
+    backend = _SyncBackend()
+    prof, created = _cann_prof(monkeypatch, tmp_path, warmup_count=0, fake_cls=_FakeCannMsProfiler, backend=backend)
+    with prof:
+        assert created[0].entered  # 无 warmup：enter 即开窗
+        assert created[0].stepped
+        assert backend.synced == 1
+    assert created[0].exited
 
 
-def test_tf_npu_result_aggregates_op_statistic(tmp_path):
-    """op_statistic happy path（解析统一在 ms_profiler.read_op_statistic）：
-    Avg 求和为 elapsed（单轮口径），total_device_us = avg × repeat；
-    avg<=0 行剔除。"""
-    from ttk.core_modules.common.profiler.tf_npu_profiler import TfNpuProfiler
+def test_cann_ms_profiler_sync_failure_does_not_block_window(tmp_path, monkeypatch):
+    """synchronize 抛异常为 best-effort（不得吞掉采集窗开启）。"""
 
-    backend = SimpleNamespace(device_type=lambda: "npu", is_npu=lambda: True)
-    prof = TfNpuProfiler(backend, testcase_name="agg", root_path=str(tmp_path))
-    (Path(prof._outdir) / "op_statistic_20240101000000.csv").write_text(
-        "OP Type,Avg Time(us),Total Time(us),Count,Min Time(us),Max Time(us)\n"
-        "Add,2.0,20.0,10,1.0,3.0\n"
-        "Mul,1.5,15.0,10,0.5,2.5\n"
-        "ZeroAvg,0,0,0,0,0\n"
+    class _BrokenSyncBackend(_SyncBackend):
+        def synchronize(self, dev_id=0):
+            raise RuntimeError("sync failed")
+
+    prof, created = _cann_prof(
+        monkeypatch, tmp_path, warmup_count=0, fake_cls=_FakeCannMsProfiler, backend=_BrokenSyncBackend()
     )
+    with prof:
+        assert created[0].stepped  # 同步失败仍照常开窗
+    assert prof._prof is not None
+
+
+def test_cann_ms_profiler_result_delegates_msprof(tmp_path, monkeypatch):
+    """msprof 命中：elapsed/kernel_details 取 MsProfiler.result；采集无数据
+    （空 op_statistic）→ 空结果直通，不降级墙钟。"""
+    prof, created = _cann_prof(monkeypatch, tmp_path, warmup_count=1, fake_cls=_FakeCannMsProfiler)
+    with prof:
+        prof.step()
     res = prof.result(repeat_count=10)
-    assert res.elapsed_us == 3.5  # 2.0 + 1.5
     assert res.source == "msprof"
-    assert res.wall_us is not None  # wall 侧路结果透出
-    assert res.kernel_details.total_device_us == 35.0  # 3.5 × 10
-    assert res.kernel_details.total_cpu_us == 0.0
-    names = [k.name for k in res.kernel_details.kernels]
-    assert names == ["Add", "Mul"]
+    assert res.elapsed_us == 2.0
+    assert [k.name for k in res.kernel_details.kernels] == ["Add"]
+
+    class _EmptyMsProfiler(_FakeCannMsProfiler):
+        def result(self, repeat_count):
+            from ttk.core_modules.common.profiler.base import ProfileResult
+
+            return ProfileResult(source="msprof")
+
+    prof, _ = _cann_prof(monkeypatch, tmp_path, warmup_count=0, fake_cls=_EmptyMsProfiler)
+    with prof:
+        pass
+    empty = prof.result(repeat_count=2)
+    assert empty.source == "msprof"
+    assert empty.elapsed_us == 0.0  # 空结果直通（Device/us 落 "----"）
 
 
 # --- C3: find_newest_csv mtime 择新（不依赖 rmtree 副作用）——见 profiler/test_msprof_readers.py ---
@@ -291,9 +385,11 @@ _TORCH_CPU_PROFILE = {"profiler": {"activities": ["CPU"]}, "torch_lib": "cpu"}
 @pytest.mark.parametrize(
     ("api_name", "npu", "profile", "expected"),
     [
-        ("tf.raw_ops.Add", True, None, "TfNpuProfiler"),
+        ("tf.raw_ops.Add", True, None, "CannMsProfiler"),
         ("tf.raw_ops.Add", False, None, "WallClockProfiler"),
-        ("tensorflow.add", True, None, "TfNpuProfiler"),
+        ("tensorflow.add", True, None, "CannMsProfiler"),
+        ("onnx.Add", True, None, "CannMsProfiler"),
+        ("onnx.Add", False, None, "WallClockProfiler"),
         ("torch.add", True, {"profiler": "builtin"}, "TorchNpuProfiler"),
         ("torch.add", False, _TORCH_CPU_PROFILE, "TorchProfiler"),
         ("torch_npu.npu_rms_norm", True, None, "TorchNpuProfiler"),

@@ -129,6 +129,37 @@ def test_opset_version_gate(monkeypatch):
 # ── ParamPlan 装配契约（eager_call 反解的输入侧锚点）───────────────────
 
 
+def test_parse_onnx_api_name_forms():
+    """api_name 形态：裸名 → (OpType, None)；onnx.<opset>.<OpType> → 显式段；
+    domain 限定（非数字段 / 超长 dotted）→ ONNX_DOMAIN_UNSUPPORTED。"""
+    from ttk.core_modules.framework_api.onnx.param_extractor import parse_onnx_api_name
+
+    assert parse_onnx_api_name("onnx.Add") == ("Add", None)
+    assert parse_onnx_api_name("onnx.13.Add") == ("Add", 13)
+    assert parse_onnx_api_name("onnx.18.Add") == ("Add", 18)
+    assert parse_onnx_api_name("onnx.13") == ("13", None)  # 无点即 OpType 名
+    assert parse_onnx_api_name("torch.add") is None
+    assert parse_onnx_api_name("onnx.") is None
+    for bad in ("onnx.ai.onnx.Add", "onnx.foo.Add", "onnx.13.", "onnx.1.2.Add", "onnx..Add"):
+        with pytest.raises(ValueError, match="ONNX_DOMAIN_UNSUPPORTED"):
+            parse_onnx_api_name(bad)
+
+
+def test_explicit_opset_extracts_same_params():
+    """显式 opset 与裸名解析出同一参数模型（schema 源同为环境注册表最新）。"""
+    bare = _by_name(extract_onnx_params("onnx.Add"))
+    pinned = _by_name(extract_onnx_params("onnx.13.Add"))
+    assert set(pinned) == set(bare)
+
+
+def test_explicit_opset_ceiling_gate():
+    """显式 opset 超 atc 插件上限 → 解析期拒绝（裸名则拒绝整个环境）。"""
+    from ttk.core_modules.framework_api.onnx import param_extractor
+
+    with pytest.raises(ValueError, match="ONNX_OPSET_VERSION_UNSUPPORTED"):
+        extract_onnx_params(f"onnx.{param_extractor.ATC_MAX_OPSET + 1}.Add")
+
+
 def test_param_plan_assembly(split_with_num_outputs):
     """eager_call 反解的输入侧锚点：输出槽剔除 + Optional None 占位
     （build_positional_args / build_input_specs 同一套反解）。"""

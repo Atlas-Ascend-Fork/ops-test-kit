@@ -148,6 +148,8 @@ def _run_onnx_reference(api_name, raw_inputs, testcase):
 
     - 参数位经 build_positional_args 重建（与被测侧 plan.build_args 同一装配机器；
       golden_api=onnx.<Op> 时按目标 op 匹配重载）；
+    - opset 段随 api_name 透传（onnx.<opset>.<OpType>）：golden 模型与被测 om
+      声明同一 opset，ReferenceEvaluator 按声明版本分派实现；
     - 输入 specs 从实际数组重建（dtype 随数组走：Promote 时 raw_inputs 已被
       _promote_raw_inputs 抬精度，ReferenceEvaluator 以 fp32/fp64 计算高精度真值）；
     - attrs 从 testcase.attributes（kw-only 装配，与被测侧 kwargs 同源）；
@@ -158,8 +160,12 @@ def _run_onnx_reference(api_name, raw_inputs, testcase):
 
     from .api_param import build_positional_args
     from .onnx.model_builder import build_input_specs, build_model_proto
+    from .onnx.param_extractor import parse_onnx_api_name
 
-    op_type = api_name[len("onnx.") :]
+    parsed = parse_onnx_api_name(api_name)
+    if parsed is None:
+        raise RuntimeError(f"onnx golden: cannot parse {api_name}")
+    op_type, opset = parsed
     dist = testcase.tensor_list_dist
     nested = nest_by_distribution(list(raw_inputs), dist) if dist else list(raw_inputs)
     golden_info = FrameworkApiInfoKeeper().get(api_name)
@@ -174,7 +180,7 @@ def _run_onnx_reference(api_name, raw_inputs, testcase):
         api_info=golden_info,
     )
     input_specs, host_inputs = build_input_specs(golden_info, args)
-    model = build_model_proto(op_type, input_specs, kwargs)
+    model = build_model_proto(op_type, input_specs, kwargs, opset=opset)
     from onnx.reference import ReferenceEvaluator
 
     feed = {name: np.ascontiguousarray(arr) for (name, _shape, _dtype), arr in zip(input_specs, host_inputs)}

@@ -14,6 +14,7 @@ detect_framework 前缀路由与 get_adapter 注册/别名、run_graph 快速失
 """
 
 from collections import OrderedDict
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -171,3 +172,36 @@ def test_session_created_once_across_rounds(session_flow):
     assert len(created) == 1  # warmup+计时轮共享同一会话（首轮建，后续复用）
     assert created[0].rounds == 3
     assert len(sessions) == 1
+
+
+def test_case_dir_name_uses_worker_process_name(monkeypatch, onnx_registry):
+    """om 缓存目录按用例名归组（worker 进程名即用例名）；MainProcess / 空名
+    回退 op_type（legacy 布局）。"""
+    import multiprocessing
+
+    from ttk.core_modules.framework_api.onnx import OnnxAdapter
+
+    handle = SimpleNamespace(op_type="Add")
+    monkeypatch.setattr(multiprocessing, "current_process", lambda: SimpleNamespace(name="onnx_add_f32"))
+    assert OnnxAdapter._case_dir_name(handle) == "onnx_add_f32"
+    monkeypatch.setattr(multiprocessing, "current_process", lambda: SimpleNamespace(name="MP onnx_add_f32"))
+    assert OnnxAdapter._case_dir_name(handle) == "onnx_add_f32"
+    monkeypatch.setattr(multiprocessing, "current_process", lambda: SimpleNamespace(name="MainProcess"))
+    assert OnnxAdapter._case_dir_name(handle) == "Add"
+
+
+def test_load_handle_carries_explicit_opset(onnx_registry):
+    """onnx.<opset>.<OpType> 的显式版本段进 handle.opset；不同 opset 的同一
+    算子不得复用同一会话（会话键含 opset——om 不同而静默复用是假 PASS 源）。"""
+    adapter = get_adapter("onnx")
+    bare, _ = adapter.load_api("onnx.Add")
+    h13, _ = adapter.load_api("onnx.13.Add")
+    h18, _ = adapter.load_api("onnx.18.Add")
+    assert bare.opset is None
+    assert h13.opset == 13
+    assert h18.opset == 18
+    for h in (bare, h13, h18):
+        h.attach_backend(_FakeNpuBackend())
+    specs = [("input_0", (2, 3), "float32"), ("input_1", (2, 3), "float32")]
+    keys = {adapter._session_key(h, specs, {}) for h in (bare, h13, h18)}
+    assert len(keys) == 3

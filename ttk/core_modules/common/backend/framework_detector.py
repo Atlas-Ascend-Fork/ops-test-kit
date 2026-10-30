@@ -21,7 +21,8 @@ TF_API_PREFIXES = ("tf.", "tensorflow.", "npu_device.", "npu_bridge.")
 # 须走插件 golden 或 golden_api（e2e golden 三级回退的快速失败判据）。
 TF_NPU_ONLY_PREFIXES = ("tf.npu_", "npu_device.", "npu_bridge.")
 
-# onnx 通路的 api_name 前缀（onnx.<OpType>，不带 opset 版本——环境注册表最新即权威）。
+# onnx 通路的 api_name 前缀：onnx.<OpType>（裸名，建模 opset = 环境注册表最新）
+# 或 onnx.<opset>.<OpType>（显式版本段，见 onnx/param_extractor.parse_onnx_api_name）。
 # torch.onnx.* 以 "torch." 开头不在此列。
 ONNX_API_PREFIXES = ("onnx.",)
 

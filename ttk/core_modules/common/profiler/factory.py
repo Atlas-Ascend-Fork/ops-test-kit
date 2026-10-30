@@ -11,11 +11,13 @@
 
 E2E（framework-api）通路的 profiler 分派，按 api_name 前缀 + backend 路由：
   task_prof == False          → DisabledProfiler
-  tf.*/tensorflow.* + NPU     → TfNpuProfiler（内部包 MsProfiler）
+  tf.*/tensorflow.* + NPU     → CannMsProfiler（算子不经 torch dispatcher，
+                               下潜内部包 MsProfiler 出 op 级 kernel 明细；
+                               机制不可用结果留空——与 kernel/aclnn/geir
+                               同口径，不降级墙钟）
   tf.*/tensorflow.* + 其他    → WallClockProfiler
-  onnx.*（两侧）              → SteppedWallClockProfiler（aclmdl 执行不经 torch
-                                dispatcher，kernel 明细为空、perf 降级墙钟——
-                                已知限制）
+  onnx.* + NPU                → CannMsProfiler（同上，aclmdl 执行）
+  onnx.* + 其他               → WallClockProfiler（CPU 侧 waive 墙钟）
   torch_npu.* + 非 NPU        → raise（torch_npu API 必须在 NPU 上跑）
   torch.* + NPU builtin       → TorchNpuProfiler（torch_npu.profiler）
   torch.* + 其他              → TorchProfiler
@@ -31,8 +33,7 @@ __all__ = ["get_profiler"]
 
 from typing import Optional
 
-from .base import DisabledProfiler, ProfilerConfig, SteppedWallClockProfiler, WallClockProfiler
-from .tf_npu_profiler import TfNpuProfiler
+from .base import DisabledProfiler, ProfilerConfig, WallClockProfiler
 from .torch_profiler import TorchNpuProfiler, TorchProfiler
 
 
@@ -53,16 +54,15 @@ def get_profiler(
         return DisabledProfiler()
 
     # E2E 框架分派（按 api_name 前缀 + backend）
-    if api_name.startswith(("tf.", "tensorflow.")):
+    if api_name.startswith(("tf.", "tensorflow.", "onnx.")):
+        # tf 算子与 aclmdl 执行均不经 torch dispatcher，且 torch_npu profiler
+        # 不得进入这两个 worker（test_structure 隔离纪律）：下潜 CANN
+        # MsProfiler；机制不可用结果留空。非 NPU 无设备执行，墙钟 waive。
         if backend.is_npu():
-            return TfNpuProfiler(backend, config.testcase_name, config.root_path, dev_id=config.dev_id)
+            from .cann_profiler import CannMsProfiler
+
+            return CannMsProfiler(config, backend)
         return WallClockProfiler(backend)
-    if api_name.startswith("onnx."):
-        # aclmdl 执行不经 torch dispatcher：kernel 明细为空、perf 降级墙钟
-        # （已知限制）；step 感知版剔除 warmup 轮的一次性 setup
-        # （compile+load+H2D），且 torch_npu profiler 不得经 onnx worker 进入
-        # 进程（test_structure 的隔离纪律）
-        return SteppedWallClockProfiler(backend)
     if api_name.startswith("torch_npu."):
         if not backend.is_npu():
             raise RuntimeError(f"API '{api_name}' requires NPU backend, but current is '{backend.device_type()}'")

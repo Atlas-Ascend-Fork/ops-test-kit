@@ -10,12 +10,13 @@
 """
 onnx e2e 子包：OnnxAdapter + OnnxOpHandle。
 
-执行链路：CSV (onnx.<OpType>) → detect_framework → OnnxAdapter /
-NpuOnnxBackend → 参数解析（param_extractor，schema 单源）→ 输入生成（numpy
-直通）→ eager_call（会话缓存）→ model_builder 组模 → om_compiler（atc）→
-OmSession（aclmdl 执行）→ tuple[np.ndarray] → 既有比对/dump/结果列。
+执行链路：CSV（``onnx.<OpType>``，可带显式 opset 段 ``onnx.<opset>.<OpType>``）
+→ detect_framework → OnnxAdapter / NpuOnnxBackend → 参数解析
+（param_extractor，schema 单源）→ 输入生成（numpy 直通）→ eager_call（会话缓存）
+→ model_builder 组模 → om_compiler（atc）→ OmSession（aclmdl 执行）→
+tuple[np.ndarray] → 既有比对/dump/结果列。
 
-会话缓存：结构键（算子+输入形态+属性+soc+dev_id）→
+会话缓存：结构键（算子+opset+输入形态+属性+soc+dev_id）→
 OmSession 的进程级 LRU；命中后经「数组身份 → 内容指纹」双层判定复用（同签名
 不同值用例不脏命中），上限驱逐 + 同键替换时卸载旧会话（HBM 不无限累积）。
 
@@ -43,16 +44,18 @@ _LAYOUT_FIELDS = ("tensor_formats", "tensor_storage_shapes", "tensor_view_stride
 class OnnxOpHandle:
     """load_api 产物：api 级句柄（进程缓存）。
 
-    持 op_type / APIParamInfo（eager_call 反解用）；attach_backend 注入
+    持 op_type / APIParamInfo（eager_call 反解用）/ opset（api_name 显式
+    版本段，None = 裸名建模用环境最高）；attach_backend 注入
     backend 引用（soc_version + dev_id 由 wrap_eager 时机转交——backend.set_device
     仅记录 dev_id，ACL set_device 由 runner 惰性执行）。
     ``__name__ = op_type``（is_inplace 尾下划线判定天然 False）。
     """
 
-    def __init__(self, api_name: str, op_type: str, param_info):
+    def __init__(self, api_name: str, op_type: str, param_info, opset=None):
         self.api_name = api_name
         self.op_type = op_type
         self.param_info = param_info
+        self.opset = opset
         self.__name__ = op_type
         self._backend = None
         self._soc_version = None
@@ -76,12 +79,6 @@ class OnnxOpHandle:
 
     def __repr__(self):
         return f"OnnxOpHandle({self.api_name})"
-
-
-def _parse_op_type(api_name: str) -> str:
-    if not isinstance(api_name, str) or not api_name.startswith("onnx.") or "." in api_name[len("onnx.") :]:
-        raise ValueError(f"invalid onnx api_name: {api_name!r}（应为 onnx.<OpType>，不带 domain/opset 限定）")
-    return api_name[len("onnx.") :]
 
 
 class OnnxAdapter(FrameworkAdapter):
@@ -204,6 +201,7 @@ class OnnxAdapter(FrameworkAdapter):
         raw = "|".join(
             [
                 handle.op_type,
+                str(handle.opset),  # 显式版本段区分同名算子不同 opset（om 不同不得复用会话）
                 handle.param_info.source,
                 repr([(name, shape, dtype) for name, shape, dtype in input_specs]),
                 repr(sorted((name, repr(value)) for name, value in kwargs.items())),
@@ -213,14 +211,34 @@ class OnnxAdapter(FrameworkAdapter):
         )
         return hashlib.md5(raw.encode()).hexdigest()  # noqa: S324  # 非安全用途：会话结构键
 
+    @staticmethod
+    def _case_dir_name(handle) -> str:
+        """onnx_om 按用例名 + opset 归组（对齐 log/msprof 的 per-case 目录惯例：
+        <root>/onnx_om/<testcase_name>/<opset>/model.om）。
+
+        worker 进程名即用例名（process_context.change_name →
+        set_process_name，编译只发生在 worker 进程）；非 worker 环境
+        （单测直调 / MainProcess）回退 op_type 归组（legacy 布局）。
+        """
+        import multiprocessing
+
+        name = getattr(multiprocessing.current_process(), "name", "") or ""
+        if name.startswith("MP "):
+            name = name[3:]
+        if name and name != "MainProcess":
+            return name
+        return handle.op_type
+
     def _create_session(self, handle, input_specs, host_inputs, kwargs):
-        from .model_builder import build_model_bytes
+        from .model_builder import build_model_bytes, resolve_opset
         from .om_compiler import compile_om
         from .runner import OmSession
 
-        model_bytes = build_model_bytes(handle.op_type, input_specs, kwargs)
+        model_bytes = build_model_bytes(handle.op_type, input_specs, kwargs, opset=handle.opset)
         root_path = self._root_path()
-        work_dir = os.path.join(root_path, "onnx_cache", handle.op_type)
+        # onnx_om/<testcase_name>/<opset>/model.om：opset 层区分同名用例的
+        # 显式版本段与裸名（env 最高）——同名不同 opset 互不覆盖
+        work_dir = os.path.join(root_path, "onnx_om", self._case_dir_name(handle), str(resolve_opset(handle.opset)))
         os.makedirs(work_dir, exist_ok=True)
         fd, tmp_onnx = tempfile.mkstemp(prefix="ttk_onnx_", suffix=".onnx", dir=work_dir)
         try:
@@ -271,13 +289,16 @@ def _load_handle(api_name: str) -> OnnxOpHandle:
     handle = _HANDLE_CACHE.get(api_name)
     if handle is not None:
         return handle
-    op_type = _parse_op_type(api_name)
-    from .param_extractor import extract_onnx_params
+    from .param_extractor import extract_onnx_params, parse_onnx_api_name
 
+    parsed = parse_onnx_api_name(api_name)
+    if parsed is None:
+        raise ValueError(f"invalid onnx api_name: {api_name!r}（应为 onnx.<OpType> 或 onnx.<opset>.<OpType>）")
+    op_type, opset = parsed
     param_info = extract_onnx_params(api_name)
     if param_info is None:
         raise ValueError(f"onnx op not found in environment registry: {api_name}")
-    handle = OnnxOpHandle(api_name, op_type, param_info)
+    handle = OnnxOpHandle(api_name, op_type, param_info, opset=opset)
     _HANDLE_CACHE[api_name] = handle
     return handle
 

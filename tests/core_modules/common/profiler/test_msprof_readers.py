@@ -9,8 +9,8 @@
 # ----------------------------------------------------------------------------
 """ms_profiler 域 CSV 读取器与 MsProfiler.result 视图测试（谁采集谁解析）。
 
-read_task_durations（kernel/geir 消费）/ read_op_statistic（TfNpu 消费）/
-find_newest_csv（mtime 择新）此前散落在三个通路 + TfNpuProfiler 里各有一份
+read_task_durations（kernel/geir 消费）/ read_op_statistic（e2e 消费）/
+find_newest_csv（mtime 择新）此前散落在三个通路 + e2e profiler 里各有一份
 分叉实现，本文件锚定共享实现的语义。
 """
 

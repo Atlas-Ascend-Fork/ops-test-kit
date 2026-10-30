@@ -90,6 +90,19 @@ def test_split_trailing_optional_omitted(split_with_num_outputs):
     assert [vi.name for vi in m.graph.output] == ["output_0", "output_1", "output_2"]
 
 
+def test_explicit_opset_pins_opset_and_ir_version():
+    """显式 opset（api_name 带版本段）：opset_import 按声明值、ir_version 恒钉
+    IR 8（新版 onnx 包默认 ir 更高、atc 适配风险）；裸名路径不受影响。"""
+    specs = [("input_0", (2, 3), "float32"), ("input_1", (2, 3), "float32")]
+    m = build_model_proto("Add", specs, {}, opset=13)
+    assert m.opset_import[0].version == 13
+    assert m.ir_version == 8
+    # 同参数字节与裸名（env opset）模型不一致——opset 参与 LRU 键与 atc 输入
+    bare = build_model_proto("Add", specs, {})
+    assert bare.opset_import[0].version == OPSET
+    assert build_model_proto("Add", specs, {}, opset=13).opset_import[0].version == 13  # LRU 不回退
+
+
 def test_output_names_mixed_single_and_variadic():
     """Variadic 输出续编号（非 range 重编）：混合 Single+Variadic 形态不重名
     （当前注册表无此形态——ai.onnx ≤26 全量扫描仅 Split/If/Loop/Scan/

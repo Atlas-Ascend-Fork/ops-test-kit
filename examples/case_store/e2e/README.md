@@ -1,12 +1,12 @@
 # E2E 通路示例用例
 
-按框架分文件：`tf_cases.csv`（TensorFlow，13 例）、`torch_cases.csv`（torch/torch_npu，24 例）与 `onnx_cases.csv`（ONNX，6 例），每条用例的 `remark` 列即测试项。
+按框架分文件：`tf_cases.csv`（TensorFlow，13 例）、`torch_cases.csv`（torch/torch_npu，24 例）与 `onnx_cases.csv`（ONNX，7 例），每条用例的 `remark` 列即测试项。
 
 > 较新 dtype/算子用例（fp8 族、`causal_conv1d_fn_basic`、`add_bool` 等）的通过依赖本地 CANN 版本的算子支持面，不支持时的预期错误签名见上级 [README 的 CANN 版本配套说明](../README.md)。
 
 ```bash
 E=examples/case_store/e2e
-# TF 全量（13 例）；torch 全量（24 例）；onnx 全量（6 例）
+# TF 全量（13 例）；torch 全量（24 例）；onnx 全量（7 例）
 python3 -m ttk e2e -i $E/tf_cases.csv
 python3 -m ttk e2e -i $E/torch_cases.csv
 python3 -m ttk e2e -i $E/onnx_cases.csv
@@ -62,7 +62,7 @@ python3 -m ttk e2e -i $E/torch_cases.csv -t npu_gelu_f16,causal_conv1d_fn_basic
 
 ## ONNX（onnx_cases.csv）
 
-CSV 以 `onnx.<OpType>` 声明单算子：TTK 自动组装单算子 ONNX 模型 → atc 离线编译 .om → NPU 经 aclmdl 执行，与 CPU 侧 onnx ReferenceEvaluator 参考实现比对。参数（输入/属性）来自环境 onnx 包的算子 schema（`onnx.defs`）。
+CSV 以 `onnx.<OpType>` 声明单算子，可带显式 opset 段写成 `onnx.<opset>.<OpType>`（如 `onnx.13.Add`）：TTK 自动组装单算子 ONNX 模型 → atc 离线编译 .om → NPU 经 aclmdl 执行，与 CPU 侧 onnx ReferenceEvaluator 参考实现比对。参数（输入/属性）来自环境 onnx 包的算子 schema（`onnx.defs`）。
 
 | 用例 | 测试项 |
 |---|---|
@@ -72,16 +72,17 @@ CSV 以 `onnx.<OpType>` 声明单算子：TTK 自动组装单算子 ONNX 模型 
 | `onnx_concat_i32` | Variadic 输入（TensorList 嵌套）+ 必选属性 axis + 单输出槽（int32 binary_equal） |
 | `onnx_split_f32` | Optional 输入 split 尾部省略（省略的输入补 None 占位）；3 个 None 槽声明为输出槽（Variadic 输出 × num_outputs=3） |
 | `onnx_matmul_bf16` | bf16 精度档 + 输出槽声明 |
+| `onnx_add_v13` | 显式 opset 段（`onnx.13.Add`）：按声明版本建模，om 落 `onnx_om/onnx_add_v13/13/`；不带段时以环境 onnx 包最高 opset 建模 |
 
 要点：
 
 - **输出槽**声明在 `tensor_view_shapes` 内（shape 填 `None`，索引写入 `output_tensor_indexes`）；非输出位的 `None` 槽表示省略的 Optional 输入（仅限尾部）；
-- **属性**即 ONNX 节点属性（`attributes` 列，一律按名传参）；opset 取环境 onnx 包支持的最高版本（要求 `onnx.defs.onnx_opset_version() ≤ 18`，即 CANN atc 支持的版本上限）；
+- **属性**即 ONNX 节点属性（`attributes` 列，一律按名传参）；opset 默认取环境 onnx 包的最高版本（要求不超过 18，即 atc 的标准算子注册上限），也可在 `api_name` 写显式段固定版本（如 `onnx.13.Add`，上限同为 18，超限解析期报错）；
 - `tensor_formats` / `tensor_storage_shapes` / `tensor_view_strides` / `tensor_view_offsets` 布局列不支持（ND 连续语义），填写报 `ONNX_LAYOUT_UNSUPPORTED`；
 - 模式等价：onnx 的 eager ≡ 静态图（om 恒为静态图），`--eager -c` 双开单次执行、两列同值；`-d` / aclgraph 直接报错（`ONNX_DYNAMIC_GRAPH_UNSUPPORTED` / `ONNX_ACLGRAPH_UNSUPPORTED`）；
 - Optional 输出的算子（MaxPool.Indices / Dropout.mask / GRU 等）：atc 不接受带 Optional 输出的模型，构造模型时只声明非 Optional 输出（全 Optional 输出的算子构造模型时直接报错）；
 - 数据依赖 shape 的算子（NonZero / TopK 等）在装载 om 时报 `ONNX_DYNAMIC_OUTPUT_UNSUPPORTED`；
-- 环境要求：onnx ≥ 1.13（ReferenceEvaluator）、ml-dtypes（bf16）、CANN atc；perf 为墙上时钟计时（kernel 明细为空，已知限制）。
+- 环境要求：onnx ≥ 1.13（ReferenceEvaluator）、ml-dtypes（bf16）、CANN atc；性能经 msprof 采集（op 级 Avg 与 avg/max/min/calls 明细），`--task-prof=false` 时该列留空；om 编译缓存按用例归组在 `onnx_om/<用例名>/<opset>/model.om`。
 
 ```bash
 python3 -m ttk e2e -i $E/onnx_cases.csv            # 仅 eager（默认）

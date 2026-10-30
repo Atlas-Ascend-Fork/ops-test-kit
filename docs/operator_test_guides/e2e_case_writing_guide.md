@@ -14,7 +14,7 @@
 
 | 字段 | 是否必填 | 默认值 | 说明 |
 |------|---------|--------|------|
-| `api_name` | **是** | *(无)* | 框架 API 路径，如 `torch.add`、`torch.nn.functional.relu`、`torch.Tensor.relu_`；onnx写 `onnx.<OpType>`（不带 domain / opset），参数以环境 onnx 包的算子 schema 为准 |
+| `api_name` | **是** | *(无)* | 框架 API 路径，如 `torch.add`、`torch.nn.functional.relu`、`torch.Tensor.relu_`；onnx 写 `onnx.<OpType>`，可带显式 opset 段写 `onnx.<opset>.<OpType>`（如 `onnx.13.Add`）；参数以环境 onnx 包的算子 schema 为准 |
 | `tensor_view_shapes` | 否 | `()` | 输入张量 shape，支持 TensorList 嵌套。缺省时可由 Spec 的 `describe` 回填；无必选张量参数的 factory API（如 `torch.zeros`）可留空。onnx 中 shape 填 `None` 表示输出槽（对应 `output_tensor_indexes`）或省略的 Optional 输入（仅限尾部） |
 | `tensor_dtypes` | 否 | `()` | 输入 dtype，支持嵌套与单值广播 |
 | `tensor_formats` | 否 | `()` | 张量格式，支持广播 |
@@ -31,6 +31,7 @@
 | `torch.Tensor.relu_` | Tensor 方法（原地操作） |
 | `torch.ops.cann_ops_transformer.causal_conv1d_fn` | torch extension 包注册的算子 |
 | `onnx.Add` | `onnx.<OpType>` 声明单算子：TTK 组装模型 → atc 编译 .om → aclmdl 执行，与 onnx ReferenceEvaluator 比对 |
+| `onnx.13.Add` | `onnx.<opset>.<OpType>` 显式 opset 段：模型按声明版本建模，atc 按该段注册查找算子（上限 18，超限解析期报错） |
 
 非连续张量示例：
 
@@ -42,6 +43,8 @@
 | `tensor_storage_shapes` | `"((3,6),)"` | 存储 shape 为 3x6 |
 
 onnx仅支持静态 shape（维度 ≥ 0），布局列（`tensor_formats` / `tensor_storage_shapes` / `tensor_view_strides` / `tensor_view_offsets`）不支持。
+
+**opset 版本段**：`api_name` 的中间段为纯数字时按该值建模 opset，如 `onnx.13.Add` 固定用 opset 13；中间段非数字则视为 domain 限定，报 `ONNX_DOMAIN_UNSUPPORTED`。显式段不能超过 `ATC_MAX_OPSET`（atc 的标准算子注册上限，随 CANN 版本维护，当前为 18），超限在解析期报 `ONNX_OPSET_VERSION_UNSUPPORTED`。不带段的 `onnx.Add` 以环境 onnx 包的最高 opset 建模，环境 opset 高于 18 时同样在解析期报错，此时可改用显式段或换低版本 onnx 包。显式段建模时模型 `ir_version` 固定为 8（atc 通用口径），被测模型与 golden 参考实现声明同一 opset，两侧语义一致。
 
 ## 二、输出与属性
 
@@ -121,3 +124,4 @@ print('since :', s.since_version)
 |------|---------|--------|
 | `onnx_add_f32` / `onnx_add_f16` / `onnx_add_broadcast` | 基础双输入 f32 基线 / f16 + 输出槽声明 / 广播（输出 shape 由 atc 推导） | `tensor_view_shapes`、`tensor_dtypes`、`output_tensor_indexes` |
 | `onnx_concat_i32` / `onnx_split_f32` / `onnx_matmul_bf16` | Variadic 输入 + 必选属性 axis / Optional 输入尾部省略 + 3 输出槽声明（Variadic 输出）/ bf16 精度档 | `tensor_view_shapes`（嵌套/None 槽）、`attributes`、`output_tensor_indexes` |
+| `onnx_add_v13` | 显式 opset 段（`onnx.13.Add`），按声明版本建模；om 落 `onnx_om/<用例名>/<opset>/model.om` | `api_name` |

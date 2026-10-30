@@ -14,9 +14,9 @@ onnx 建模：纯函数组装单算子 ModelProto。
 两侧喂同一函数，保证被测与 golden 同构。
 
 规则：
-  1. opset 取 `onnx.defs.onnx_opset_version()`（环境最高；onnx 包版本
-     约束由 param_extractor 校验）；ir_version 用 onnx 包默认
-     （IR 8 × opset 18 atc 通过）；
+  1. 建模 opset：``onnx.<OpType>``（裸名）取 `onnx.defs.onnx_opset_version()`
+     （环境最高，约束由 param_extractor 校验）；``onnx.<opset>.<OpType>``
+     （显式版本段）按声明值建模，ir_version 恒钉 IR 8；
   2. 输入名固定 `input_0..N`（与 atc `--input_shape` 键一致），实际存在的
      输入按序编号；**尾部 Optional 输入直接省略**（node.inputs 短列表——`""`
      空串占位被 onnx parser 拒绝 E19999）；非尾部 Optional 输入
@@ -250,7 +250,12 @@ def _output_names(op_type: str, schema_outputs, normalized_attrs: dict, optional
     return names
 
 
-def _build(op_type: str, input_specs, attrs: dict, opset: int):
+# 显式 opset 建模时恒钉 ir 8：atc 接受的口径，且不受新版 onnx 包默认 ir
+# 升高的影响（onnx ≤1.13 对 opset≤18 的默认 ir 即 8，裸名路径字节不变）
+_PINNED_IR_VERSION = 8
+
+
+def _build(op_type: str, input_specs, attrs: dict, opset: int, pin_ir_version: bool = False):
     import onnx
     import onnx.defs
     from onnx import helper
@@ -295,35 +300,55 @@ def _build(op_type: str, input_specs, attrs: dict, opset: int):
         input_value_infos,
         [helper.make_tensor_value_info(name, 0, None) for name in output_names],
     )
-    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)])
+    model_kwargs = {"ir_version": _PINNED_IR_VERSION} if pin_ir_version else {}
+    return helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", opset)],
+        **model_kwargs,
+    )
 
 
-def build_model_bytes(op_type: str, input_specs: list, attrs: Optional[dict] = None) -> bytes:
+def resolve_opset(opset: Optional[int]) -> int:
+    """建模 opset 归一口径：显式段直用，裸名取环境注册表最高。
+
+    build_model_bytes 与 onnx_om 缓存路径（<testcase_name>/<opset>/）共用，
+    防两处解析值漂移。
+    """
+    import onnx.defs
+
+    return opset if opset is not None else onnx.defs.onnx_opset_version()
+
+
+def build_model_bytes(
+    op_type: str, input_specs: list, attrs: Optional[dict] = None, opset: Optional[int] = None
+) -> bytes:
     """组装单算子 ModelProto 并序列化（进程级 LRU，缓存条目即返回字节）。
 
     om_compiler 的落盘入口；参数契约与 ``build_model_proto`` 一致，
     两条公开面共用同一条缓存路径（同键命中直接返回字节，不再反序列化）。
 
+    Args:
+        opset: 显式 opset 版本（api_name 带版本段）；None → 环境注册表最高。
+
     Raises:
         ValueError: 同 ``build_model_proto``。
     """
-    import onnx.defs
-
     attrs = attrs or {}
-    opset = onnx.defs.onnx_opset_version()
+    explicit_opset = opset is not None
+    opset = resolve_opset(opset)
     key = (op_type, opset, _freeze(list(input_specs)), _freeze(attrs))
     cached = _MODEL_CACHE.get(key)
     if cached is not None:
         _MODEL_CACHE.move_to_end(key)
         return cached
-    data = _build(op_type, list(input_specs), attrs, opset).SerializeToString()
+    data = _build(op_type, list(input_specs), attrs, opset, pin_ir_version=explicit_opset).SerializeToString()
     _MODEL_CACHE[key] = data
     while len(_MODEL_CACHE) > _MODEL_CACHE_MAX:
         _MODEL_CACHE.popitem(last=False)
     return data
 
 
-def build_model_proto(op_type: str, input_specs: list, attrs: Optional[dict] = None):
+def build_model_proto(op_type: str, input_specs: list, attrs: Optional[dict] = None, opset: Optional[int] = None):
     """组装单算子 ModelProto（纯函数 + 进程级 LRU）。
 
     Args:
@@ -333,6 +358,7 @@ def build_model_proto(op_type: str, input_specs: list, attrs: Optional[dict] = N
             args → specs 反解见 build_input_specs）。
         attrs: ``{attr_name: python_value}`` —— 仅 CSV 声明的属性（缺省属性
             走算子默认，不写入节点）。
+        opset: 显式 opset 版本（api_name 带版本段）；None → 环境注册表最高。
 
     Returns:
         onnx.ModelProto（每次调用由序列化字节反序列化，调用方可安全变异，
@@ -346,7 +372,7 @@ def build_model_proto(op_type: str, input_specs: list, attrs: Optional[dict] = N
     """
     import onnx
 
-    return onnx.load_model_from_string(build_model_bytes(op_type, input_specs, attrs))
+    return onnx.load_model_from_string(build_model_bytes(op_type, input_specs, attrs, opset=opset))
 
 
 def build_input_specs(param_info, args) -> tuple:

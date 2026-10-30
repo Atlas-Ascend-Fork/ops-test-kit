@@ -237,9 +237,9 @@ def test_framework_api_does_not_consume_framework_of():
         assert "_FRAMEWORK_ROOTS" not in text, f"{path}: e2e shared layer must not reference _FRAMEWORK_ROOTS"
 
 
-def test_onnx_cache_is_runtime_output():
-    """onnx_cache 是运行产物目录（root_path 下、内容寻址）：源码树不追踪。"""
+def test_onnx_om_is_runtime_output():
+    """onnx_om 是运行产物目录（root_path 下、按用例归组）：源码树不追踪。"""
     from pathlib import Path as _Path
 
     gitignore = _Path(__file__).resolve().parents[3] / ".gitignore"
-    assert "/onnx_cache/" in gitignore.read_text(encoding="utf-8")
+    assert "/onnx_om/" in gitignore.read_text(encoding="utf-8")

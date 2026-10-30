@@ -45,7 +45,7 @@ from typing import Optional
 
 from ..api_model import APIParamInfo, ParamInfo
 
-__all__ = ["extract_onnx_params", "ATC_MAX_OPSET"]
+__all__ = ["extract_onnx_params", "parse_onnx_api_name", "ATC_MAX_OPSET"]
 
 # atc onnx 算子插件注册的 opset 上限（随 CANN 版本维护；实测：
 # cann-9.2.0 按 ai.onnx::<opset>::<OpType> 精确匹配、标准算子注册至 18 段）。
@@ -97,8 +97,36 @@ def _attr_python_default(attr_def) -> Optional[object]:
     return None
 
 
+def parse_onnx_api_name(api_name: str):
+    """api_name → (op_type, opset|None)。
+
+    - ``onnx.<OpType>``：未声明 opset → None（建模用环境注册表最新）
+    - ``onnx.<opset>.<OpType>``：数字段即显式 opset（atc 按
+      ai.onnx::<opset>::<OpType> 精确注册算子，高版本 onnx 包可借此向下建模）
+    - 非数字段与更长的 dotted 名：域限定形态，报 ONNX_DOMAIN_UNSUPPORTED
+
+    返回 None 表示非 onnx 域（调用方静默跳过）；空 OpType（onnx.）同 None，
+    带点的空段（onnx.13.）按域限定报错。
+    """
+    if not isinstance(api_name, str) or not api_name.startswith(_ONNX_API_PREFIX):
+        return None
+    rest = api_name[len(_ONNX_API_PREFIX) :]
+    if not rest:
+        return None
+    if "." not in rest:
+        return rest, None
+    qualifier, op_type = rest.split(".", 1)
+    if not op_type or "." in op_type or not qualifier or not qualifier.isdigit():
+        raise ValueError(
+            f"ONNX_DOMAIN_UNSUPPORTED: {api_name!r} carries a domain qualifier; "
+            f"only the default ai.onnx domain (api_name = onnx.<OpType> or "
+            f"onnx.<opset>.<OpType>) is supported"
+        )
+    return op_type, int(qualifier)
+
+
 def _check_onnx_opset_version() -> None:
-    """onnx 包版本约束校验：超 atc 插件上限时明确报错。"""
+    """onnx 包版本约束校验（裸名建模用 env 最高 opset）：超 atc 插件上限明确报错。"""
     import onnx.defs
 
     opset = onnx.defs.onnx_opset_version()
@@ -106,7 +134,8 @@ def _check_onnx_opset_version() -> None:
         raise ValueError(
             f"ONNX_OPSET_VERSION_UNSUPPORTED: onnx.defs.onnx_opset_version()={opset} "
             f"exceeds the atc plugin ceiling ({ATC_MAX_OPSET}); install an onnx package "
-            f"whose opset version is <= {ATC_MAX_OPSET} (e.g. onnx 1.13.x for CANN 9.2.x)"
+            f"whose opset version is <= {ATC_MAX_OPSET} (e.g. onnx 1.13.x for CANN 9.2.x), "
+            f"or pin the opset explicitly in the api_name (onnx.{ATC_MAX_OPSET}.<OpType>)"
         )
 
 
@@ -114,30 +143,32 @@ def extract_onnx_params(api_name: str) -> Optional[APIParamInfo]:
     """onnx.defs schema（环境注册表最新）→ APIParamInfo。
 
     Args:
-        api_name: 形如 ``onnx.<OpType>``；OpType 内再含 "." 视为 domain 限定
-            （ai.onnx.ml / com.microsoft 等），不支持。
+        api_name: ``onnx.<OpType>``（建模 opset = 环境注册表最新）或
+            ``onnx.<opset>.<OpType>``（显式 opset，见 parse_onnx_api_name）。
 
     Returns:
         APIParamInfo（单 overload）；schema 不存在 → None（上游收敛 API_PARSE_FAIL）。
 
     Raises:
-        ValueError: domain 不支持 / 属性类型不支持 / onnx 包版本超约束，
-            消息带 ONNX_*_UNSUPPORTED 语义前缀（log 透传后落 API_PARSE_FAIL）。
+        ValueError: domain 不支持 / 属性类型不支持 / opset 超约束（显式段超
+            ATC_MAX_OPSET 或裸名环境 opset 超限），消息带 ONNX_*_UNSUPPORTED
+            语义前缀（log 透传后落 API_PARSE_FAIL）。
     """
-    if not isinstance(api_name, str) or not api_name.startswith(_ONNX_API_PREFIX):
+    parsed = parse_onnx_api_name(api_name)
+    if parsed is None:
         return None
-    op_type = api_name[len(_ONNX_API_PREFIX) :]
-    if not op_type:
-        return None
-    if "." in op_type:
-        raise ValueError(
-            f"ONNX_DOMAIN_UNSUPPORTED: {api_name!r} carries a domain qualifier; "
-            f"only the default ai.onnx domain (api_name = onnx.<OpType>) is supported"
-        )
+    op_type, explicit_opset = parsed
 
     import onnx.defs
 
-    _check_onnx_opset_version()
+    if explicit_opset is None:
+        # 裸名：建模 opset = env 最高，超 atc 插件上限即整通路不支持
+        _check_onnx_opset_version()
+    elif not 1 <= explicit_opset <= ATC_MAX_OPSET:
+        raise ValueError(
+            f"ONNX_OPSET_VERSION_UNSUPPORTED: {api_name!r} pins opset {explicit_opset}, "
+            f"outside the atc plugin ceiling [1, {ATC_MAX_OPSET}]"
+        )
 
     try:
         schema = onnx.defs.get_schema(op_type)
