@@ -36,7 +36,7 @@ python3 -m ttk kernel -i cases.csv --co
 | `--binary` | `-b` | 二进制编译；`-b release` 使用发布内核 | 关闭 |
 | `--compile-only` | `--co` | 仅编译不执行 | 关闭 |
 | `--no-prof` | | 不执行 kernel（编译、输入生成、Golden 生成照常）；与 `--dump in,golden` 组合即"手工数据准备"，配合 `--manual-data-dirs` 回放 | 关闭 |
-| `--compile-opts` | | 编译选项（KEY=VALUE 格式，可多次指定） | 无 |
+| `--compile-opts` | | 编译选项（KEY=VALUE 格式，可多次指定），详见 [tips](../../../../docs/tips/kernel_compile_options.md) | 无 |
 | `--tiling-run` | `--tr` | Tiling 运行次数 | 3 |
 
 ## 内存控制

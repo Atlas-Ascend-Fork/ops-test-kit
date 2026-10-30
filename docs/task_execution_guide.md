@@ -147,3 +147,4 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2     # 预览 Excel（指定工�
 | [离线数据准备与导入](./tips/offline_data_prepare_guide.md) | `--no-prof --dump in,golden` + `--manual-data-dirs` |
 | [三方交叉校验](./tips/cross_check_guide.md) | `--compare cross_check` / `--xpu-perf` + `--config` |
 | [NPUSim 仿真测试](./npusim/npusim_usage_guide.md) | `--backend npusim` + `--sim-*` |
+| [Kernel 编译选项](./tips/kernel_compile_options.md) | `--compile-opts macros=...` / `op_debug_config` / `tbe_debug_level` |

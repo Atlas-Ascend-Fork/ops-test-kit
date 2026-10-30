@@ -53,7 +53,8 @@ def _add_kernel_args(parser):
         metavar="KEY=VALUE",
         help="Compile option as key=value. Can be specified multiple times. "
         "e.g. --compile-opts op_debug_config=oom,dump_cce "
-        "--compile-opts enable_deterministic_mode=1",
+        "--compile-opts enable_deterministic_mode=1 "
+        '--compile-opts "macros=-DFOO=1 -DBAR=2"',
     )
     group.add_argument(
         "-c", "--const", nargs="?", const=True, default=None, help="Enable const shape test; use -c=false to disable"

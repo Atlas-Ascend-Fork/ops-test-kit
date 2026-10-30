@@ -26,6 +26,8 @@ _tbe_mod.Opc = MagicMock
 from ttk.core_modules.kernel.operator.op_interface import (  # noqa: E402, I001
     OperatorInterface,
     OperatorNotFoundError,
+    REGBASE_V2_SOURCE_DEBUG_OPTION,
+    _ASCENDC_COMMON_UTILITY_MODULES,
 )
 
 # 恢复真实 Opc：op_interface 已在上方导入时绑定了 mock，但 tbe_interface 模块属性
@@ -302,7 +304,7 @@ class TestCompileOp:
     )
     def test_compile_op(self, mock_singleton, mode, func, expect_raises, match):
         oi = mock_singleton
-        mock_gs = MagicMock(kernel_compile_options=[])
+        mock_gs = MagicMock(kernel_compile_options=[], macros=[])
         with patch("ttk.core_modules.kernel.operator.op_interface.get_global_storage", return_value=mock_gs):
             if expect_raises:
                 with pytest.raises(RuntimeError, match=match):
@@ -310,6 +312,89 @@ class TestCompileOp:
             else:
                 result = oi._compile_op(mode, "Add", func, ("x",), [], {})
                 assert isinstance(result, float)
+
+    def test_compile_op_injects_macros(self, mock_singleton, monkeypatch):
+        """--compile-opts macros 注入、与 regbase 补参数合并、退出还原、无栈可打时报错。"""
+        import sys
+        import types
+
+        class FakeCommonUtility:
+            @staticmethod
+            def check_debug_options(compile_options):
+                compile_options.append("ORIGINAL")
+                return True
+
+        mod = types.ModuleType("fake_ascendc_common_utility")
+        mod.CommonUtility = FakeCommonUtility
+        monkeypatch.setitem(sys.modules, _ASCENDC_COMMON_UTILITY_MODULES[0], mod)
+
+        oi = mock_singleton
+        mock_gs = MagicMock(kernel_compile_options=[], macros=["-DFOO=1", "-DBAR=2"], compile_options={})
+
+        # 1. 基础注入 + 退出后还原（后续编译不再注入）
+        observed = []
+
+        def op_func(*_args, **_kwargs):
+            options = []
+            FakeCommonUtility.check_debug_options(options)
+            observed.append(options)
+
+        with patch("ttk.core_modules.kernel.operator.op_interface.get_global_storage", return_value=mock_gs):
+            oi._compile_op("Dyn", "Add", op_func, ("x",), [], {})
+        assert observed == [["ORIGINAL", "-DFOO=1", "-DBAR=2"]]
+        restored = []
+        FakeCommonUtility.check_debug_options(restored)
+        assert restored == ["ORIGINAL"]
+
+        # 2. 与 regbase 补参（debug + Ascend950）合并在同一 patch 回合
+        monkeypatch.setattr("ttk.core_modules.kernel.operator.op_interface.kernel_debug_compile_enabled", lambda: True)
+        oi._opc.get_soc_spec.return_value = "Ascend950"
+        combined = []
+
+        def op_func_debug(*_args, **_kwargs):
+            options = ["-O0", "-g"]
+            FakeCommonUtility.check_debug_options(options)
+            combined.extend(options)
+
+        with patch("ttk.core_modules.kernel.operator.op_interface.get_global_storage", return_value=mock_gs):
+            oi._compile_op("Dyn", "Add", op_func_debug, ("x",), [], {})
+        assert combined == ["-O0", "-g", "ORIGINAL", REGBASE_V2_SOURCE_DEBUG_OPTION, "-DFOO=1", "-DBAR=2"]
+
+        # 3. 两套栈都打不上补丁时，显式传 macros 必须报错
+        for name in _ASCENDC_COMMON_UTILITY_MODULES:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        with patch(
+            "ttk.core_modules.kernel.operator.op_interface.get_global_storage", return_value=mock_gs
+        ), pytest.raises(RuntimeError, match="macros requested"):
+            oi._compile_op("Dyn", "Add", MagicMock(), ("x",), [], {})
+
+    def test_compile_op_without_macros_leaves_options(self, mock_singleton, monkeypatch):
+        """无 macros 时 check_debug_options 不追加任何编译选项。"""
+        import sys
+        import types
+
+        class FakeCommonUtility:
+            @staticmethod
+            def check_debug_options(compile_options):
+                compile_options.append("ORIGINAL")
+                return True
+
+        mod = types.ModuleType("fake_ascendc_common_utility")
+        mod.CommonUtility = FakeCommonUtility
+        monkeypatch.setitem(sys.modules, _ASCENDC_COMMON_UTILITY_MODULES[0], mod)
+
+        observed = []
+
+        def op_func(*_args, **_kwargs):
+            options = []
+            FakeCommonUtility.check_debug_options(options)
+            observed.append(options)
+
+        oi = mock_singleton
+        mock_gs = MagicMock(kernel_compile_options=[], macros=[])
+        with patch("ttk.core_modules.kernel.operator.op_interface.get_global_storage", return_value=mock_gs):
+            oi._compile_op("Dyn", "Add", op_func, ("x",), [], {})
+        assert observed == [["ORIGINAL"]]
 
 
 class TestSetCommonCompileContext:
@@ -367,7 +452,7 @@ class TestCompileDynamicShape:
     def test_compile_success(self, mock_singleton):
         oi = mock_singleton
         case = _make_testcase()
-        mock_gs = MagicMock(auto_switch=False, kernel_compile_options=[])
+        mock_gs = MagicMock(auto_switch=False, kernel_compile_options=[], macros=[])
         dyn_params = (
             {"shape": (-1,), "dtype": "float16"},
             {"shape": (-1,), "dtype": "float16"},

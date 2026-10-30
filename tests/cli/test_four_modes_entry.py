@@ -95,10 +95,20 @@ class TestKernelMode:
     def test_compile_opts_key_value_passthrough(self, captured):
         """--compile-opts KEY=VALUE 可多次指定，累积成 dict。"""
         sw = _run(
-            ["kernel", "-i", "x.csv", "--compile-opts", "op_debug_config=oom", "--compile-opts", "k=v"],
+            [
+                "kernel",
+                "-i",
+                "x.csv",
+                "--compile-opts",
+                "op_debug_config=oom",
+                "--compile-opts",
+                "k=v",
+                "--compile-opts",
+                "macros=-DFOO=1",
+            ],
             captured,
         )
-        assert sw.compile_options == {"op_debug_config": "oom", "k": "v"}
+        assert sw.compile_options == {"op_debug_config": "oom", "k": "v", "macros": "-DFOO=1"}
 
 
 # -- geir 模式 --------------------------------------------------------------

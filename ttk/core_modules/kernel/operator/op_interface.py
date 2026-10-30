@@ -63,18 +63,19 @@ def _append_regbase_v2_source_debug_option(compile_options: list):
 
 
 @contextmanager
-def _ascend950_source_debug_compatibility(enabled: bool):
-    """Supply the RegBase V2 companion flag missing from the AscendC path.
+def _patch_check_debug_options(mutate: Callable):
+    """Wrap both stacks' ``CommonUtility.check_debug_options`` for one compilation.
 
-    CANN's generic CCEC path adds this flag for tbe_debug_level=2, but the
-    high-level AscendC compiler path only translates op_debug_config to
-    ``-O0 -g``. Keep this compatibility patch scoped to one compilation and
-    restore CANN's static method afterwards.
+    The two stacks (AscendC ``asc_op_compile_base`` / TIK ``tbe.tikcpp``) both invoke
+    this hook with the final compile option list right before the ccec command is
+    assembled. Callers pass a ``mutate(compile_options)`` callback to append options.
+
+    The op impl pys capture ``from <stack>.compile_op import compile_op`` at import
+    time, so wrapping ``compile_op`` afterwards does not take effect — the patch must
+    land on the ``CommonUtility`` class itself, which forces importing the stack
+    modules here (they may not be loaded yet). The patch is restored afterwards and
+    missing modules (uninstalled stacks / CANN differences) are skipped.
     """
-    if not enabled:
-        yield
-        return
-
     patched = []
     seen_classes = set()
     try:
@@ -91,15 +92,47 @@ def _ascend950_source_debug_compatibility(enabled: bool):
 
             def check_debug_options(compile_options, original=original):
                 is_debug = original(compile_options)
-                _append_regbase_v2_source_debug_option(compile_options)
+                mutate(compile_options)
                 return is_debug
 
             common_utility.check_debug_options = staticmethod(check_debug_options)
             patched.append((common_utility, descriptor))
-        yield
+        yield patched
     finally:
         for common_utility, descriptor in reversed(patched):
             common_utility.check_debug_options = descriptor
+
+
+@contextmanager
+def _inject_compile_options(regbase_compat: bool, flags: list):
+    """Inject extra options into each kernel compile of the current op.
+
+    Merges two behaviors into one patch round (single import + single wrapper):
+
+    - ``regbase_compat``: supply the RegBase V2 companion flag missing from the
+      AscendC path. CANN's generic CCEC path adds this flag for tbe_debug_level=2,
+      but the high-level AscendC compiler path only translates op_debug_config to
+      ``-O0 -g``.
+    - ``flags``: user compile macros from ``--compile-opts macros``.
+    """
+    if not regbase_compat and not flags:
+        yield
+        return
+
+    def _mutate(compile_options):
+        if regbase_compat:
+            _append_regbase_v2_source_debug_option(compile_options)
+        for flag in flags:
+            if flag not in compile_options:
+                compile_options.append(flag)
+
+    with _patch_check_debug_options(_mutate) as patched:
+        if flags and not patched:
+            raise RuntimeError(
+                "--compile-opts macros requested but no compile stack accepted the injection "
+                "(both AscendC and TIK CommonUtility.check_debug_options are unavailable)"
+            )
+        yield
 
 
 class CaseNotSupportedError(Exception):
@@ -450,6 +483,9 @@ class OperatorInterface(metaclass=Singleton):
     @staticmethod
     def _build_compile_cfg():
         compile_options = dict(get_global_storage().compile_options)
+        # ttk 私有键，仅经 ccec 命令行注入（_inject_compile_options / CceManualCompile），
+        # 不进 CANN build_config 命名空间
+        compile_options.pop("macros", None)
         if kernel_debug_compile_enabled():
             # Request CANN's complete source-level debug mode under msdebug and
             # keep the explicit ccec flags for compiler-path compatibility. The
@@ -483,8 +519,8 @@ class OperatorInterface(metaclass=Singleton):
                 needs_debug_compatibility = (
                     kernel_debug_compile_enabled() and self._opc.get_soc_spec("SHORT_SOC_VERSION") == "Ascend950"
                 )
-                with self._opc.build_config(**build_cfg), _ascend950_source_debug_compatibility(
-                    needs_debug_compatibility
+                with self._opc.build_config(**build_cfg), _inject_compile_options(
+                    needs_debug_compatibility, get_global_storage().macros
                 ):
                     op_func(*copy.deepcopy(tensor_list), **copy.deepcopy(op_kwargs))
             else:

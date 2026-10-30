@@ -148,6 +148,28 @@ def test_oom_enabled_reads_compile_options(debug_config, expected):
     assert sw.oom_enabled() is expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected", "expect_raise"),
+    [
+        ("-DFOO=1 -DBAR=2", ["-DFOO=1", "-DBAR=2"], None),
+        ('-DX="a b"', ["-DX=a b"], None),
+        ("", [], None),
+        (None, [], None),
+        (["-DFOO=1"], None, "must be a string"),
+    ],
+)
+def test_macros_parses_compile_options(raw, expected, expect_raise):
+    """macros = shlex 解析 --compile-opts macros 值；未设置返回空列表；非字符串报错。"""
+    sw = SWITCHES()
+    if raw is not None:
+        sw.compile_options["macros"] = raw
+    if expect_raise:
+        with pytest.raises(ValueError, match=expect_raise):
+            _ = sw.macros
+    else:
+        assert sw.macros == expected
+
+
 def test_op_test_switch_str_and_release_bin():
     """OPTestSwitch：__str__ 三段式格式（worker 日志消费）；realtime='release'
     时 use_release_bin（--binary release 编译复用二进制）。"""

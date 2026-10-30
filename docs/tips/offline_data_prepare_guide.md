@@ -34,7 +34,14 @@ python3 -m ttk e2e -i cases.csv --plugin /path/to/assets \
 
 ### XPU 三方输出
 
-三方输出也可提前备好：直接在 XPU 机器上跑 TTK 落盘（目前仅 e2e 的 torch / tf 支持；跨机部署见 [xpu-server 部署指南](../reference/xpu_server.md)）：
+参与三方比对的 XPU 输出也可提前备好：在 XPU 机器上跑 TTK，让输入、Golden 与三方输出一起落盘。
+
+支持范围：
+
+- 目前仅 e2e 通路的 torch / tf
+- 需在 XPU 机器上先起 xpu-server（三方硬件在本机时 endpoint 指向 `127.0.0.1` 即可，启动方式见 [三方交叉校验](./cross_check_guide.md)；跨机部署见 [xpu-server 部署指南](../reference/xpu_server.md)）
+
+XPU 机器上的配置：
 
 ```yaml
 # ttk.conf.yaml（XPU 机器）
@@ -48,11 +55,11 @@ frameworks:
       torch_lib: cuda          # GPU；MLU 用 mlu
 ```
 
+运行（`--dump full` 会把输入、Golden 与三方输出一起落盘）：
+
 ```bash
 python3 -m ttk e2e -i cases.csv --config ttk.conf.yaml --dump full
 ```
-
-`--dump full` 会把输入、Golden 与三方输出一起落盘。
 
 产物拷回 NPU 环境，作 `manual_xpu_binaries` 回放参与三方比对（见 [三方交叉校验](./cross_check_guide.md)）。
 

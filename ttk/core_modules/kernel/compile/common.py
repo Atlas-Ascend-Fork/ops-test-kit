@@ -33,6 +33,11 @@ def normalize_mode(mode: str):
     return mode[0].upper() + mode[1:].lower()
 
 
+def _user_macros() -> list:
+    """--compile-opts macros 透传的编译宏/原始编译器参数（当次进程生效）。"""
+    return get_global_storage().macros
+
+
 class CceManualCompile:
     @classmethod
     def compile(
@@ -137,7 +142,7 @@ class CceManualCompile:
                 return "SUCC"
             return "FOUND_NOTHING"
 
-        ret = cls._compile_cce(cce_file, i_obj_file, platform, core_type)
+        ret = cls._compile_cce(cce_file, i_obj_file, platform, core_type, _user_macros())
         if ret != "SUCC":
             return ret
         return cls._ld(obj_file, i_obj_file)
@@ -155,12 +160,20 @@ class CceManualCompile:
                 return "FOUND_NOTHING"
 
             ret = cls._compile_cce(
-                aic_cce_file, aic_i_obj_file, platform, "AiCore", f"-D{kernel_main_func}={kernel_main_func}_mix_aic"
+                aic_cce_file,
+                aic_i_obj_file,
+                platform,
+                "AiCore",
+                _user_macros() + [f"-D{kernel_main_func}={kernel_main_func}_mix_aic"],
             )
             if ret != "SUCC":
                 return ret
             ret = cls._compile_cce(
-                aiv_cce_file, aiv_i_obj_file, platform, "VectorCore", f"-D{kernel_main_func}={kernel_main_func}_mix_aiv"
+                aiv_cce_file,
+                aiv_i_obj_file,
+                platform,
+                "VectorCore",
+                _user_macros() + [f"-D{kernel_main_func}={kernel_main_func}_mix_aiv"],
             )
             if ret != "SUCC":
                 return ret
@@ -173,7 +186,11 @@ class CceManualCompile:
                 return "SUCC"
             return "FOUND_NOTHING"
         ret = cls._compile_cce(
-            cce_file, i_obj_file, platform, core_type, f"-D{kernel_main_func}={kernel_main_func}_mix_{suffix}"
+            cce_file,
+            i_obj_file,
+            platform,
+            core_type,
+            _user_macros() + [f"-D{kernel_main_func}={kernel_main_func}_mix_{suffix}"],
         )
         if ret != "SUCC":
             return ret

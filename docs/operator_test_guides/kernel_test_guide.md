@@ -114,7 +114,7 @@ python3 -m ttk kernel -i add.csv --co
 | `--binary` | `-b` | 二进制模式；`-b release` 使用发布内核 | 关闭 |
 | `--compile-only` | `--co` | 仅编译不执行 | 关闭 |
 | `--no-prof` | | dry-run：不执行被测通路，仅生成输入与 Golden；与 `--dump in,golden` 组合用于离线数据准备 | 关闭 |
-| `--compile-opts` | | 编译选项（KEY=VALUE 格式，可多次指定） | 无 |
+| `--compile-opts` | | 编译选项（KEY=VALUE 格式，可多次指定），详解见 [Kernel 编译选项使用技巧](../tips/kernel_compile_options.md) | 无 |
 | `--tiling-run` | `--tr` | Tiling 运行次数 | 3 |
 | `--reuse-hbm` | | 重复执行间复用同一块 HBM（配合默认 3 次执行使能 L2 Cache） | 关闭 |
 | `--reserve-hbm` | | 预留 HBM 内存（MB） | 无 |
@@ -130,6 +130,9 @@ python3 -m ttk kernel -i add.csv --co
 ```shell
 # 编译选项
 python3 -m ttk kernel -i cases.csv --compile-opts op_debug_config=oom,dump_cce --compile-opts enable_deterministic_mode=1
+
+# 透传编译宏到 ccec 命令行（空格分隔，可引号包裹）
+python3 -m ttk kernel -i cases.csv --compile-opts "macros=-DFOO=1 -DBAR=2"
 
 # 多次执行间复用HBM（使能L2 Cache）
 python3 -m ttk kernel -i cases.csv --reuse-hbm

@@ -17,6 +17,7 @@ get/set_global_storage 为兼容函数（消费方迁移完成后删）。
 # Standard Packages
 import os
 import pathlib
+import shlex
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import List, Optional, Tuple
@@ -234,6 +235,21 @@ class SWITCHES:
 
     def oom_enabled(self) -> bool:
         return "oom" in self.compile_options.get("op_debug_config", "")
+
+    @property
+    def macros(self) -> List[str]:
+        """--compile-opts macros=<...> 的编译宏/原始编译器参数（如 -DFOO=1），追加到 ccec 命令行。"""
+        value = self.compile_options.get("macros", "")
+        if value is None or value == "":
+            return []
+        if not isinstance(value, str):
+            raise ValueError(f"--compile-opts macros must be a string, got {type(value).__name__}")
+        if not value.strip():
+            return []
+        try:
+            return shlex.split(value)
+        except ValueError as e:
+            raise ValueError(f"--compile-opts macros value is invalid: {value!r} ({e})") from None
 
     def _init_platform(self):
         """平台与通路：op(kernel)/aclnn/geir/framework-api 四链 + 板端/仿真形态。"""
