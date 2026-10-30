@@ -140,7 +140,7 @@ class EyeImpl:                        # third_party 实现类
 | `stat_rel_err` | 统计相对误差 | `stat_rel_err` |
 | `binary_equal` | 逐 bit 相等 | `binary` |
 | `cross_check` | 交叉比对（配合 `third_party`） | `cross_check` |
-| `quant` | 量化比对（int4/int8 输出） | 仅 Spec 声明 |
+| `quant` | 量化比对（int4/int8/uint8 输出） | 仅 Spec 声明 |
 | `isclose` | numpy.isclose 容差 | `close` |
 | `cosine` | 余弦相似度 | `cosine` |
 

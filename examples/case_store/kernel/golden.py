@@ -93,7 +93,7 @@ class PadTestSpec:
 class AscendQuantV2TestSpec:
     """量化 y = round(x * scale + offset) 饱和到 dst_type；scale 定值生成。
     int8 输出默认按 dtype 轴路由 binary_equal（如需 |a-g|<=1 的 quant 判据，
-    须在 TestSpec tolerance 声明 standard='quant'，仅 int4/int8 输出可用）；
+    须在 TestSpec tolerance 声明 standard='quant'，仅 int4/int8/uint8 输出可用）；
     float8 输出走 mix 可过，收紧用 CLI `--compare requant`（仅 hifloat8 自动
     路由；requant 为 CLI 专属判据，Spec.tolerance 不收）。"""
 

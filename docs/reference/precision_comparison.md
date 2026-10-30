@@ -19,7 +19,7 @@
 | 余弦相似度 | `cosine` | 大规模向量整体趋势 | 1-cos ≤ 0.01 |
 | 二进制精确 | `binary` | 整型运算/精确结果 | 无容差 |
 | 重量化 | `requant` | hifloat8 类型 | ptol=0.001 |
-| 量化 | `quant` | 浮点输入 + int4/int8 量化输出 | ptol=0 |
+| 量化 | `quant` | 浮点输入 + int4/int8/uint8 量化输出 | ptol=0 |
 | 三方交叉校验 | `cross_check` | 多硬件精度对齐 | 按 level 预设 |
 
 按场景选择：
@@ -285,7 +285,7 @@ python3 -m ttk kernel -i cases.csv --compare requant
 
 ## 七、量化（quant）
 
-用于浮点输入 + int4/int8 量化输出的算子，判据为绝对误差 ≤ 1 LSB。
+用于浮点输入 + int4/int8/uint8 量化输出的算子，判据为绝对误差 ≤ 1 LSB。
 
 ### 公式
 
@@ -304,12 +304,12 @@ passed = (bad / golden_size) <= ptol
 ### 适用场景
 
 - 量化算子（如 PerTokenQuant）
-- 浮点输入 → int4/int8 输出
+- 浮点输入 → int4/int8/uint8 输出
 - 量化末步是阶跃函数，浮点末位 1 ULP 差异会导致结果跳相邻整数格，逐位相等没有意义
 
 ### 使用方式
 
-只能通过 Spec.tolerance 声明（要求输出 int4/int8、输入含浮点）：
+只能通过 Spec.tolerance 声明（要求输出 int4/int8/uint8、输入含浮点）：
 
 ```python
 __spec__ = {"per_token_quant": "PerTokenQuantTestSpec"}

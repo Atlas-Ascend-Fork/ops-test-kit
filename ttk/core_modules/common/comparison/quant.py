@@ -27,7 +27,7 @@ from .registry import (
 class QuantComparison(ComparisonBase):
     """量化输出判据：**绝对误差 <= 1**（1 LSB = 1 ULP），单标杆比对，不做三方。
 
-    【适用场景】浮点型输入 + int4/int8 输出的量化算子。
+    【适用场景】浮点型输入 + int4/int8/uint8 输出的量化算子。
 
     【为何不能用 binary_equal】
     量化的最后一步是 round(x / scale)，round 是阶跃函数：当商落在 .5 附近时，

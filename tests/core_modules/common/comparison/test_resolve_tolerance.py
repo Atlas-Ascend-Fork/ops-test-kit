@@ -255,6 +255,32 @@ class TestRoutingMatrix:
         assert self._tokens("int8", tol) == ["quant"]
         assert self._tokens("int8", tol, cli="bin") == ["bin"]
         assert self._tokens("int8", tol, cli="close") == ["quant"]  # 浮点取值不覆盖量化声明
+        # uint8 与 int8 同为量化目标（非对称量化 zero_point != 0，值域 [0, 255]），
+        # 升格 / CLI 覆盖语义与 int8 完全一致
+        tol_u8 = {"uint8": {"standard": "quant"}}
+        assert self._tokens("uint8", tol_u8) == ["quant"]
+        assert self._tokens("uint8", tol_u8, cli="bin") == ["bin"]
+        assert self._tokens("uint8", tol_u8, cli="close") == ["quant"]
+        # 未声明时维持整数类别强制——存量 uint8 算子行为不变
+        assert self._tokens("uint8") == ["binary_equal"]
+
+
+def test_quant_uint8_guardrails_unchanged():
+    """uint8 入白名单后护栏不变：仍要求至少一个浮点输入，其余宽整型继续拦截。"""
+    import pytest
+
+    # 合法：uint8 输出 + 浮点输入（可附带整型量化参数 zero_point / offset）
+    stds = resolve_tolerance({"uint8": {"standard": "quant"}}, None, None, ["uint8"], None, ["float16", "int32"])
+    assert _tokens(stds) == ["quant"]
+
+    # 纯整型输入（索引/计数/掩码语义）仍被拦截
+    with pytest.raises(ValueError, match="all integer"):
+        resolve_tolerance({"uint8": {"standard": "quant"}}, None, None, ["uint8"], None, ["int32"])
+
+    # 白名单外整型（int16/uint16/int32/...）声明 quant 继续报错——±1 容忍会放过真缺陷
+    for dt in ("int16", "uint16", "int32", "uint32", "int64", "uint64"):
+        with pytest.raises(ValueError, match="quant only applies to"):
+            resolve_tolerance({dt: {"standard": "quant"}}, None, None, [dt], None, ["float16"])
 
 
 def test_requant_spec_ptol_passthrough():

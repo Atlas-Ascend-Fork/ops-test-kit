@@ -190,7 +190,7 @@ def sort_golden(x, descending=False, **kwargs):
 | `stat_rel_err` | 统计相对误差 | `stat_rel_err` |
 | `binary_equal` | 逐 bit 相等 | `binary`（`bin` 为内部判据别名，不能直接传给 `--compare`） |
 | `cross_check` | 交叉比对（需配合 `third_party`） | `cross_check` |
-| `quant` | 量化比对（int4/int8 量化输出，绝对误差 ≤ 1） | —（仅 Spec.tolerance 声明） |
+| `quant` | 量化比对（int4/int8/uint8 量化输出，绝对误差 ≤ 1） | —（仅 Spec.tolerance 声明） |
 | `isclose` | numpy.isclose 容差比对 | `close` |
 | `cosine` | 余弦相似度 | `cosine` |
 

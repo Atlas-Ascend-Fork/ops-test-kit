@@ -72,9 +72,12 @@ def _is_complex(s: str) -> bool:
     return "complex" in s
 
 
-# 量化输出的目标 dtype：标准限定 int4 / int8。
+# 量化输出的目标 dtype：标准限定 int4 / int8 / uint8。
 # 不含 int32/int64——那些通常承载索引、计数、掩码等精确整数语义，差 1 就是错。
-_QUANT_OUT_DTYPES = {"int4", "int8"}
+# uint8 与 int8 同为量化承载：非对称量化（zero_point != 0）值域天然 [0, 255]，
+# TF quint8 即以 uint8 为 numpy 存储类型；int16/uint16 等更宽整型仍承载精确
+# 整数语义，不在白名单（同上理由）。
+_QUANT_OUT_DTYPES = {"int4", "int8", "uint8"}
 
 # --compare 中对【整型输出】有意义的取值：可覆盖 Spec 的 quant 声明。
 # 其余取值均为浮点判据，对量化整型无意义，不参与覆盖。
@@ -92,8 +95,8 @@ def _spec_standard(tolerance, dtype_str):
 def _check_quant_applicable(dtype_str, input_dtypes):
     """声明 quant 时校验前提，不匹配直接报错——**不静默纠正**。
 
-    【为何要校验】quant 的判据是绝对误差 <= 1，只对"浮点输入 + int4/int8 输出"的
-    量化场景成立。若用在索引/计数类输出上，±1 的容忍会放过真缺陷，而且悄无声息。
+    【为何要校验】quant 的判据是绝对误差 <= 1，只对"浮点输入 + int4/int8/uint8
+    输出"的量化场景成立。若用在索引/计数类输出上，±1 的容忍会放过真缺陷，而且悄无声息。
     【为何报错而非降级】误用是配置错误，应当让作者当场看见并改正；静默换成别的判据
     会让 Spec 声明与实际判定不一致，是更隐蔽的坑。
     【为何要求至少一个浮点输入】量化必然存在 float→int 的转换，被量化的数据必为
@@ -112,8 +115,9 @@ def _check_quant_applicable(dtype_str, input_dtypes):
         if ins and not any(is_float_dtype(i) for i in ins):
             raise ValueError(
                 f"Spec.tolerance declares standard='quant' for [{dtype_str}], but input "
-                f"dtypes {ins} are all integer. quant requires float inputs with int4/int8 "
-                f"outputs; pure integer ops (index/count/mask) should use binary_equal."
+                f"dtypes {ins} are all integer. quant requires float inputs with "
+                f"{sorted(_QUANT_OUT_DTYPES)} outputs; pure integer ops (index/count/mask) "
+                f"should use binary_equal."
             )
 
 

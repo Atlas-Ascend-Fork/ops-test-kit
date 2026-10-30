@@ -70,6 +70,29 @@ def test_quant_default_ptol_zero_fails():
     assert is_pass is False
 
 
+def test_quant_uint8_criterion_and_boundaries():
+    """uint8 量化判据端到端：|a-g| <= 1 通过、差 2 失败；0/255 边界经 int32 提升无回绕。
+
+    0 与 255 若在 uint8 域内直接相减会回绕（|0-255| = 1），判据先 astype(np.int32)
+    再求差，边界对（0↔1、254↔255）按真实差值 1 判定。"""
+    tolerance = {"uint8": {"standard": "quant"}}
+    standards = resolve_tolerance(tolerance, None, None, ["uint8"], None, input_dtypes=["float16"])
+
+    # 差 1 全通过（含 0/255 边界对）
+    outputs = [np.array([0, 255, 128, 127], np.uint8)]
+    goldens = [np.array([1, 254, 127, 128], np.uint8)]
+    _p, _l, is_pass, metrics = _entry(outputs, goldens, ("uint8",), standards)
+    assert is_pass is True
+    assert metrics[0]["exceed_count"] == 0
+
+    # 差 2 全失败（默认 ptol=0）；255→253 / 0→2 若发生回绕会得 254，同样超差——双向钉死
+    outputs = [np.array([0, 255, 128], np.uint8)]
+    goldens = [np.array([2, 253, 130], np.uint8)]
+    _p, _l, is_pass, metrics = _entry(outputs, goldens, ("uint8",), standards)
+    assert is_pass is False
+    assert metrics[0]["exceed_count"] == 3
+
+
 @pytest.mark.parametrize("ph", ["GOLDEN_TIMEOUT", "GOLDEN_FAILURE", "UNSUPPORTED"])
 def test_golden_placeholder_fails_at_entry(ph):
     """入口收 golden 占位串（生成失败类）：不抛、precision 透传、FAIL。"""
