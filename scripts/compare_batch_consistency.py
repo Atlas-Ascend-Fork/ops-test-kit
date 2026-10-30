@@ -163,6 +163,28 @@ def byte_width(dtype: str) -> int:
     return width
 
 
+def find_output_dump(dump_dir: Path, dump_names: Sequence[str], output_index: int = 0) -> Optional[Path]:
+    """Locate an output .bin dump across flat and per-testcase subdirectory layouts.
+
+    Supports the legacy flat ``{name}_output_{i}.bin`` layout and the eager-dump
+    ``{name}/output_*_{i}_*.bin`` layout (e.g. ``output_eager_0_int32.bin``).
+    Reject ambiguous nested matches instead of choosing an arbitrary output.
+    """
+    for name in dump_names:
+        flat_path = dump_dir / f"{name}_output_{output_index}.bin"
+        if flat_path.is_file():
+            return flat_path
+        case_dir = dump_dir / name
+        if case_dir.is_dir():
+            candidates = sorted(path for path in case_dir.glob(f"output_*_{output_index}_*.bin") if path.is_file())
+            if len(candidates) > 1:
+                paths = ", ".join(str(path) for path in candidates)
+                raise ValueError(f"{name}: ambiguous output dump for output {output_index}; found {paths}")
+            if candidates:
+                return candidates[0]
+    return None
+
+
 def complete_batch_metadata(row: Dict[str, str]):
     """Return parsed metadata only when all three batch fields are provided.
 
@@ -474,11 +496,12 @@ class BatchProfile:
         # name. Prefer the explicit prefix, then retain E2E/cache compatibility.
         prefix = str(row.get("dump_file_prefix") or "").strip()
         dump_names = (prefix, testcase_name) if prefix and prefix != testcase_name else (testcase_name,)
-        output_paths = tuple(dump_dir / f"{name}_output_0.bin" for name in dump_names)
-        output_path = next((path for path in output_paths if path.is_file()), None)
+        output_path = find_output_dump(dump_dir, dump_names)
         if output_path is None:
-            expected_paths = ", ".join(str(path) for path in output_paths)
-            raise ValueError(f"{testcase_name}: missing output dump; expected one of {expected_paths}")
+            flat_paths = ", ".join(str(dump_dir / f"{name}_output_0.bin") for name in dump_names)
+            nested_paths = ", ".join(str(dump_dir / name / "output_*_0_*.bin") for name in dump_names)
+            expected_paths = f"{flat_paths}, or {nested_paths}"
+            raise ValueError(f"{testcase_name}: missing output dump; expected {expected_paths}")
         output_bytes = output_path.read_bytes()
         expected_bytes = product(shape) * byte_width(dtype)
         if len(output_bytes) != expected_bytes:
@@ -978,11 +1001,11 @@ class CompressorProfile(BatchProfile):
             raise ValueError(f"{testcase_name}: precision_status is not PASS")
         prefix = str(row.get("dump_file_prefix") or "").strip()
         dump_names = (prefix, testcase_name) if prefix and prefix != testcase_name else (testcase_name,)
-        output_paths = tuple(dump_dir / f"{name}_output_0.bin" for name in dump_names)
-        output_path = next((path for path in output_paths if path.is_file()), None)
+        output_path = find_output_dump(dump_dir, dump_names)
         if output_path is None:
-            expected = ", ".join(str(p) for p in output_paths)
-            raise ValueError(f"{testcase_name}: missing cmp_kv output dump; expected one of {expected}")
+            flat_paths = ", ".join(str(dump_dir / f"{name}_output_0.bin") for name in dump_names)
+            nested_paths = ", ".join(str(dump_dir / name / "output_*_0_*.bin") for name in dump_names)
+            raise ValueError(f"{testcase_name}: missing cmp_kv output dump; expected {flat_paths}, or {nested_paths}")
         raw_bytes = output_path.read_bytes()
         raw = np.frombuffer(raw_bytes, dtype=np.uint16)
         return (raw.astype(np.uint32) << 16).view(np.float32)
@@ -1252,14 +1275,19 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Compare FA TTK batch-consistency output dumps.")
     parser.add_argument("--result", required=True, help="Phase-one TTK result CSV")
     parser.add_argument("--final_result", required=True, help="Final relation report CSV")
+    parser.add_argument(
+        "--dump_dir",
+        default=os.environ.get("NPU_DUMP_PATH"),
+        help="Directory holding the output .bin dumps (default: %(default)s)",
+    )
     return parser
 
 
 def main():
     args = build_parser().parse_args()
-    dump_path = os.environ.get("NPU_DUMP_PATH")
+    dump_path = args.dump_dir
     if not dump_path:
-        print("batch consistency comparison failed: NPU_DUMP_PATH is not set")
+        print("batch consistency comparison failed: NPU_DUMP_PATH is not set and --dump_dir was not provided")
         return 1
     try:
         passed, summary = compare_result_csv(Path(args.result), Path(args.final_result), Path(dump_path))
