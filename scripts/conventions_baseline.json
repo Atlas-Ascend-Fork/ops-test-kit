@@ -171,9 +171,6 @@
     "ttk/core_modules/common/testcase/infershape.py": {
       "C901": 1
     },
-    "ttk/core_modules/common/xpu.py": {
-      "C901": 1
-    },
     "ttk/core_modules/framework_api/adapter.py": {
       "PLR0913": 1
     },
@@ -187,8 +184,8 @@
       "PLR0913": 5
     },
     "ttk/core_modules/framework_api/execute.py": {
-      "C901": 1,
-      "PLR0913": 2,
+      "C901": 2,
+      "PLR0913": 4,
       "PLR0915": 1
     },
     "ttk/core_modules/framework_api/golden.py": {
@@ -223,23 +220,17 @@
       "PLR0913": 24,
       "PLR0915": 1
     },
-    "ttk/core_modules/framework_api/torch/npu_declaration.py": {
-      "C901": 1
-    },
     "ttk/core_modules/framework_api/torch/param_extractor.py": {
       "C901": 8,
       "PLR0913": 1,
       "PLR0915": 1
-    },
-    "ttk/core_modules/framework_api/torch/pyi_loader.py": {
-      "C901": 1
     },
     "ttk/core_modules/framework_api/torch/type_inference.py": {
       "C901": 4,
       "PLR0915": 1
     },
     "ttk/core_modules/framework_api/utils.py": {
-      "PLR0913": 1
+      "PLR0913": 2
     },
     "ttk/core_modules/framework_api/worker.py": {
       "C901": 5,
@@ -353,6 +344,27 @@
     },
     "ttk/core_modules/framework_api/onnx/__init__.py": {
       "PLR0913": 1
+    },
+    "ttk/core_modules/common/xpu/binding.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/torch/extract_cpp.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/torch/extract_docstring.py": {
+      "C901": 3,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/framework_api/torch/extract_declaration.py": {
+      "C901": 1
+    },
+    "ttk/core_modules/framework_api/torch/rank_inputs.py": {
+      "C901": 1,
+      "PLR0913": 1,
+      "PLR0915": 1
+    },
+    "ttk/core_modules/framework_api/torch/extract_pyi.py": {
+      "C901": 1
     }
   },
   "underscore": {
@@ -362,6 +374,9 @@
     "ttk/core_modules/kernel/golden.py": {
       "ttk.core_modules.common.comparison.resolve:_BIN_DTYPES": "golden 复用比较层的量化 dtype 集合",
       "ttk.core_modules.common.invoke:_framework_of": "golden 复用框架探测辅助函数"
+    },
+    "ttk/core_modules/framework_api/api_param.py": {
+      "ttk.core_modules.common.testcase.api_param:_coerce_value": "装配机器复用 common 类型强转辅助"
     }
   }
 }

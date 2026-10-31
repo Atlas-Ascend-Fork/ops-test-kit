@@ -11,7 +11,7 @@
 
 设计契约：可变性是接口确定即可知的静态事实，落在参数级模型上——
   - torch：aten schema alias_info.is_write（schema 源）/ 尾下划线命名投影
-    （docstring/pyi 源，_resolve_api_flags 兜底）；
+    （docstring/pyi 源，mark_inplace_mutable 兜底）；
   - tf：OpDef is_ref / DT_RESOURCE 按参数名落 flag（mutable_input_flags）。
 torch 侧 in-process；TF 侧子进程运行——torch 进程后加载 TF 的 C 扩展会段错误
 （torch_npu 与 TF 运行时冲突，参照 test_golden_generation 的子进程隔离模式）。

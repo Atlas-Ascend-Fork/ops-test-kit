@@ -31,37 +31,17 @@ with profiling.py — same plan, same (*args, **kwargs) layout.
 import functools
 import logging
 
-from ttk.core_modules.common.testcase.batch import batch_relation_kwargs
 from ttk.core_modules.framework_api.api_param import build_positional_args
 from ttk.utilities import DTYPE_PROMOTE_MAP
 from ttk.utilities.container import nest_by_distribution
 
 from ..common.backend import detect_framework, resolve_api
-from ..common.invoke import Invoke, accepts_var_keyword, golden_mode, sig_params
+from ..common.invoke import Invoke, golden_mode
 from ..common.plugin import SpecResolver, get_plugin_function
 from ..common.process import process_context
 from .adapter import adapter_for_api_name
 from .info_keeper import FrameworkApiInfoKeeper
-
-_cpu_backend_cache = {}
-
-
-def _get_cpu_backend(framework="torch"):
-    """Get cached CPU backend for the given framework."""
-    if framework not in _cpu_backend_cache:
-        if framework == "tf":
-            from ..common.backend.cpu_tf_backend import CpuTfBackend
-
-            _cpu_backend_cache[framework] = CpuTfBackend()
-        elif framework == "onnx":
-            from ..common.backend.onnx_backend import CpuOnnxBackend
-
-            _cpu_backend_cache[framework] = CpuOnnxBackend()
-        else:
-            from ..common.backend.cpu_torch_backend import CpuTorchBackend
-
-            _cpu_backend_cache[framework] = CpuTorchBackend()
-    return _cpu_backend_cache[framework]
+from .utils import build_plugin_call
 
 
 def _promote_raw_inputs(testcase, raw_inputs, switches=None):
@@ -158,7 +138,6 @@ def _run_onnx_reference(api_name, raw_inputs, testcase):
     """
     import numpy as np
 
-    from .api_param import build_positional_args
     from .onnx.model_builder import build_input_specs, build_model_proto
     from .onnx.param_extractor import parse_onnx_api_name
 
@@ -186,6 +165,21 @@ def _run_onnx_reference(api_name, raw_inputs, testcase):
     feed = {name: np.ascontiguousarray(arr) for (name, _shape, _dtype), arr in zip(input_specs, host_inputs)}
     outputs = ReferenceEvaluator(model).run(None, feed)
     return [np.asarray(o) for o in outputs]
+
+
+def invoke_golden_api(api_name, matched_oidx, resolved, args, kwargs):
+    """golden 真值执行的统一调用点：带 TypeError 细节日志的直调包装。
+
+    落点由调用方决定（args 已按 backend 放置，外层 device_scope 控 CPU/NPU），
+    本函数不关心设备。被测侧 eager 不走这里（adapter.eager_call）。"""
+    try:
+        return resolved(*args, **kwargs)
+    except TypeError as e:
+        logging.warning(
+            f"golden API call {api_name}(oidx={matched_oidx}) failed with TypeError: {e}. "
+            f"args={len(args)}, kwargs={list(kwargs.keys())}"
+        )
+        raise
 
 
 def generate_golden(testcase, raw_inputs, plugin_path=None, switches=None, backend="cpu", exec_backend=None, dev_id=0):
@@ -353,6 +347,87 @@ def has_dynamic_golden_source(testcase, switches, manual_case=None):
     return get_plugin_function(testcase.api_name, "golden", "e2e", switches.plugin_path) is not None
 
 
+def _call_plugin_with_plan(testcase, func, switches=None, backend="cpu", device=None):
+    """Call golden plugin using testcase's param plan — same arg order as profiling.
+    Interface is identical to input plugin, except golden returns values.
+    Uses testcase.tensors (CPU nested tensors) directly.
+
+    device 非 None 时（NPU）：args/kwargs 中 torch 张量 .to(device) 上板，
+    extra 注入 device 字符串（声明 device 形参或 **kwargs 的插件才收到）；
+    返回值经 result_to_numpy 回转。cpu_backend 按本例框架自取（模块级缓存）。"""
+    plan = testcase.get_param_plan()
+    if plan is None:
+        raise RuntimeError(f"No param plan for {testcase.api_name}, cannot call golden plugin")
+    cpu_backend = _get_cpu_backend(detect_framework(testcase.api_name))
+    use_numpy = cpu_backend.needs_numpy_fallback(testcase)
+
+    if isinstance(func, type):
+        return _call_class_golden(testcase, func, plan, switches, cpu_backend, device=device)
+    args, kwargs = build_plugin_call(
+        func, testcase, switches, plan, testcase.tensors, backend=backend, use_numpy=use_numpy, device=device or "cpu"
+    )
+    if device is not None:
+        import torch
+
+        def _to_dev(v):
+            if isinstance(v, torch.Tensor):
+                return v.to(device)
+            if isinstance(v, (list, tuple)):
+                return type(v)(_to_dev(x) for x in v)
+            return v
+
+        args = [_to_dev(a) for a in args]
+        kwargs = {k: _to_dev(v) for k, v in kwargs.items()}
+    result = func(*args, **kwargs)
+    return cpu_backend.result_to_numpy(result)
+
+
+def _call_class_golden(testcase, func, plan, switches, cpu_backend, device=None):
+    """class 形插件 golden：按名池绑定 __init__/__call__。
+
+    池 = 张量参数名绑定值（plan.tensor_param_bindings，TensorList 参数为
+    列表）+ testcase.attributes + device（class_accepts_device 声明才注入）。
+    device 非 None 时池内 torch 张量 .to(device) 上板；返回值经
+    result_to_numpy 回转。
+    """
+    from ttk.core_modules.common.invoke import class_accepts_device, instantiate_and_call
+
+    args, kwargs, _extra = plan.build_args(testcase.tensors)
+    pool = {}
+    for name, entries in plan.tensor_param_bindings(testcase.tensors).items():
+        vals = [kwargs[key] if container == "kwargs" else args[key] for _top_index, container, key, _vararg in entries]
+        pool[name] = vals[0] if len(vals) == 1 else vals
+    pool.update(testcase.attributes or {})
+    if device is not None:
+        import torch
+
+        pool = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in pool.items()}
+    if class_accepts_device(func):
+        pool["device"] = device or "cpu"
+    return cpu_backend.result_to_numpy(instantiate_and_call(func, pool))
+
+
+_cpu_backend_cache = {}
+
+
+def _get_cpu_backend(framework="torch"):
+    """按框架取 CPU 后端（进程内缓存）。"""
+    if framework not in _cpu_backend_cache:
+        if framework == "tf":
+            from ..common.backend.cpu_tf_backend import CpuTfBackend
+
+            _cpu_backend_cache[framework] = CpuTfBackend()
+        elif framework == "onnx":
+            from ..common.backend.onnx_backend import CpuOnnxBackend
+
+            _cpu_backend_cache[framework] = CpuOnnxBackend()
+        else:
+            from ..common.backend.cpu_torch_backend import CpuTorchBackend
+
+            _cpu_backend_cache[framework] = CpuTorchBackend()
+    return _cpu_backend_cache[framework]
+
+
 def _run_api(api_name, raw_inputs, testcase, backend, dev_id=0, api_info=None):
     """按 API 名字执行并返回 numpy 列表；backend 决定 CPU/NPU 落点。
 
@@ -367,7 +442,9 @@ def _run_api(api_name, raw_inputs, testcase, backend, dev_id=0, api_info=None):
       本例 param plan（同 API 路径）；TensorList 嵌套以本例声明为准
     """
     from ttk.utilities import get
+    from ttk.utilities.container import nest_by_distribution
 
+    from .api_param import build_positional_args
     from .tf.param_extractor import mutable_flat_indexes
 
     dist = testcase.tensor_list_dist
@@ -432,82 +509,6 @@ def _run_api(api_name, raw_inputs, testcase, backend, dev_id=0, api_info=None):
     return _exec_and_convert(api_name, args, kwargs, oidx, backend, dev_id=scope_dev)
 
 
-def _call_plugin_with_plan(testcase, func, switches=None, backend="cpu", device=None):
-    """Call golden plugin using testcase's param plan — same arg order as profiling.
-    Interface is identical to input plugin, except golden returns values.
-    Uses testcase.tensors (CPU nested tensors) directly.
-
-    device 非 None 时（NPU）：args/kwargs 中 torch 张量 .to(device) 上板，
-    extra 注入 device 字符串（声明 device 形参或 **kwargs 的插件才收到）；
-    返回值经 result_to_numpy 回转。cpu_backend 按本例框架自取（模块级缓存）。"""
-    plan = testcase.get_param_plan()
-    if plan is None:
-        raise RuntimeError(f"No param plan for {testcase.api_name}, cannot call golden plugin")
-    cpu_backend = _get_cpu_backend(detect_framework(testcase.api_name))
-    use_numpy = cpu_backend.needs_numpy_fallback(testcase)
-
-    args, kwargs, extra_attrs = plan.build_args(testcase.tensors)
-    if isinstance(func, type):
-        return _call_class_golden(testcase, func, plan, switches, cpu_backend, device=device)
-    if device is not None:
-        import torch
-
-        def _to_dev(v):
-            if isinstance(v, torch.Tensor):
-                return v.to(device)
-            if isinstance(v, (list, tuple)):
-                return type(v)(_to_dev(x) for x in v)
-            return v
-
-        args = [_to_dev(a) for a in args]
-        kwargs = {k: _to_dev(v) for k, v in kwargs.items()}
-    extra = {
-        "backend": backend,
-        "device": device or "cpu",
-        "tensor_formats": testcase.tensor_formats,
-        "tensor_dtypes": testcase.tensor_dtypes,
-        "use_numpy": use_numpy,
-        "short_soc_version": getattr(switches, "short_soc_version", None),
-        "testcase_name": testcase.testcase_name,
-    }
-    extra.update(extra_attrs)
-
-    extra.update(batch_relation_kwargs(testcase))
-
-    params = sig_params(func)
-    if accepts_var_keyword(params):
-        kwargs.update(extra)
-    else:
-        kwargs.update({k: v for k, v in extra.items() if k in params})
-    result = func(*args, **kwargs)
-    return cpu_backend.result_to_numpy(result)
-
-
-def _call_class_golden(testcase, func, plan, switches, cpu_backend, device=None):
-    """class 形插件 golden：按名池绑定 __init__/__call__。
-
-    池 = 张量参数名绑定值（plan.tensor_param_bindings，TensorList 参数为
-    列表）+ testcase.attributes + device（class_accepts_device 声明才注入）。
-    device 非 None 时池内 torch 张量 .to(device) 上板；返回值经
-    result_to_numpy 回转。
-    """
-    from ttk.core_modules.common.invoke import class_accepts_device, instantiate_and_call
-
-    args, kwargs, _extra = plan.build_args(testcase.tensors)
-    pool = {}
-    for name, entries in plan.tensor_param_bindings(testcase.tensors).items():
-        vals = [kwargs[key] if container == "kwargs" else args[key] for _top_index, container, key, _vararg in entries]
-        pool[name] = vals[0] if len(vals) == 1 else vals
-    pool.update(testcase.attributes or {})
-    if device is not None:
-        import torch
-
-        pool = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in pool.items()}
-    if class_accepts_device(func):
-        pool["device"] = device or "cpu"
-    return cpu_backend.result_to_numpy(instantiate_and_call(func, pool))
-
-
 def _exec_and_convert(api_name, args, kwargs, overload_index=0, cpu_backend=None, dev_id=0):
     """Execute API and convert result to list of numpy arrays.
 
@@ -515,12 +516,11 @@ def _exec_and_convert(api_name, args, kwargs, overload_index=0, cpu_backend=None
     adapter.wrap_eager 包装（TF 裸 eager 落 CPU，GE 分发须 tf.function），
     调用在 backend.device_scope(dev_id) 内进行。
     """
-    from .execute import call_api
+    from ..common.backend import detect_framework
 
     resolved, is_tensor_method = resolve_api(api_name)
     if cpu_backend is None:
-        framework = detect_framework(api_name)
-        cpu_backend = _get_cpu_backend(framework)
+        cpu_backend = _get_cpu_backend(detect_framework(api_name))
     if cpu_backend.is_npu():
         from .adapter import adapter_for_api_name
 
@@ -533,13 +533,15 @@ def _exec_and_convert(api_name, args, kwargs, overload_index=0, cpu_backend=None
 
     mutable_vars = collect_mutable_variables(api_name, args, kwargs)
     convert_variables_to_handles(api_name, args, kwargs)
+    from .golden import invoke_golden_api  # 惰性：execute↔golden 调用链方向
+
     with cpu_backend.device_scope(dev_id):
         if is_tensor_method:
             if args[0] is None:
                 return [None]
-            result = call_api(api_name, overload_index, getattr(args[0], resolved), args[1:], kwargs)
+            result = invoke_golden_api(api_name, overload_index, getattr(args[0], resolved), args[1:], kwargs)
         else:
-            result = call_api(api_name, overload_index, resolved, args, kwargs)
+            result = invoke_golden_api(api_name, overload_index, resolved, args, kwargs)
     nps = cpu_backend.result_to_numpy(result)
     if result is None and mutable_vars:
         nps = read_mutable_values(mutable_vars)

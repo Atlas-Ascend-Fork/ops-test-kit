@@ -1048,6 +1048,31 @@ def _apply_transposes(attrs, dev_tensors):
         dev_tensors[0] = dev_tensors[0].t().contiguous()
 
 
+def gmm_alltoallv_matrix(a_array_val, exp_per_card, seed):
+    """GMM alltoallv token 分布矩阵（与 ACLNN __patch_gmm_rank_attributes 同口径）。"""
+    n = len(a_array_val)
+    rng = np.random.default_rng(seed)
+    total = sum(a_array_val)
+    if total % n != 0:
+        return [[total // n] * (exp_per_card * n) for _ in range(n)]
+    col_sum = total // n
+    k_values = []
+    for a in a_array_val:
+        if a % n != 0:
+            return [[col_sum // (exp_per_card)] * (exp_per_card * n) for _ in range(n)]
+        k = a // n
+        k_values.append(max(k, exp_per_card))
+    blocks = []
+    for k in k_values:
+        block = np.zeros((exp_per_card, n), dtype=int)
+        for col in range(n):
+            counts = rng.multinomial(k - exp_per_card, [1.0 / exp_per_card] * exp_per_card)
+            block[:, col] = counts + 1
+        blocks.append(block)
+    tmp = np.vstack(blocks)
+    return [list(col) for col in zip(*tmp)]
+
+
 def _patch_gmm_attrs(api_name, attrs, dev_tensors, remark, rank, world_size):
     """Generate sendCounts/recvCounts matching ACLNN __patch_gmm_rank_attributes
     (seed comes from remark (e.g. "seed=1"), ep_ws from attrs)."""
@@ -1063,9 +1088,7 @@ def _patch_gmm_attrs(api_name, attrs, dev_tensors, remark, rank, world_size):
     epc = int(dev_tensors[1].shape[0]) if len(dev_tensors) > 1 else 1
     M_per_rank = int(dev_tensors[0].shape[0]) if len(dev_tensors) > 0 else 0
     A_array = [M_per_rank] * ep_ws
-    from ttk.core_modules.common.xpu import generate_gmm_alltoallv_matrix as _generate_gmm_alltoallv_matrix
-
-    exp_token_nums = _generate_gmm_alltoallv_matrix(A_array, epc, seed=seed_val)
+    exp_token_nums = gmm_alltoallv_matrix(A_array, epc, seed=seed_val)
     attrs = dict(attrs)
     if "npu_gmm_alltoallv" in api_name:
         recv_counts = list(exp_token_nums[rank])

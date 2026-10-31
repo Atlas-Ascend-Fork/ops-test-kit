@@ -22,14 +22,13 @@ from ttk.core_modules.common.testcase.batch import resolve_deterministic_level
 from ..common.invoke import Invoke
 from ..common.profiler import ProfilerConfig, get_profiler
 from .utils import (
+    WARMUP_COUNT,
     compute_output_md5,
     finalize_det_status,
     prepare_device_args,
     resolve_npu_preprocess_hook,
     unpack_4bit_outputs,
 )
-
-WARMUP_COUNT = 1
 
 
 def _capture_peak_memory(backend, dev_id, return_struct, fn, *args, **kwargs):
@@ -258,19 +257,3 @@ def _execute_eager(
 
     result_nps = unpack_4bit_outputs(testcase, result_nps)
     return result_nps, perf, det_status
-
-
-def call_api(api_name, matched_oidx, resolved, args, kwargs):
-    """Call resolved API with error logging.
-
-    Safe wrapper that logs TypeError details before re-raising.
-    Used by worker.py and golden.py.
-    """
-    try:
-        return resolved(*args, **kwargs)
-    except TypeError as e:
-        logging.warning(
-            f"API call {api_name}(oidx={matched_oidx}) failed with TypeError: {e}. "
-            f"args={len(args)}, kwargs={list(kwargs.keys())}"
-        )
-        raise

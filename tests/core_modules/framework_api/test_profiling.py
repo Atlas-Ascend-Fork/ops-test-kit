@@ -12,7 +12,7 @@
 测试 ttk.core_modules.framework_api worker/execute/compare（原 profiling.py 拆分）。
 
 覆盖内容：
-- to_non_contiguous_view / default_generate_inputs: 非连续视图与默认输入生成；
+- make_storage_view / default_generate_inputs: 非连续视图与默认输入生成；
 - invoke_pre_compare/invoke_custom_compare（钩子契约在 common/comparison/comparison.py）：跳过条件、原地/返回模式、返回值适配；
 - evaluate_eager_precision（统一比对入口内联处）/ compare_with_hooks：端到端集成。
 """
@@ -23,10 +23,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from ttk.core_modules.framework_api.input_generate import (
-    default_generate_inputs,
-    to_non_contiguous_view,
-)
+from ttk.core_modules.common.testcase.tensor import make_storage_view
+from ttk.core_modules.framework_api.input_generate import default_generate_inputs
 
 
 def _make_switches(**overrides):
@@ -237,7 +235,7 @@ class TestDeterministicContract:
 
 
 class TestToNonContiguousView:
-    """to_non_contiguous_view: 通过 as_strided 构造非连续视图。"""
+    """make_storage_view: 通过 as_strided 构造非连续视图。"""
 
     def test_stride_with_offset(self):
         """带偏移的非连续视图，验证数据正确读取。"""
@@ -245,7 +243,7 @@ class TestToNonContiguousView:
         view_shape = (3, 2)
         view_stride = (4, 2)
         view_offset = 1
-        result = to_non_contiguous_view(storage, view_shape, view_stride, view_offset)
+        result = make_storage_view(storage, view_shape, view_stride, view_offset)
         assert result.shape == (3, 2)
         expected = np.array([[1, 3], [5, 7], [9, 11]], dtype=np.float32)
         np.testing.assert_array_equal(np.array(result), expected)

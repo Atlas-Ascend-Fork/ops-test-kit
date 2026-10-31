@@ -16,7 +16,6 @@ Generates numpy arrays from testcase metadata, applies custom plugin overrides,
 and converts to framework tensors (torch).
 """
 
-from ttk.core_modules.common.testcase.batch import batch_relation_kwargs
 from ttk.core_modules.common.testcase.input_data import (
     assign_tensor_value,
     broadcast_tensorlist_values,
@@ -27,8 +26,8 @@ from ttk.utilities import get
 from ttk.utilities.container import nest_by_distribution
 from ttk.utilities.dtypes import DTYPE_MAP
 
-from ..common.invoke import accepts_var_keyword, sig_params
 from ..common.plugin import get_plugin_function
+from .utils import build_plugin_call
 
 
 def _cpu_placement_scope(backend, enabled):
@@ -47,69 +46,45 @@ def _cpu_placement_scope(backend, enabled):
 
 
 def generate_inputs(testcase, switches, backend, plan, stored_inputs=None, cpu_placement=False):
-    """Generate numpy input arrays. Default generation first, then optional custom plugin.
-
-    Custom input plugin interface (signature matches API definition, same as golden plugin):
-        def my_input_torch_gather(input, dim, index, sparse_grad=False, out=None):
-            input[:] = np.zeros_like(input)
-            index[:] = np.random.randint(0, input.shape[1], size=index.shape, dtype=index.dtype)
-
-    Plugin has no return value, modifies tensor arrays in-place via x[:] = value.
-    Called with same ParamPlan arg order as profiling execution and golden generation.
-
-    cpu_placement=True：框架张量物化在 CPU 作用域（输入生成/golden 阶段的
-    形态；设备张量由执行侧另行重建）。
-    """
+    """输入生成入口：replay（stored_inputs）装载，或 默认生成 → attributes 覆盖 →
+    input 插件改写。插件按 ParamPlan 装配调用、无返回值（x[:] = value 原地改）。
+    cpu_placement=True 时框架张量在 CPU 作用域物化（设备张量执行侧重建）。"""
     if stored_inputs is not None:
         testcase.np_storages = list(stored_inputs)
         raw_inputs = build_views_from_storages(testcase)
-        set_runtime_tensors(testcase, raw_inputs, backend, cpu_placement=cpu_placement)
-        return raw_inputs
-
-    raw_inputs = default_generate_inputs(testcase, switches)
-    override_tensors_from_attributes(testcase, raw_inputs)
+    else:
+        raw_inputs = default_generate_inputs(testcase, switches)
+        apply_attribute_tensors(testcase, raw_inputs)
 
     plugin_path = switches.plugin_path
     input_func = get_plugin_function(testcase.api_name, "input", "e2e", plugin_path)
+    plugin_inputs = None
     if input_func is not None:
         with _cpu_placement_scope(backend, cpu_placement):
             plugin_inputs = backend.inputs_from_numpy(testcase, raw_inputs)
         use_numpy = backend.needs_numpy_fallback(testcase)
         dist = testcase.tensor_list_dist
         nested_for_plugin = nest_by_distribution(plugin_inputs, dist) if dist else plugin_inputs
-        args, kwargs, extra_attrs = plan.build_args(nested_for_plugin)
-        extra = {
-            "backend": backend.device_type(),
-            "tensor_formats": testcase.tensor_formats,
-            "tensor_dtypes": testcase.tensor_dtypes,
-            "use_numpy": use_numpy,
-            "short_soc_version": switches.short_soc_version,
-            "testcase_name": testcase.testcase_name,
-            "input_ranges": testcase.input_data_ranges,
-        }
-        extra.update(extra_attrs)
-
-        extra.update(batch_relation_kwargs(testcase))
-
-        params = sig_params(input_func)
-        if accepts_var_keyword(params):
-            kwargs.update(extra)
-        else:
-            kwargs.update({k: v for k, v in extra.items() if k in params})
+        args, kwargs = build_plugin_call(
+            input_func,
+            testcase,
+            switches,
+            plan,
+            nested_for_plugin,
+            backend=backend.device_type(),
+            use_numpy=use_numpy,
+            input_ranges=testcase.input_data_ranges,
+        )
         input_func(*args, **kwargs)
-        # 重建 testcase.tensors，并把插件在输入上置的 requires_grad 重放到重建后的
-        # tensor 上（经 set_runtime_tensors 的 plugin_tensors 参数）。这样
-        # testcase.tensors 始终是重建产物（净化语义统一），插件对象不进 runtime tensors。
-        #
-        # 背景：op-plugin 一类算子会按输入 requires_grad 门控（如
-        # RotaryMulBackwardKernelNpuOpApi.cpp 用 r1.requires_grad() 短路 xOptional
-        # 输入，requires_grad=False 时只算 dx、dcos/dsin 全 0）。ttk 此前无条件从
-        # raw_inputs 重建 testcase.tensors，会丢弃插件置的 requires_grad，导致这类
-        # 算子 e2e 无法比对 dcos/dsin。插件按约定以 x[:] = value 原地改数据
-        # （from_numpy 共享内存），数据与重建路径一致；此处仅重放 requires_grad。
-        set_runtime_tensors(testcase, raw_inputs, backend, plugin_tensors=plugin_inputs, cpu_placement=cpu_placement)
-    else:
-        set_runtime_tensors(testcase, raw_inputs, backend, cpu_placement=cpu_placement)
+    # 统一重建 runtime tensors：数据/shape 恒来自 raw_inputs（插件对象不进入）；
+    # 插件命中的仅回放其置的 requires_grad（部分算子按该标志门控输入）。
+    set_runtime_tensors(
+        testcase,
+        raw_inputs,
+        backend,
+        plugin_tensors=plugin_inputs,
+        cpu_placement=cpu_placement,
+    )
     return raw_inputs
 
 
@@ -135,17 +110,11 @@ def set_runtime_tensors(testcase, raw_inputs, backend, plugin_tensors=None, cpu_
         testcase.tensors = flat_tensors
 
 
-def override_tensors_from_attributes(testcase, raw_inputs):
-    """Override tensor values from testcase attributes dict by parameter name.
+def apply_attribute_tensors(testcase, raw_inputs):
+    """把 attributes 按参数名声明的值写进输入张量，并记 const 位。
 
-    For regular tensor: val is scalar or array broadcastable to target shape.
-    For TensorList, two modes:
-      1. Scalar broadcast: val is a single number or [scalar] -> all sub-tensors get same value
-      2. Per-tensor: val is a list, len must match sub-tensor count -> applied one-by-one
-
-    Records tensor indexes sourced from attributes in testcase.const_input_indexes
-    so backends can create const tensors (tf.constant / torch.tensor) for them.
-    """
+    普通张量：标量或可广播数组；TensorList 两态：标量广播全体 / 逐张量列表。
+    const_input_indexes/const_input_values 供后端建常量张量（tf.constant/torch.tensor）。"""
     info = testcase.get_api_info()
     if not info or not testcase.attributes:
         return
@@ -220,12 +189,7 @@ def build_views_from_storages(testcase):
         v_offset = testcase.flat_view_offset(idx)
 
         if v_stride is not None or v_offset != 0:
-            inputs.append(to_non_contiguous_view(storage, view_shape, v_stride, v_offset))
+            inputs.append(make_storage_view(storage, view_shape, v_stride, v_offset))
         else:
             inputs.append(storage)
     return inputs
-
-
-def to_non_contiguous_view(storage, view_shape, view_stride, view_offset):
-    """Create non-contiguous view from contiguous storage using numpy as_strided."""
-    return make_storage_view(storage, view_shape, view_stride, view_offset)

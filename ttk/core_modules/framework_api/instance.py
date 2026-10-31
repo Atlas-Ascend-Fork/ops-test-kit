@@ -183,9 +183,7 @@ class FrameworkApiInstance(InstanceBase):
         return tasks
 
     def handle_result(self, task: Task, result: Any) -> tuple:
-        self._print_new_compare_failures(
-            task.testcase, result if isinstance(result, FrameworkApiReturnStructure) else None
-        )
+        self._print_compare_failures(task.testcase, result if isinstance(result, FrameworkApiReturnStructure) else None)
         if isinstance(result, FrameworkApiReturnStructure):
             return result.pick_data(self.result_titles())
         # worker 结果类型异常 → 显式 FAIL 行（不静默降级为字符串行）
@@ -213,12 +211,11 @@ class FrameworkApiInstance(InstanceBase):
     def get_device_info(self, dev_id: int) -> str:
         return f"{self.backend.device_type()}:{dev_id}"
 
-    def _print_new_compare_failures(self, testcase, result=None) -> None:
-        # 自定义比对失败详情：结构化条目随返回结构回传（不依赖日志格式扫描）
+    def _print_compare_failures(self, testcase, result=None) -> None:
+        # 两个通道互补、不重叠：custom compare 失败只进 metrics（结构化摘要），
+        # 内置判据/cross_check 的逐元素明细只在 COMPARE 日志里（Index/Diff 行）。
         if result is not None:
             print_structured_compare_failures(getattr(result, "precision_metrics", None), testcase.testcase_name)
-        # COMPARE 级进单一 ttk.log（per-case 覆写）——按用例日志文件
-        # 读 Index/Diff 行，失败明细随结果打屏。
         switches = get_global_storage()
         log_dir = build_single_log_dir(switches.test_mode, testcase.testcase_name, switches.root_path)
         diff_lines, _end = read_compare_log_failures(os.path.join(log_dir, COMPARE_LOG_FILE_NAME))

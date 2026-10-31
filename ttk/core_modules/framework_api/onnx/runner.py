@@ -30,8 +30,11 @@ frombuffer 按 numel 截断。
 
 __all__ = ["OmSession"]
 
+import contextlib
 import hashlib
 import logging
+import os
+import tempfile
 import weakref
 
 import numpy as np
@@ -178,3 +181,77 @@ class OmSession:
                 self._acl.unload_model(model_id)
             except RuntimeError:
                 logging.warning(f"[{self._op_type}] unload model {model_id} failed", exc_info=True)
+
+
+# ── om 会话构建（OnnxAdapter 经此构建；结构键/LRU 在 onnx/__init__.py）─────────
+
+_ACL_INTERFACE = None
+
+
+def acl_interface():
+    """libascendcl 接口单例（懒加载，模块 import 零 .so 触碰）。"""
+    global _ACL_INTERFACE
+    if _ACL_INTERFACE is None:
+        from .runtime import AclModelInterface
+
+        _ACL_INTERFACE = AclModelInterface()
+    return _ACL_INTERFACE
+
+
+def root_path() -> str:
+    from ttk.switches import get_global_storage
+
+    return getattr(get_global_storage(), "root_path", os.getcwd())
+
+
+def session_case_dir(handle) -> str:
+    """om 归档目录名：worker 进程名即用例名（对齐 log/msprof 的 per-case
+    惯例）；非 worker 环境（单测/MainProcess）回退 op_type。"""
+    import multiprocessing
+
+    name = getattr(multiprocessing.current_process(), "name", "") or ""
+    if name.startswith("MP "):
+        name = name[3:]
+    if name and name != "MainProcess":
+        return name
+    return handle.op_type
+
+
+def session_key(handle, input_specs, kwargs) -> str:
+    """会话结构键（op 名/opset/schema 源/输入形态/属性/芯片/卡）。"""
+    raw = "|".join(
+        [
+            handle.op_type,
+            str(handle.opset),
+            handle.param_info.source,
+            repr([(name, shape, dtype) for name, shape, dtype in input_specs]),
+            repr(sorted((name, repr(value)) for name, value in kwargs.items())),
+            handle.soc_version,
+            str(handle.dev_id),
+        ]
+    )
+    return hashlib.md5(raw.encode()).hexdigest()  # noqa: S324  # 非安全用途：会话结构键
+
+
+def create_om_session(handle, input_specs, host_inputs, kwargs):
+    """组模 → atc 编译 → OmSession（onnx_om/<用例名>/<opset>/model.om）。"""
+    from .model_builder import build_model_bytes, resolve_opset
+    from .om_compiler import compile_om
+
+    model_bytes = build_model_bytes(handle.op_type, input_specs, kwargs, opset=handle.opset)
+    work_dir = os.path.join(root_path(), "onnx_om", session_case_dir(handle), str(resolve_opset(handle.opset)))
+    os.makedirs(work_dir, exist_ok=True)
+    fd, tmp_onnx = tempfile.mkstemp(prefix="ttk_onnx_", suffix=".onnx", dir=work_dir)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(model_bytes)
+        om_path = compile_om(
+            tmp_onnx,
+            {name: shape for name, shape, _dtype in input_specs},
+            handle.soc_version,
+            work_dir,
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_onnx)
+    return OmSession(acl_interface(), handle.dev_id or 0, om_path, host_inputs, handle.op_type)

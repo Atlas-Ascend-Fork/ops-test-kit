@@ -73,42 +73,37 @@ def _preserve_logging_handlers(monkeypatch):
 
 
 class TestFlatTensorDtypesCompression:
-    def test_compressed_broadcast_after_normalize(self, make_testcase):
+    def test_flatten_compression_forms(self, make_testcase):
         case = make_testcase(tensor_view_shapes=TENSORLIST_SHAPES, tensor_dtypes=("float32",))
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_dtypes == ("float32", "float32", "float32")
         assert all(isinstance(x, str) for x in case.flat_tensor_dtypes)
 
-    def test_per_param_after_normalize(self, make_testcase):
         case = make_testcase(tensor_view_shapes=NESTED_SHAPES, tensor_dtypes=("float32", "int8"))
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_dtypes == ("float32", "float32", "int8")
 
-    def test_fully_nested(self, make_testcase):
         case = make_testcase(tensor_view_shapes=TENSORLIST_SHAPES, tensor_dtypes=(("float32", "float16", "int8"),))
         assert case.flat_tensor_dtypes == ("float32", "float16", "int8")
 
-    def test_flat_no_nesting(self, make_testcase):
         case = make_testcase(tensor_view_shapes=FLAT_SHAPES, tensor_dtypes=("float32", "float32"))
         assert case.flat_tensor_dtypes == ("float32", "float32")
 
 
 class TestPureOutputIndexes:
-    def test_flat_output(self, make_testcase):
+    def test_flat_tensorlist_and_multi_output(self, make_testcase):
         case = make_testcase(tensor_view_shapes=((2, 3), (2, 3), (2, 3)), output_tensor_indexes=(2,))
         assert case.pure_output_indexes == [2]
 
-    def test_tensorlist_output(self, make_testcase):
         case = make_testcase(tensor_view_shapes=NESTED_SHAPES, output_tensor_indexes=(0,))
         assert case.pure_output_indexes == [0, 1]
 
-    def test_multi_output(self, make_testcase):
         case = make_testcase(tensor_view_shapes=((2, 3), (2, 3), (2, 3), (2, 3)), output_tensor_indexes=(1, 3))
         assert case.pure_output_indexes == [1, 3]
 
 
 class TestFlatOutputDtypes:
-    def test_flat_output(self, make_testcase):
+    def test_flat_tensorlist_and_empty_forms(self, make_testcase):
         case = make_testcase(
             tensor_view_shapes=((2, 3), (2, 3), (2, 3)),
             tensor_dtypes=("float32", "float16", "int8"),
@@ -116,7 +111,6 @@ class TestFlatOutputDtypes:
         )
         assert case.flat_output_dtypes == ("int8",)
 
-    def test_tensorlist_output_expanded(self, make_testcase):
         case = make_testcase(
             tensor_view_shapes=NESTED_SHAPES,
             tensor_dtypes=(("float32", "int8"), "float16"),
@@ -124,11 +118,9 @@ class TestFlatOutputDtypes:
         )
         assert case.flat_output_dtypes == ("float32", "int8")
 
-    def test_no_output_indexes(self, make_testcase):
         case = make_testcase(tensor_view_shapes=FLAT_SHAPES, tensor_dtypes=("float32", "float32"))
         assert case.flat_output_dtypes == ()
 
-    def test_out_of_range_index_skipped(self, make_testcase):
         case = make_testcase(
             tensor_view_shapes=((2, 3),),
             tensor_dtypes=("float32",),
@@ -247,7 +239,7 @@ class TestValidateFrameworkApi:
 
 
 class TestCheckTensorConfiguration:
-    """Tests for _check_tensor_configuration — hard validation against API signature."""
+    """Tests for _check_api_signature — hard validation against API signature."""
 
     def setup_method(self):
         FrameworkApiInfoKeeper().clear_cache()
@@ -329,23 +321,6 @@ class TestCheckTensorConfiguration:
         assert case_bad.fail_reason == "PARAM_TYPE_MISMATCH"
 
         self._register_api(
-            "torch.test_tl_ok",
-            [
-                ParamInfo(name="tensors", type="tuple of Tensors"),
-                ParamInfo(name="out", type="Tensor", default="None", is_optional=True),
-            ],
-        )
-        case_ok = make_testcase(
-            api_name="torch.test_tl_ok",
-            tensor_view_shapes=(((2, 3), (2, 5)), (3, 3)),
-            tensor_dtypes=("float32", "float32"),
-            output_tensor_indexes=(1,),
-        )
-        case_ok.validate()
-        assert case_ok.is_valid
-
-    def test_single_tensor_nested_for_tensor_param_invalid(self, make_testcase):
-        self._register_api(
             "torch.test_nested_mismatch",
             [
                 ParamInfo(name="input", type="Tensor"),
@@ -360,6 +335,22 @@ class TestCheckTensorConfiguration:
         case.validate()
         assert not case.is_valid
         assert case.fail_reason == "PARAM_TYPE_MISMATCH"
+
+        self._register_api(
+            "torch.test_tl_ok",
+            [
+                ParamInfo(name="tensors", type="tuple of Tensors"),
+                ParamInfo(name="out", type="Tensor", default="None", is_optional=True),
+            ],
+        )
+        case_ok = make_testcase(
+            api_name="torch.test_tl_ok",
+            tensor_view_shapes=(((2, 3), (2, 5)), (3, 3)),
+            tensor_dtypes=("float32", "float32"),
+            output_tensor_indexes=(1,),
+        )
+        case_ok.validate()
+        assert case_ok.is_valid
 
     def test_api_not_found_logs_failure(self, make_testcase, caplog):
         case = make_testcase(
@@ -610,7 +601,7 @@ class TestCheckTensorConfiguration:
 
 
 class TestCheckMultiOverload:
-    """Tests for multi-overload matching in _check_tensor_configuration."""
+    """Tests for multi-overload matching in _check_api_signature."""
 
     def setup_method(self):
         FrameworkApiInfoKeeper().clear_cache()
@@ -620,43 +611,25 @@ class TestCheckMultiOverload:
         FrameworkApiInfoKeeper().clear_cache()
         _MANUAL_OVERRIDES.clear()
 
-    def test_multi_overload_matches_second(self, make_testcase):
-        FrameworkApiInfoKeeper().register(
-            "torch.test_multi",
-            [
-                [ParamInfo(name="input", type="Tensor"), ParamInfo(name="other", type="Tensor")],
-                [ParamInfo(name="input", type="Tensor")],
-            ],
-            source="test",
-        )
+    def test_multi_overload_match_matrix(self, make_testcase):
+        two_overloads = [
+            [ParamInfo(name="input", type="Tensor"), ParamInfo(name="other", type="Tensor")],
+            [ParamInfo(name="input", type="Tensor")],
+        ]
+
+        FrameworkApiInfoKeeper().register("torch.test_multi", two_overloads, source="test")
         case = make_testcase(api_name="torch.test_multi", tensor_view_shapes=((2, 3),), tensor_dtypes=("float32",))
         case.validate()
         assert case.is_valid
 
-    def test_multi_overload_matches_first(self, make_testcase):
-        FrameworkApiInfoKeeper().register(
-            "torch.test_multi2",
-            [
-                [ParamInfo(name="input", type="Tensor"), ParamInfo(name="other", type="Tensor")],
-                [ParamInfo(name="input", type="Tensor")],
-            ],
-            source="test",
-        )
+        FrameworkApiInfoKeeper().register("torch.test_multi2", two_overloads, source="test")
         case = make_testcase(
             api_name="torch.test_multi2", tensor_view_shapes=((2, 3), (2, 3)), tensor_dtypes=("float32", "float32")
         )
         case.validate()
         assert case.is_valid
 
-    def test_multi_overload_no_match(self, make_testcase):
-        FrameworkApiInfoKeeper().register(
-            "torch.test_multi3",
-            [
-                [ParamInfo(name="input", type="Tensor"), ParamInfo(name="other", type="Tensor")],
-                [ParamInfo(name="input", type="Tensor")],
-            ],
-            source="test",
-        )
+        FrameworkApiInfoKeeper().register("torch.test_multi3", two_overloads, source="test")
         case = make_testcase(
             api_name="torch.test_multi3",
             tensor_view_shapes=((2, 3), (2, 3), (2, 3)),
@@ -666,7 +639,6 @@ class TestCheckMultiOverload:
         assert not case.is_valid
         assert case.fail_reason == "INPUT_COUNT_EXCEEDED"
 
-    def test_multi_overload_tensorlist_vs_tensor(self, make_testcase):
         FrameworkApiInfoKeeper().register(
             "torch.test_multi_tl",
             [
@@ -689,7 +661,7 @@ class TestCheckMultiOverload:
 
 
 class TestOutputTensorExcludesFromInputCount:
-    """Tests for _check_tensor_configuration excluding output_tensor_indexes."""
+    """Tests for _check_api_signature excluding output_tensor_indexes."""
 
     def setup_method(self):
         FrameworkApiInfoKeeper().clear_cache()
@@ -699,8 +671,8 @@ class TestOutputTensorExcludesFromInputCount:
         FrameworkApiInfoKeeper().clear_cache()
         _MANUAL_OVERRIDES.clear()
 
-    def test_all_tensors_marked_output_invalidates(self, make_testcase):
-        """1 tensor with output_tensor_indexes=(0,) → 0 input tensors → invalid."""
+    def test_output_tensor_excluded_from_input_count(self, make_testcase):
+        """输出槽不计入输入张量数：全输出拒绝、单输出/双输出放行。"""
         FrameworkApiInfoKeeper().register(
             "torch.abs",
             [
@@ -716,8 +688,6 @@ class TestOutputTensorExcludesFromInputCount:
         assert not case.is_valid
         assert case.fail_reason == "ALL_TENSORS_MARKED_OUTPUT"
 
-    def test_output_tensor_excluded_from_count(self, make_testcase):
-        """2 tensors, 1 output → 1 input tensor, API needs 1 input → valid."""
         FrameworkApiInfoKeeper().register(
             "torch.abs_valid",
             [
@@ -735,8 +705,6 @@ class TestOutputTensorExcludesFromInputCount:
         case.validate()
         assert case.is_valid
 
-    def test_two_outputs_one_input_valid(self, make_testcase):
-        """3 tensors, 2 outputs → 1 input. API with 1 required tensor + 2 optional → valid."""
         FrameworkApiInfoKeeper().register(
             "torch.sort_like",
             [
@@ -825,7 +793,7 @@ class TestInplaceTensorMethod:
         assert case.output_dist == (2,)
         assert case.flat_precision_tolerances == ("1e-3", "1e-3")
 
-    def test_inplace_self_not_excluded_from_input_count(self, make_testcase):
+    def test_inplace_self_count_and_pure_output(self, make_testcase):
         FrameworkApiInfoKeeper().register(
             "torch.Tensor.fake_mul_",
             [
@@ -840,7 +808,6 @@ class TestInplaceTensorMethod:
         case.validate()
         assert case.is_valid
 
-    def test_inplace_pure_output_excludes_self(self, make_testcase):
         FrameworkApiInfoKeeper().register(
             "torch.Tensor.fake_sub_",
             [
@@ -888,7 +855,7 @@ class TestOutputConfigurationValidation:
         assert not case.is_valid
         assert case.fail_reason == "MISSING_REQUIRED_OUTPUT"
 
-    def test_required_tensor_list_out_wrong_and_correct_count(self, make_testcase):
+    def test_tensorlist_and_optional_out(self, make_testcase):
         info = APIParamInfo(
             api_name="torch_npu.test_tl_out",
             overloads=[
@@ -920,7 +887,6 @@ class TestOutputConfigurationValidation:
         case_ok.validate()
         assert case_ok.is_valid
 
-    def test_optional_out_passes_with_and_without_output(self, make_testcase):
         FrameworkApiInfoKeeper().register(
             "torch.opt_out",
             [
@@ -944,15 +910,16 @@ class TestOutputConfigurationValidation:
 
 
 class TestOutputConfigUnknownTensorListCount:
-    """Test _check_output_configuration when out_expected_count=0 with is_tensor_list=True.
+    """Test _check_output_slots when out_expected_count=0 with is_tensor_list=True.
 
     This happens for APIs parsed from TypeError multi-overload (e.g. torch.sort)
     where we know out is TensorList but don't know the exact count.
     """
 
-    def test_optional_tensor_list_unknown_count_no_out_passes(self, make_testcase):
-        info = APIParamInfo(
-            api_name="torch.sort_like",
+    def test_unknown_count_matrix(self, make_testcase):
+        """out_expected_count=0（TypeError 解析路径）下 optional/required × 有/无 out 矩阵。"""
+        optional_out = lambda name: APIParamInfo(  # noqa: E731
+            api_name=name,
             overloads=[
                 [
                     ParamInfo(name="input", type="Tensor"),
@@ -962,24 +929,24 @@ class TestOutputConfigUnknownTensorListCount:
             _return_counts=[0],
             source="test",
         )
-        FrameworkApiInfoKeeper().register("torch.sort_like", info)
+        required_out = lambda name: APIParamInfo(  # noqa: E731
+            api_name=name,
+            overloads=[
+                [
+                    ParamInfo(name="input", type="Tensor"),
+                    ParamInfo(name="out", type="tuple of Tensors", is_keyword_only=True),
+                ]
+            ],
+            _return_counts=[0],
+            source="test",
+        )
+
+        FrameworkApiInfoKeeper().register("torch.sort_like", optional_out("torch.sort_like"))
         case = make_testcase(api_name="torch.sort_like", tensor_view_shapes=((4, 4),), tensor_dtypes=("float32",))
         case.validate()
         assert case.is_valid
 
-    def test_optional_tensor_list_unknown_count_with_out_passes(self, make_testcase):
-        info = APIParamInfo(
-            api_name="torch.sort_like2",
-            overloads=[
-                [
-                    ParamInfo(name="input", type="Tensor"),
-                    ParamInfo(name="out", type="tuple of Tensors", is_optional=True, is_keyword_only=True),
-                ]
-            ],
-            _return_counts=[0],
-            source="test",
-        )
-        FrameworkApiInfoKeeper().register("torch.sort_like2", info)
+        FrameworkApiInfoKeeper().register("torch.sort_like2", optional_out("torch.sort_like2"))
         case = make_testcase(
             api_name="torch.sort_like2",
             tensor_view_shapes=((4, 4), (4, 4), (4, 4)),
@@ -989,19 +956,7 @@ class TestOutputConfigUnknownTensorListCount:
         case.validate()
         assert case.is_valid
 
-    def test_required_tensor_list_unknown_count_with_out_passes(self, make_testcase):
-        info = APIParamInfo(
-            api_name="torch.sort_like3",
-            overloads=[
-                [
-                    ParamInfo(name="input", type="Tensor"),
-                    ParamInfo(name="out", type="tuple of Tensors", is_keyword_only=True),
-                ]
-            ],
-            _return_counts=[0],
-            source="test",
-        )
-        FrameworkApiInfoKeeper().register("torch.sort_like3", info)
+        FrameworkApiInfoKeeper().register("torch.sort_like3", required_out("torch.sort_like3"))
         case = make_testcase(
             api_name="torch.sort_like3",
             tensor_view_shapes=((4, 4), (4, 4)),
@@ -1011,19 +966,7 @@ class TestOutputConfigUnknownTensorListCount:
         case.validate()
         assert case.is_valid
 
-    def test_required_tensor_list_unknown_count_no_out_fails(self, make_testcase):
-        info = APIParamInfo(
-            api_name="torch.sort_like4",
-            overloads=[
-                [
-                    ParamInfo(name="input", type="Tensor"),
-                    ParamInfo(name="out", type="tuple of Tensors", is_keyword_only=True),
-                ]
-            ],
-            _return_counts=[0],
-            source="test",
-        )
-        FrameworkApiInfoKeeper().register("torch.sort_like4", info)
+        FrameworkApiInfoKeeper().register("torch.sort_like4", required_out("torch.sort_like4"))
         case = make_testcase(api_name="torch.sort_like4", tensor_view_shapes=((4, 4),), tensor_dtypes=("float32",))
         case.validate()
         assert not case.is_valid

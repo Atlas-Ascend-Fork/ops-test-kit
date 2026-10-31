@@ -160,6 +160,16 @@ class FrameworkAdapter(ABC):
         不直连子包模块。
         """
 
+    # ── 设备态 ──────────────────────────────────────────────
+
+    def setup_device_state(self, backend, testcase, process_ctx):  # noqa: B027  # 可选钩子：默认无操作
+        """执行段前的进程级设备态配置（默认无操作）。
+
+        torch：torch_npu CubeMathType 精度模式（torch/cube_math_type.py，
+        执行锁内、golden NPU 段与被测段共用同一配置）；tf/onnx 无对应概念。
+        由 worker 编排层经本钩子触达，不直连子包模块。
+        """
+
 
 def get_adapter(framework: str = "torch") -> FrameworkAdapter:
     """按框架名取 Adapter 单例（惰性加载子包并缓存）。"""

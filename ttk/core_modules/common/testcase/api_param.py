@@ -195,7 +195,7 @@ def match_overload(api_name, input_tensor_count, attributes=None, tensor_distrib
     return tied[0][2], tied[0][1]
 
 
-def coerce_value(raw, target_type):
+def _coerce_value(raw, target_type):
     """Coerce a raw value from CSV attributes to the expected Python type.
 
     Supports union types expressed as 'type1|type2' (e.g., 'int|tuple of ints').
@@ -209,7 +209,7 @@ def coerce_value(raw, target_type):
         errors = []
         for member_type in target_type.split("|"):
             try:
-                return coerce_value(raw, member_type)
+                return _coerce_value(raw, member_type)
             except (ValueError, TypeError) as e:
                 errors.append(str(e))
         raise ValueError(
@@ -277,17 +277,17 @@ def coerce_value(raw, target_type):
     if m:
         elem_type = m.group(1)
         if isinstance(raw, (tuple, list)):
-            return tuple(coerce_value(v, elem_type) for v in raw)
+            return tuple(_coerce_value(v, elem_type) for v in raw)
         if isinstance(raw, bool if elem_type == "bool" else (int if elem_type == "int" else float)):
-            return (coerce_value(raw, elem_type),)
+            return (_coerce_value(raw, elem_type),)
         if isinstance(raw, str):
             if not raw or raw in ("[]", "()"):
                 return ()
             try:
                 parsed = ast.literal_eval(raw)
                 if isinstance(parsed, (tuple, list)):
-                    return tuple(coerce_value(v, elem_type) for v in parsed)
-                return (coerce_value(parsed, elem_type),)
+                    return tuple(_coerce_value(v, elem_type) for v in parsed)
+                return (_coerce_value(parsed, elem_type),)
             except (ValueError, SyntaxError) as e:
                 raise ValueError(f"Cannot coerce {raw!r} to {target_type}: {e}") from e
         raise ValueError(f"Cannot coerce {raw!r} to {target_type}")

@@ -62,20 +62,24 @@ _TF_NON_TENSOR_PARAM_NAMES = frozenset(
 )
 
 
+def _is_tf_api(api_name) -> bool:
+    """TF 系 api_name 判定（前缀守卫单源：防 torch 进程触达 TF C 扩展）。"""
+    return isinstance(api_name, str) and api_name.startswith(("tf.", "tensorflow."))
+
+
 def _is_tensor_param(p: inspect.Parameter, api_name: str) -> bool:
-    """Determine if a TF op parameter is a tensor parameter.
+    """判 TF 参数是否张量，按注解/名字/raw_ops 约定/位置序判定：
 
-    Strategy:
-    1. If annotation is tf.Tensor/tf.Variable → True.
-    2. If param name is a known non-tensor name (name, axis, dims, etc.) → False.
-    3. If annotation is a scalar type (int, float, bool, str) → False.
-    4. tf.raw_ops.* convention: all params except 'name' are tensors.
-    5. If annotation is Annotated/Any/empty → treat positional params as tensors.
+    1. 注解是 tf.Tensor/tf.Variable（含子类）→ 张量；
+    2. 注解是标量 dtype 名（int/float/bool/str/dtype）→ 非张量；
+    3. 参数名在已知非张量名单（name 等）→ 非张量；
+    4. tf.raw_ops.* 约定：除 name 外全部按张量；
+    5. 剩余（无注解/其他注解）：位置或关键字参数按张量。
     """
-
     import tensorflow as tf
 
     ann = p.annotation
+    ann_name = None
     if ann is not inspect.Parameter.empty:
         try:
             if isinstance(ann, type) and issubclass(ann, (tf.Tensor, tf.Variable)):
@@ -83,13 +87,8 @@ def _is_tensor_param(p: inspect.Parameter, api_name: str) -> bool:
         except TypeError:
             pass
         ann_name = getattr(ann, "__name__", str(ann))
-        if ann_name in ("int", "float", "bool", "str", "dtype"):
-            return False
-        if p.name in _TF_NON_TENSOR_PARAM_NAMES:
-            return False
-        if api_name.startswith(("tf.raw_ops.", "tensorflow.raw_ops.")):
-            return True
-        return p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
+    if ann_name in ("int", "float", "bool", "str", "dtype"):
+        return False
     if p.name in _TF_NON_TENSOR_PARAM_NAMES:
         return False
     if api_name.startswith(("tf.raw_ops.", "tensorflow.raw_ops.")):
@@ -162,8 +161,8 @@ def extract_tf_params(api_name: str) -> Optional[APIParamInfo]:
         )
         params.append(pi)
 
-    # 参数级可变性 / resource / 列表输入落位（OpDef 按名匹配，见 _fill_opdef_flags）
-    _fill_opdef_flags(api_name, params)
+    # 参数级可变性 / resource / 列表输入落位（OpDef 按名匹配，见 _apply_opdef_flags）
+    _apply_opdef_flags(api_name, params)
 
     overload = OverloadInfo(params=params)
     info = APIParamInfo(
@@ -191,7 +190,7 @@ def _lookup_op_def(api_name):
     仅 TF 系 api_name 才 import tensorflow: torch 进程先加载 torch_npu 后再
     加载 TF 的 C 扩展会段错误(两大框架运行时冲突), 故非 TF 前缀直接返回。
     """
-    if not isinstance(api_name, str) or not api_name.startswith(("tf.", "tensorflow.")):
+    if not _is_tf_api(api_name):
         return None
     try:
         from tensorflow.python.framework import op_def_registry
@@ -223,7 +222,7 @@ def tensor_list_input_names(api_name):
     return frozenset(a.name for a in op_def.input_arg if a.number_attr or a.type_list_attr)
 
 
-def _fill_opdef_flags(api_name, params):
+def _apply_opdef_flags(api_name, params):
     """OpDef 元数据 → ParamInfo 落位（可变性 / resource / 列表输入，按名匹配）。
 
     Python 签名看不到的静态事实由 OpDef 补齐：is_ref / DT_RESOURCE 记
@@ -268,7 +267,7 @@ def _api_info(api_name):
     非 TF 前缀短路返回 None —— torch 名不触达 keeper（防 torch 进程内
     TF C 扩展加载），与 _lookup_op_def 的前缀守卫同语义。
     """
-    if not isinstance(api_name, str) or not api_name.startswith(("tf.", "tensorflow.")):
+    if not _is_tf_api(api_name):
         return None
     from ..info_keeper import FrameworkApiInfoKeeper
 
@@ -363,11 +362,11 @@ def reset_ref_variables(dev_tensors, raw_inputs):
     raw_inputs 是原始 numpy 输入, 不被任何执行阶段改写。
     """
     for i, t in enumerate(dev_tensors or ()):
-        if is_ref_variable(t) and i < len(raw_inputs) and raw_inputs[i] is not None:
+        if is_tf_variable(t) and i < len(raw_inputs) and raw_inputs[i] is not None:
             t.assign(raw_inputs[i])
 
 
-def is_ref_variable(value):
+def is_tf_variable(value):
     """value 是否为 tf.Variable(to_device/clone 需 bypass 普通张量处理)。"""
     import tensorflow as tf
 

@@ -594,7 +594,7 @@ class TestNormalizeIdempotent:
         assert case.input_dtypes == dtypes
 
     def test_normalized_then_normalize_again(self):
-        """Calling _normalize_compressed_fields twice produces same result."""
+        """Calling _expand_compressed_fields twice produces same result."""
         case = _make_testcase(
             input_shapes=(((3, 4), (5, 4)), (8,)),
             input_dtypes=("float16",),
@@ -602,7 +602,7 @@ class TestNormalizeIdempotent:
         _validate(case)
         first = case.input_dtypes
         # Normalize again
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.input_dtypes == first
 
 

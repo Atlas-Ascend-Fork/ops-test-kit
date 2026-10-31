@@ -53,10 +53,10 @@ GEIR_KERNEL_WHITELIST = (
     "ttk.core_modules.kernel.testcase",  # TestcaseKernel 算子级用例基类
     "ttk.core_modules.kernel.device_state",  # 轮间 clear_device_state（与 e2e 共用形态）
 )
-# common 内允许 import ttk.remote 的文件（仅 instance.py 与 xpu.py）
+# common 内允许 import ttk.remote 的文件（仅 instance.py 与 xpu/dispatch.py）
 COMMON_REMOTE_ALLOW = (
     "ttk/core_modules/common/instance.py",
-    "ttk/core_modules/common/xpu.py",
+    "ttk/core_modules/common/xpu/dispatch.py",
 )
 
 

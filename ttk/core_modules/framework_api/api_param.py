@@ -26,14 +26,14 @@ Usage:
 
 import logging
 
-from ttk.core_modules.common.testcase.api_param import coerce_value, match_overload
+from ttk.core_modules.common.testcase.api_param import _coerce_value, match_overload
 
 __all__ = [
     "ParamPlan",
     "build_positional_args",
-    "coerce_value",
-    "match_overload",
 ]
+# match_overload / _coerce_value 为 common 上提的复用件，仅框架内显式 import，
+# 不再作为本模块公开面承诺
 
 
 class ParamPlan:
@@ -124,9 +124,9 @@ class ParamPlan:
                 # is "Tensor" and coercion would fail.
                 kwargs[param.name] = attrs[param.name]
         elif param.name in attrs:
-            kwargs[param.name] = coerce_value(attrs[param.name], param.type)
+            kwargs[param.name] = _coerce_value(attrs[param.name], param.type)
         elif param.default is not None:
-            val = coerce_value(param.default, param.type)
+            val = _coerce_value(param.default, param.type)
             kwargs[param.name] = val
 
     def _place_tensor_param(self, param, tensor_queue, attrs, args, record_binding):
@@ -140,14 +140,14 @@ class ParamPlan:
         elif param.name in attrs and param.name != "self" and not tensor_queue:
             raw = attrs[param.name]
             try:
-                args.append(coerce_value(raw, param.type))
+                args.append(_coerce_value(raw, param.type))
             except (ValueError, TypeError):
                 logging.warning(
                     f"{self.api_name}: scalar fallback for param '{param.name}' "
                     f"(declared type={param.type}, value={raw!r})"
                 )
                 try:
-                    args.append(coerce_value(raw, "Number"))
+                    args.append(_coerce_value(raw, "Number"))
                 except (ValueError, TypeError):
                     # TF 无注解签名里的枚举/字符串参数(如 dequantize 的 mode)会被
                     # 归类为 Tensor，数值强转也失败时按原值透传，由 API 自行校验
@@ -197,9 +197,9 @@ class ParamPlan:
             elif param.is_tensor_like:
                 self._place_tensor_param(param, tensor_queue, attrs, args, record_binding)
             elif param.name in attrs:
-                args.append(coerce_value(attrs[param.name], param.type))
+                args.append(_coerce_value(attrs[param.name], param.type))
             elif param.default is not None:
-                args.append(coerce_value(param.default, param.type))
+                args.append(_coerce_value(param.default, param.type))
             else:
                 args.append(None)
 

@@ -10,7 +10,7 @@
 
 
 """
-Profiling utility functions shared between profiling.py and graph runners.
+Profiling utility functions shared between worker.py and graph runners.
 
 Framework-neutral — framework-specific fixups are delegated to the
 FrameworkAdapter（bind_tensors / eager 钩子）与 backend 方法。
@@ -20,6 +20,46 @@ import hashlib
 import logging
 
 import numpy as np
+
+from ttk.core_modules.common.testcase.batch import batch_relation_kwargs
+from ttk.utilities.dtypes import is_4bit_dtype, unpack_4bits
+
+from ..common.invoke import accepts_var_keyword, sig_params
+
+# eager（execute.py）与图模式（torch/graph_runner.py）共用的 warmup 轮数
+WARMUP_COUNT = 1
+
+
+def build_plugin_call(
+    func, testcase, switches, plan, nested_inputs, *, backend, use_numpy, device=None, input_ranges=None
+):
+    """按 ParamPlan 装配插件入参（input/golden 插件共用）：build_args + 上下文注入 + 签名过滤。
+
+    extra = testcase_name/tensor_formats/tensor_dtypes/use_numpy/short_soc_version/
+    backend（device 与 input_ranges 可选）+ attributes 未消耗项 + batch_relation_kwargs；
+    func 无 **kwargs 时只传已声明形参。返回 (args, kwargs)。
+    """
+    args, kwargs, extra_attrs = plan.build_args(nested_inputs)
+    extra = {
+        "backend": backend,
+        "tensor_formats": testcase.tensor_formats,
+        "tensor_dtypes": testcase.tensor_dtypes,
+        "use_numpy": use_numpy,
+        "short_soc_version": getattr(switches, "short_soc_version", None),
+        "testcase_name": testcase.testcase_name,
+    }
+    if device is not None:
+        extra["device"] = device
+    if input_ranges is not None:
+        extra["input_ranges"] = input_ranges
+    extra.update(extra_attrs)
+    extra.update(batch_relation_kwargs(testcase))
+    params = sig_params(func)
+    if accepts_var_keyword(params):
+        kwargs.update(extra)
+    else:
+        kwargs.update({k: v for k, v in extra.items() if k in params})
+    return args, kwargs
 
 
 def compute_output_md5(arrays):
@@ -106,6 +146,15 @@ def prepare_device_args(testcase, backend, dev_id, plan, raw_inputs, adapter=Non
     return args, kwargs
 
 
+def _unpack_4bit_guard(src, dst_dtype, label):
+    """unpack_4bits 统一守卫：失败保留原样送比对（比对必挂，此处留指向性线索）。"""
+    try:
+        return unpack_4bits(src, dst_dtype)
+    except Exception as exc:
+        logging.debug(f"[4bit] unpack {label} as {dst_dtype} failed: {exc}")
+        return None
+
+
 def unpack_4bit_outputs(testcase, result_nps):
     """Unpack uint8 packed 4-bit outputs to float4/int4 numpy arrays.
 
@@ -120,8 +169,6 @@ def unpack_4bit_outputs(testcase, result_nps):
     if not output_dtypes:
         return result_nps
 
-    from ttk.utilities import unpack_4bits
-
     for idx, dtype_str in enumerate(output_dtypes):
         if idx >= len(result_nps) or result_nps[idx] is None:
             continue
@@ -129,9 +176,42 @@ def unpack_4bit_outputs(testcase, result_nps):
             continue
         ds = str(dtype_str)
         if ("float4" in ds or "int4" in ds) and result_nps[idx].dtype == np.uint8:
-            try:
-                result_nps[idx] = unpack_4bits(result_nps[idx], ds)
-            except Exception as e:
-                # 解包失败保留 uint8 原样送比对（比对必挂，此处留指向性线索）
-                logging.debug(f"[unpack_4bit_outputs] unpack output#{idx} as {ds} failed: {e}")
+            unpacked = _unpack_4bit_guard(result_nps[idx], ds, f"output#{idx}")
+            if unpacked is not None:
+                result_nps[idx] = unpacked
     return result_nps
+
+
+def align_4bit_golden(output_nps, golden_nps):
+    """golden 为 4bit dtype 而输出 dtype 更宽时的比对前对齐。
+
+    两种封装形态统一先 view 成 uint8 再 unpack 到 golden 的 4bit dtype：
+      1. 输出 uint8/int8 —— 每字节 2 个 4bit 值；
+      2. 输出 int32/fp32 等宽 dtype —— 每 32bit 元素 8 个 4bit 值。
+    消除纯封装 dtype 差异，让数值比对与容差解析落在 golden 的 4bit dtype 上。
+    奇数元素数时打包尾部的填充 nibble（pack_4bits 奇数补零约定）裁齐 golden
+    元素数；仅当多出尾部在打包粒度内（< 2*itemsize 个 nibble，即只可能是末
+    元素填充位）且全为零时才裁——超出粒度或尾部非零属输出尺寸异常，保留
+    unpack 结果让长度比对诚实暴露（无条件截断会把尺寸 bug 放行成假 PASS）。
+    CSV 已声明 4bit 输出的场景在执行段 unpack_4bit_outputs 完成，此处为
+    golden 侧驱动的兜底（golden 来自插件/回放时 dtype 以 golden 为准）。
+    """
+    if not output_nps or not golden_nps:
+        return output_nps
+
+    for i in range(min(len(output_nps), len(golden_nps))):
+        res, gld = output_nps[i], golden_nps[i]
+        if res is None or gld is None:
+            continue
+        if not isinstance(res, np.ndarray) or not isinstance(gld, np.ndarray):
+            continue
+        if not is_4bit_dtype(gld.dtype) or res.dtype == gld.dtype:
+            continue
+        unpacked = _unpack_4bit_guard(res, gld.dtype, f"output#{i}")
+        if unpacked is None:
+            continue
+        surplus = unpacked.size - gld.size
+        if 0 < surplus < 2 * res.itemsize and not unpacked[gld.size :].any():
+            unpacked = unpacked[: gld.size]
+        output_nps[i] = unpacked
+    return output_nps

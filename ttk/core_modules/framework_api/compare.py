@@ -9,8 +9,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 
 """
-E2E 比对：精度比对（evaluate_eager/graph_precision）、XPU 三方采集输入派生、
-调试 dump 落盘。golden 生成见 golden.py。
+E2E 比对：精度比对（evaluate_eager/graph_precision）、调试 dump 落盘。
+golden 生成见 golden.py，XPU 三方采集输入派生见 xpu.py。
 """
 
 import logging
@@ -18,52 +18,12 @@ import logging
 from ttk.core_modules.common.dump import (
     DataDumper,
 )
-from ttk.utilities.container import nest_by_distribution
 from ttk.utilities.dtypes import is_float_dtype
 
 from ..common.comparison import CompareHooks, compare_with_hooks
 from ..common.comparison.resolve import resolve_tolerance
 from ..common.plugin import SpecResolver
 from .result import FrameworkApiReturnStructure
-
-
-def e2e_xpu_inputs(testcase, raw_inputs):
-    """raw_inputs (flat numpy) re-nested, pure outputs filtered → top-level input slots."""
-    dist = testcase.tensor_list_dist
-    nested = nest_by_distribution(list(raw_inputs), dist) if dist else list(raw_inputs)
-    out_indices = set(testcase.output_tensor_indexes or ())
-    # output_tensor_indexes 是 top-level 槽位索引（对齐 _check_output_configuration
-    # 与 e2e_xpu_input_names）：TensorList 槽也只占一个槽位
-    return [slot for real_idx, slot in enumerate(nested) if real_idx not in out_indices]
-
-
-def e2e_xpu_input_dtypes(testcase):
-    """Logical tensor dtypes (pure outputs filtered) for XPU schema.
-
-    过滤规则与 e2e_xpu_inputs 一致（输出槽剔除、TensorList 保持嵌套），dtype
-    为 CSV 声明值（如 complex32），与 raw_inputs 的 tensor_list_dist 重排一致。
-    """
-    dist = testcase.tensor_list_dist
-    flat_dtypes = testcase.flat_tensor_dtypes or ()
-    nested = nest_by_distribution(list(flat_dtypes), dist) if dist else list(flat_dtypes)
-    out_indices = set(testcase.output_tensor_indexes or ())
-    return [slot for real_idx, slot in enumerate(nested) if real_idx not in out_indices]
-
-
-def e2e_xpu_input_names(testcase):
-    """Input tensor param names (pure outputs filtered) for XPU schema."""
-    plan = testcase.get_param_plan()
-    if plan is None:
-        return []
-    out_indices = set(testcase.output_tensor_indexes or ())
-    names = []
-    real_idx = 0
-    for p in plan.overload_params:
-        if p.is_tensor_like and p.name != "out":
-            if real_idx not in out_indices:
-                names.append(p.name)
-            real_idx += 1
-    return names
 
 
 def _make_dumper(testcase, switches) -> "DataDumper":

@@ -17,7 +17,7 @@ import pickle
 import pytest
 
 from ttk.core_modules.framework_api.api_model import APIParamInfo, ParamInfo, split_by_comma
-from ttk.core_modules.framework_api.torch.npu_declaration import _normalize_npu_type, _parse_npu_declaration
+from ttk.core_modules.framework_api.torch.extract_declaration import _normalize_npu_type, _parse_npu_declaration
 from ttk.core_modules.framework_api.torch.param_extractor import (
     _MANUAL_OVERRIDES,
     _annotation_to_type,
@@ -177,8 +177,9 @@ class TestParseSignature:
         if "*" in sig:
             assert all(p.is_keyword_only for p in params[1:])
 
-    def test_empty_and_names_only_fallback(self):
-        """空签名→None；无类型签名→按名字推断类型（input→Tensor, dim→int, keepdim→bool）。"""
+    def test_empty_fallback_and_torch214_index_add(self):
+        """空签名→None；无类型签名→按名字推断（input→Tensor, dim→int, keepdim→bool）；
+        torch 2.14 docstring 首行完整签名（报错形态）：alpha 解析为 Number。"""
         assert _parse_params_from_signature("") is None
         assert _parse_params_from_signature("  ") is None
 
@@ -188,8 +189,6 @@ class TestParseSignature:
         assert params[1].type == "int"
         assert params[2].type == "bool"
 
-    def test_torch214_index_add_signature(self):
-        """torch 2.14 docstring 首行完整签名（报错形态）：alpha 解析为 Number。"""
         sig = "input: Tensor, dim: int, index: Tensor, source: Tensor, *, alpha: Union[Number, _complex] = 1, out: Optional[Tensor]"
         params = _parse_params_from_signature(sig)
         alpha = next(p for p in params if p.name == "alpha")
@@ -247,16 +246,15 @@ def test_normalize_npu_type(npu_type, expected):
 
 
 class TestParseNpuDeclaration:
-    def test_tensor_list_and_return_type_skipped(self):
-        """TensorList 类型保留；'-> Tensor' 返回类型被跳过。"""
+    def test_tensorlist_return_skip_and_star_keyword_only(self):
+        """TensorList 类型保留、'-> Tensor' 返回类型跳过；'*' 后参数 keyword_only，
+        可选性只看默认值/'?' 标记。"""
         params = _parse_npu_declaration("TensorList tensors, int dim")
         assert params[0].type == "tuple of Tensors"
 
         params = _parse_npu_declaration("Tensor input -> Tensor")
         assert len(params) == 1
 
-    def test_star_makes_keyword_only(self):
-        """'*' 后的参数标记为 keyword_only 但不自动变为可选：可选性只看默认值/'?' 标记。"""
         params = _parse_npu_declaration("Tensor input, *, Tensor? smooth_scales=None, Tensor? group_index=None")
         assert len(params) == 3
         assert not params[0].is_keyword_only
@@ -303,8 +301,9 @@ class TestManualOverrides:
 
 
 class TestExtractTorchApi:
-    def test_torch_add(self):
-        """torch.add 提取出 ≥2 个 tensor 参数。"""
+    def test_torch_add_and_div(self):
+        """torch.add 提取出 ≥2 个 tensor 参数；torch.div 有 ≥2 个 overload 且
+        match_overload(2)/(1) 均匹配。"""
         try:
             import torch  # noqa: F401
         except ImportError:
@@ -313,12 +312,6 @@ class TestExtractTorchApi:
         assert info is not None
         assert info.tensor_count >= 2
 
-    def test_torch_div_multi_overload(self):
-        """torch.div 有 ≥2 个 overload，match_overload(2) 和 match_overload(1) 均匹配。"""
-        try:
-            import torch  # noqa: F401
-        except ImportError:
-            pytest.skip("torch not available")
         info = extract_api_params("torch.div")
         assert len(info.overloads) >= 2
         assert info.match_overload(2)[0]
@@ -428,11 +421,11 @@ class TestMatchOverload:
 class TestTensorMethodSelf:
     def test_resolve_and_inject_self(self):
         """torch.Tensor.add_ 解析成功；get_api_params 注入 self 参数。"""
+        from ttk.core_modules.framework_api.api_model import is_tensor_method_name
         from ttk.core_modules.framework_api.api_model import resolve_function as _resolve_function
-        from ttk.core_modules.framework_api.torch.param_extractor import _is_tensor_method
 
-        assert _is_tensor_method("torch.Tensor.add_")
-        assert not _is_tensor_method("torch.add")
+        assert is_tensor_method_name("torch.Tensor.add_")
+        assert not is_tensor_method_name("torch.add")
 
         try:
             import torch  # noqa: F401
@@ -452,24 +445,12 @@ class TestNormalizeArgsTypeUnion:
         ("raw", "expected"),
         [
             ("int, float, inf, -inf, 'fro', 'nuc'", "int|float|str"),
-        ],
-        ids=["comma-enum"],
-    )
-    def test_comma_separated_union(self, raw, expected):
-        """逗号分隔的 union 类型解析（含枚举值、tuple 变体、去重）。"""
-        from ttk.core_modules.framework_api.torch.param_extractor import _normalize_args_type
-
-        assert _normalize_args_type(raw) == expected
-
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [
             ("Tensor or Number", "Number"),  # Tensor 成员被过滤
         ],
-        ids=["tensor-filtered"],
+        ids=["comma-enum", "or-tensor-filtered"],
     )
-    def test_or_union(self, raw, expected):
-        """'or' 分隔的 union 类型解析（Tensor 成员被过滤，由 overload 处理）。"""
+    def test_comma_and_or_union(self, raw, expected):
+        """逗号/'or' 分隔的 union 类型解析（Tensor 成员被过滤，由 overload 处理）。"""
         from ttk.core_modules.framework_api.torch.param_extractor import _normalize_args_type
 
         assert _normalize_args_type(raw) == expected
@@ -488,9 +469,9 @@ class TestCoerceValueUnion:
     )
     def test_coerce_union_type(self, value, type_str, expected):
         """coerce_value 对 union 类型按值自动选择正确分支转换。"""
-        from ttk.core_modules.framework_api.api_param import coerce_value
+        from ttk.core_modules.framework_api.api_param import _coerce_value
 
-        assert coerce_value(value, type_str) == expected
+        assert _coerce_value(value, type_str) == expected
 
 
 # == _enrich_types_from_annotations =========================================
@@ -548,7 +529,7 @@ class TestNnFunctionalPyi:
             import torch  # noqa: F401
         except ImportError:
             pytest.skip("torch not available")
-        from ttk.core_modules.framework_api.torch.pyi_loader import _parse_pyi_param_str
+        from ttk.core_modules.framework_api.torch.extract_pyi import _parse_pyi_param_str
 
         info = extract_api_params("torch.nn.functional.conv_tbc")
         assert info is not None
@@ -649,7 +630,7 @@ class TestAtenSchemaExtraction:
         assert bias.is_optional
 
     def test_aten_add_multi_overload_and_defaults(self):
-        """torch.ops.aten.add：≥10 个 overload，alpha 默认值=1。"""
+        """torch.ops.aten.add：≥10 个 overload，alpha 默认值=1；不存在的 aten op → None。"""
         try:
             import torch  # noqa: F401
         except ImportError:
@@ -663,11 +644,9 @@ class TestAtenSchemaExtraction:
                 alpha = next(p for p in ov.params if p.name == "alpha")
                 assert alpha.is_optional
                 assert alpha.default == 1
-                return
-        pytest.fail("未找到含 alpha 的 tensor overload")
-
-    def test_aten_nonexistent_returns_none(self):
-        """不存在的 aten op → None。"""
+                break
+        else:
+            pytest.fail("未找到含 alpha 的 tensor overload")
         assert extract_api_params("torch.ops.aten.nonexistent_op_xyz") is None
 
 
@@ -746,32 +725,15 @@ def test_parse_return_count(line, expected):
 
 
 class TestReturnCountAndOutUpgrade:
-    @pytest.mark.parametrize(
-        ("api", "expected_count"),
-        [
-            ("torch.topk", 2),
-        ],
-        ids=["topk"],
-    )
-    def test_return_count(self, api, expected_count):
-        """实测 torch API 的 return_count。"""
-        info = extract_api_params(api)
+    def test_return_count_and_out_upgrade(self):
+        """多返回值 API（torch.topk）：return_count=2，out 是 TensorList 且
+        out_expected_count 等于 return_count。"""
+        info = extract_api_params("torch.topk")
         assert info is not None
-        assert info.overloads[0].return_count == expected_count
-
-    @pytest.mark.parametrize(
-        ("api", "expected_out_count"),
-        [
-            ("torch.topk", 2),
-        ],
-        ids=["topk"],
-    )
-    def test_out_is_tensor_list_with_expected_count(self, api, expected_out_count):
-        """多返回值 API 的 out 是 TensorList，out_expected_count 等于 return_count。"""
-        info = extract_api_params(api)
+        assert info.overloads[0].return_count == 2
         ov = info.overloads[0]
         assert ov.layout.is_out_tensor_list
-        assert ov.layout.out_expected_count == expected_out_count
+        assert ov.layout.out_expected_count == 2
 
 
 # == npu_hans decode/encode =================================================
@@ -812,16 +774,13 @@ class TestInplaceStripping:
         except Exception:
             return False
 
-    def test_strips_inplace_when_variant_exists(self):
+    def test_strips_inplace_except_functional_namespace(self):
         if not self._torch_available():
             pytest.skip("torch not importable")
         info = extract_api_params("torch.relu")
         assert info is not None
         assert "inplace" not in [p.name for p in info.params], "relu_ 存在时应剥离 inplace"
 
-    def test_functional_namespace_keeps_inplace(self):
-        if not self._torch_available():
-            pytest.skip("torch not importable")
         info = extract_api_params("torch.nn.functional.relu")
         assert info is not None
         assert "inplace" in [p.name for p in info.params], "torch.nn. 排除域内 inplace 应保留"

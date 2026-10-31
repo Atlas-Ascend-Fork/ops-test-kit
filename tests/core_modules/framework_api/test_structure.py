@@ -243,3 +243,27 @@ def test_onnx_om_is_runtime_output():
 
     gitignore = _Path(__file__).resolve().parents[3] / ".gitignore"
     assert "/onnx_om/" in gitignore.read_text(encoding="utf-8")
+
+
+_RETIRED_RANK_STAGING_OP_MARKERS = (
+    "MatmulReduceScatter",
+    "AllGatherMatmul",
+    "MatmulAllReduce",
+    "MatmulAlltoAll",
+    "AlltoAllMatmul",
+    "QuantMatmulAllReduce",
+    "GroupedMatMul",
+    "AlltoAllvGrouped",
+    "BatchMatMul",
+    "npu_moe_distribute_combine",
+    "bmm_reduce_scatter",
+    "all_to_all_all_gather",
+)
+
+
+def test_worker_carries_no_rank_op_names():
+    """多卡编排层（worker.py）零算子名：rank 输入算子特定语义在
+    torch/rank_inputs.py，编排层不得再出现算子名清单。"""
+    source = (FRAMEWORK_API / "worker.py").read_text(encoding="utf-8")
+    leaked = [marker for marker in _RETIRED_RANK_STAGING_OP_MARKERS if marker in source]
+    assert not leaked, f"operator names leaked into the multi-device orchestration path: {leaked}"

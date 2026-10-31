@@ -98,7 +98,7 @@ def test_dynamic_slot_respects_compressed_storage_broadcast(kind, compressed):
         case = make_aclnn_case()
         case.tensor_storage_shapes = ((2,),) if compressed else ((2,), None, (2,))
 
-    case._normalize_compressed_fields()
+    case._expand_compressed_fields()
     case._check_dyn_shape_slots()
 
     if compressed:
@@ -425,14 +425,11 @@ def test_tf_graph_rejects_preprocess_tensor_materialization(monkeypatch, caplog)
 # ── absorb 协议（npu_preprocess 结果落地）─────────────────────────────
 
 
-def test_absorb_none_without_declaration_is_noop():
-    """无 -1 声明 × None 返回 → 基类默认 no-op（纯副作用）。"""
+def test_absorb_none_declared_undeclared():
+    """无 -1 声明 × None 返回 → 默认 no-op；有 -1 声明 × 槽位未反刷 → 契约失败。"""
     case = make_case(((8,),), ("float32",))
     assert case.absorb_preprocess(None, None) is None
 
-
-def test_absorb_none_with_declaration_requires_slot_refresh():
-    """有 -1 声明 × None 返回 × 槽位未反刷 → 契约失败（提示双通道）。"""
     case = make_case()  # ((-1,),)
     with pytest.raises(RuntimeError, match="not materialized.*dict return or slot-table write"):
         case.absorb_preprocess(None, None)

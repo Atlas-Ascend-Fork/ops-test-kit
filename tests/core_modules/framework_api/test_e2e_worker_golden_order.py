@@ -77,6 +77,9 @@ class _NoOpAdapter:
     def run_graph(self, *args, **kwargs):
         return [], None, None, None
 
+    def setup_device_state(self, _backend, _testcase, _process_ctx):
+        return None
+
 
 def _backend(is_npu=False):
     return SimpleNamespace(
@@ -322,7 +325,7 @@ def test_inplace_output_slots_align_with_loader(tmp_path):
     case.testcase_name = "e2e_inplace"
     case.tensor_view_shapes = ((8,),)
     case.tensor_dtypes = ("float32",)
-    case._auto_fill_inplace_tensor_method()
+    case._fill_inplace_output_slot()
 
     assert case.output_tensor_indexes == (0,)  # inplace：输出别名输入槽 0
     assert case.flat_output_view_shapes == ((8,),)
@@ -349,7 +352,7 @@ def test_inplace_non_contiguous_view_loads_logical_values(tmp_path):
     case.testcase_name = "e2e_inplace_view"
     case.tensor_view_shapes = ((3, 4),)
     case.tensor_dtypes = ("float32",)
-    case._auto_fill_inplace_tensor_method()
+    case._fill_inplace_output_slot()
 
     path = tmp_path / "gpu.bin"
     expected = np.arange(12, dtype=np.float32).reshape(3, 4)
@@ -397,9 +400,23 @@ def _mx_collect(case, switches, golden_nps=None, ref_nps=None, manual_case=None)
     recorder = []
     process_ctx = SimpleNamespace(notify_status=lambda stage, *_: recorder.append(stage))
     return_struct = SimpleNamespace(xpu_metrics=None, set_golden_perf=lambda *a, **k: None)
-    third, xpu_results, out_golden, early = e2e_worker._collect_xpu(
-        case, switches, process_ctx, manual_case, (), ref_nps, golden_nps, None, return_struct
+    ctx = e2e_worker._ProfileContext(
+        case,
+        None,
+        switches,
+        0,
+        {},
+        {},
+        return_struct,
+        deterministic_level=0,
     )
+    ctx.process_ctx = process_ctx
+    ctx.manual_case = manual_case
+    ctx.raw_inputs = ()
+    ctx.npu_results = SimpleNamespace(device_outputs=ref_nps)
+    ctx.golden_outputs = golden_nps
+    early = e2e_worker._collect_xpu(ctx)
+    third, xpu_results, out_golden = ctx.xpu_outputs, ctx.xpu_results, ctx.golden_outputs
     return third, xpu_results, out_golden, early, recorder, return_struct
 
 

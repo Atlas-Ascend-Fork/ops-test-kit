@@ -155,11 +155,14 @@ class APIParamInfo:
         elif self.params and not self.overloads:
             self.overloads = _normalize_to_overload_infos([self.params], self._return_counts)
 
-    def _resolve_api_flags(self):
-        """torch 侧解析标志（tf 侧不经过本入口，is_mutable 在 extractor 内填充）。"""
-        parts = self.api_name.split(".") if self.api_name else []
-        self.is_tensor_method = len(parts) >= 3 and parts[0] == "torch" and parts[1] == "Tensor"
-        func_name = parts[-1] if parts else ""
+    def mark_inplace_mutable(self):
+        """torch inplace 命名投影：函数名尾下划线 → 首个张量参数置 is_mutable。
+
+        schema 源已在 _parse_aten_schema_arguments 按 alias_info.is_write 落位，
+        这里只补非 schema 源（docstring/pyi）或解析降级的结果；逐重载投影——
+        match_overload 选中的不一定是 best 重载。tf/onnx 不经过本入口
+        （is_mutable 在各自 extractor 内填充）。"""
+        func_name = self.api_name.rsplit(".", 1)[-1] if self.api_name else ""
         if not (func_name.endswith("_") and not func_name.startswith("_")):
             return
         # 尾下划线命名约定（torch inplace）：schema 源已在 _parse_aten_schema_arguments
@@ -241,6 +244,12 @@ class APIParamInfo:
         return False, None, -1
 
 
+def is_tensor_method_name(api_name: str) -> bool:
+    """torch.Tensor.xxx 方法名（≥3 段且第二段为 Tensor）。"""
+    parts = (api_name or "").split(".")
+    return len(parts) >= 3 and parts[0] == "torch" and parts[1] == "Tensor"
+
+
 def resolve_function(api_name: str):
     try:
         parts = api_name.split(".")
@@ -261,7 +270,7 @@ def resolve_function(api_name: str):
                     if overload is not None:
                         return overload
                 return packet
-        if len(parts) >= 3 and parts[0] == "torch" and parts[1] == "Tensor":
+        if is_tensor_method_name(api_name):
             import torch
 
             method_name = ".".join(parts[2:])

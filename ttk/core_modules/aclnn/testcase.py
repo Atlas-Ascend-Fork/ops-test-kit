@@ -482,12 +482,11 @@ class TestcaseAclnn(ApiTestcaseBase):
     def validate(self):
         """Run all validation checks on testcase configuration."""
         super().validate()
-        self._parse_device_ids_field()
         self._check_api_name()
         self._apply_describe_shapes()
         if not self.is_valid:
             return
-        self._normalize_compressed_fields()
+        self._expand_compressed_fields()
         self._check_tensor_parm()
         self._parse_tensor_dtypes()
         self._check_tensor_list_configuration()
@@ -499,7 +498,6 @@ class TestcaseAclnn(ApiTestcaseBase):
         self._check_params_count()
         self._stc_shape_size_check()
         self._check_manual_xpu_binaries()
-        self._generate_batch_consistency_id()
 
     def _stc_shape_size_check(self):
         """HBM 输入守门（-l/--limit）：输入张量总量超限判无效（对齐 kernel 通路）。
@@ -526,7 +524,7 @@ class TestcaseAclnn(ApiTestcaseBase):
             self.is_valid = False
             self.fail_reason = "STC_SHAPE_OUT_OF_BOUND"
 
-    def _normalize_compressed_fields(self):
+    def _expand_compressed_fields(self):
         """Expand compressed tensor/scalar fields to fully specified nested format.
 
         After normalization each field matches tensor_view_shapes nesting exactly:
@@ -540,7 +538,7 @@ class TestcaseAclnn(ApiTestcaseBase):
         if sdist:
             self._normalize_scalar_field_by_dist("scalar_dtypes", sdist)
             self._normalize_range_field_by_dist("scalar_data_ranges", sdist)
-        super()._normalize_compressed_fields()
+        super()._expand_compressed_fields()
 
     # ========== Scalar AoS substrate（标量 = shape=() 的 Tensor） ==========
 

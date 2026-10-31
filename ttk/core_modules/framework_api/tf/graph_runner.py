@@ -8,12 +8,8 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-"""TF 图模式执行器（tf/ 域）。
-
-via tf.function — TF's native graph compilation; npu_device handles NPU
-dispatch internally, no separate compiler backend needed.
-Corresponds to torch's graph_runner.py (torch.compile + torchair).
-"""
+"""TF 图模式执行器：tf.function 原生图编译，npu_device 内部处理 NPU 分发
+（无独立编译器后端；对应 torch 侧 graph_runner.py 的 torch.compile + torchair）。"""
 
 import logging
 
@@ -87,26 +83,11 @@ def execute_tf_graph(
     is_aclgraph=False,
     deterministic_level=None,
 ):
-    """Execute API in TF graph mode via tf.function with profiling.
+    """TF 图模式执行（tf.function + profiling）。
 
-    Args:
-        testcase: TestcaseE2e
-        backend: Backend instance (NpuTfBackend or CpuTfBackend)
-        dev_id: device ID
-        switches: SWITCHES
-        plan: ParamPlan
-        resolved: resolved API callable
-        is_tensor_method: unused placeholder (always False for TF; kept for
-            signature parity with torch's execute_graph so the caller can
-            use a single graph_fn variable for both frameworks)
-        is_inplace: unused placeholder (always False for TF; same reason)
-        raw_inputs: numpy input arrays
-        dynamic: True for dynamic shape graph, False for static shape graph
-
-    Returns:
-        (nps, ProfileResult, det_status, err_msg)：执行失败时 nps=[]、
-        err_msg 带异常描述；成功或跳过时 err_msg 为 None。
-    """
+    is_tensor_method/is_inplace 恒 False（与 torch execute_graph 签名对齐，
+    调用方可用同一 graph_fn）；dynamic=True 用动态 shape input_signature。
+    返回 (nps, ProfileResult, det_status, err_msg)，失败时 nps=[]。"""
     if is_aclgraph:
         logging.warning("aclgraph mode not supported for TF, skipping")
         return [], None, None, None
@@ -145,7 +126,7 @@ def execute_tf_graph(
 
         from .param_extractor import (
             collect_mutable_variables,
-            is_ref_variable,
+            is_tf_variable,
             read_mutable_values,
         )
 
@@ -154,7 +135,7 @@ def execute_tf_graph(
         # 模式)：Phase 1 带复位跑正确性(窗口外)，Phase 2 纯图执行跑计时(窗口内
         # 无复位 op，采集天然干净，无需事后按 op 名剔除)。计时有效性依据：kernel
         # 耗时只与 shape/dtype 相关，与数据值无关，Phase 2 的状态累积不影响计时
-        mutable_backups = [(v, v.read_value()) for v in (*args, *kwargs.values()) if is_ref_variable(v)]
+        mutable_backups = [(v, v.read_value()) for v in (*args, *kwargs.values()) if is_tf_variable(v)]
 
         def reset_mutable_refs():
             for var, backup in mutable_backups:
@@ -258,15 +239,8 @@ def _unique_node_name(api_func, graph_tag):
 
 
 class TfGraphWrapper:
-    """Wrap a TF API callable in tf.function for graph-mode execution.
-
-    For static shape (-c): input_signature with fixed TensorSpec shapes.
-    For dynamic shape (-d): input_signature with None dimensions.
-
-    tf.raw_ops.* ops require keyword args; the wrapper binds positional
-    inputs to the API's tensor parameter names via inspect.signature,
-    so tf.function tracing passes them as kwargs.
-    """
+    """tf.function 图包装：-c 静态 input_signature（固定 shape），-d 动态
+    （None 维）；raw_ops 按参数名绑 kwargs 传入 trace。"""
 
     def __init__(
         self,

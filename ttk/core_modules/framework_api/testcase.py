@@ -76,8 +76,8 @@ class TestcaseE2e(ApiTestcaseBase):
 
     tensor_property_headers = {
         # 缺省 () 使参数化用例（无 shapes/dtypes 列，由 spec.describe 组装）
-        # 可过 factory 必填字段解析；空值行仍按 validate 判无效（工厂 API 短路
-        # 除外）。CSV 显式声明列时行为不变。
+        # 可过 factory 必填字段解析；空值行仍按 validate 判无效（输入张量
+        # 全部可选的算子短路除外）。CSV 显式声明列时行为不变。
         "tensor_view_shapes": (FIELD_TYPES.SHAPELIKE_DYN_NESTED, None, ()),
         "tensor_dtypes": (FIELD_TYPES.STRING_SCALAR_NESTED, None, ()),
     }
@@ -447,35 +447,50 @@ class TestcaseE2e(ApiTestcaseBase):
 
     def validate(self):
         super().validate()
+        self._validate_csv_inputs()
+        if not self.is_valid:
+            return
+        self._validate_api_contract()
+
+    def _validate_csv_inputs(self):
+        """CSV 输入侧：语法归一、缺失回填、完整性、补位、压缩展开、列数一致性。"""
         self._strip_backward_suffix()  # 后缀剥离在签名对账生态消费前
         self._apply_describe_shapes()
+        self._check_declarations()
+        if not self.is_valid:
+            return
+        # auto-fill 须先于 normalize：normalize 会按 output_tensor_indexes 计算并
+        # 缓存 output_dist，inplace 方法补 (0,) 若发生在其后，odist 类归一化被跳过
+        # 且缓存过期无失效钩子（plain 属性不走六列 setter 的同步路径）。
+        self._fill_inplace_output_slot()
+        self._expand_compressed_fields()
+        self._check_field_counts()
+        self._check_dyn_shape_slots()
+        self._check_manual_xpu_binaries()
+
+    def _validate_api_contract(self):
+        """API 签名侧：重载匹配、必选属性与 out 参数对账。"""
+        self._check_api_signature()
+        self._check_output_slots()
+
+    def _check_declarations(self):
+        """声明基础校验：api_name 非空；无 shapes 时须为输入张量全部可选的算子；
+        有 shapes 须有 dtypes。"""
         if not self.api_name:
             self.is_valid = False
             self.fail_reason = "api_name is empty"
             return
         if not self.tensor_view_shapes:
-            info = self._try_get_api_info_for_factory()
+            info = self._check_missing_shapes()
             if info is None:
                 return
         if self.tensor_view_shapes and not self.tensor_dtypes:
             self.is_valid = False
             self.fail_reason = "tensor_dtypes is empty"
-            return
-        # auto-fill 须先于 normalize：normalize 会按 output_tensor_indexes 计算并
-        # 缓存 output_dist，inplace 方法补 (0,) 若发生在其后，odist 类归一化被跳过
-        # 且缓存过期无失效钩子（plain 属性不走六列 setter 的同步路径）。
-        self._auto_fill_inplace_tensor_method()
-        self._normalize_compressed_fields()
-        self._parse_device_ids_field()
-        self._check_top_level_counts()
-        self._check_dyn_shape_slots()
-        self._check_tensor_configuration()
-        self._check_output_configuration()
-        self._check_manual_xpu_binaries()
-        self._generate_batch_consistency_id()
 
-    def _try_get_api_info_for_factory(self):
-        """Check if API is a factory function (no required input tensors)."""
+    def _check_missing_shapes(self):
+        """shapes 为空时校验 API 类型：输入张量全部可选的算子（如 torch.zeros）
+        放行并返回签名，其余判无效。解析失败报 API_PARSE_FAIL。"""
         info = self.get_api_info()
         if info is None:
             self._report_api_parse_failure()
@@ -497,14 +512,14 @@ class TestcaseE2e(ApiTestcaseBase):
 
         return is_inplace_tensor_method(api_name)
 
-    def _auto_fill_inplace_tensor_method(self):
+    def _fill_inplace_output_slot(self):
         if not self._is_inplace_tensor_method(self.api_name):
             return
         if not self.output_tensor_indexes:
             self.output_tensor_indexes = (0,)
 
-    def _check_tensor_configuration(self):
-        """Validate tensor parameters match API definition in count and type."""
+    def _check_api_signature(self):
+        """张量参数与 API 签名对账：框架门禁 → 张量声明对账（全输出拒绝/重载匹配/数量超界）。"""
         if not self.is_valid:
             return
         info = self.get_api_info()
@@ -513,17 +528,19 @@ class TestcaseE2e(ApiTestcaseBase):
             self.is_valid = False
             self.fail_reason = "API_PARSE_FAIL"
             return
-        if self._check_onnx_unknown_attrs(info):
+        self._check_framework_gates(info)
+        if not self.is_valid:
             return
-        if self._check_onnx_dynamic_input():
+        self._check_tensor_declaration(info)
+
+    def _check_framework_gates(self, info):
+        """框架专属门禁：onnx 域的未知属性与动态 shape 声明在校验期拒绝。"""
+        from ..common.backend import detect_framework
+
+        if detect_framework(self.api_name) != "onnx":
             return
-        if self._check_input_count_exceeded(info):
-            return
-        if self._is_factory_api(info):
-            return
-        if self._check_all_tensors_output(info):
-            return
-        self._check_overload_match(info)
+        self._check_onnx_unknown_attrs(info)
+        self._check_onnx_dynamic_input(info)
 
     def _report_api_parse_failure(self):
         from .info_keeper import FrameworkApiInfoKeeper
@@ -547,10 +564,6 @@ class TestcaseE2e(ApiTestcaseBase):
         """
         if not self.attributes:
             return False
-        from ..common.backend import detect_framework
-
-        if detect_framework(self.api_name) != "onnx":
-            return False
         declared = {p.name for ov in info.overloads for p in ov.params if p.is_keyword_only}
         unknown = sorted(set(self.attributes) - declared)
         if not unknown:
@@ -565,7 +578,7 @@ class TestcaseE2e(ApiTestcaseBase):
         )
         return True
 
-    def _check_onnx_dynamic_input(self):
+    def _check_onnx_dynamic_input(self, info):
         """onnx 域：输入槽含 dim<0（-1 动态标记）时校验期显式拒绝。
 
         动态 shape 是设计非目标（om 恒为静态图，仅支持静态 shape dim ≥ 0）。
@@ -579,10 +592,6 @@ class TestcaseE2e(ApiTestcaseBase):
         Returns:
             True if the testcase was invalidated (dynamic dims found).
         """
-        from ..common.backend import detect_framework
-
-        if detect_framework(self.api_name) != "onnx":
-            return False
         dyn_slots = tuple(
             idx
             for idx, shape in enumerate(self.flat_tensor_view_shapes or ())
@@ -600,47 +609,32 @@ class TestcaseE2e(ApiTestcaseBase):
         )
         return True
 
-    def _check_input_count_exceeded(self, info):
-        """Fail if non-output tensor count exceeds API's max input tensor parameters.
+    @staticmethod
+    def _max_input_tensors(info):
+        """所有重载中输入张量参数（非 out，含可选）数量的最大值。"""
+        return max(sum(1 for p in ov.params if p.is_tensor_like and p.name != "out") for ov in info.overloads)
 
-        Overloads containing a VAR_POSITIONAL (*args) tensor parameter are exempt
-        because they accept an unbounded number of tensors.
-        """
-        out_indices = set(self.output_tensor_indexes or ())
-        top_count = len(self.tensor_view_shapes or ())
-        # Match get_param_plan logic: filter None tensors (placeholders for optional
-        # params not used in this case) in addition to output tensors.
-        input_count = sum(
-            1 for i in range(top_count) if i not in out_indices and self.tensor_view_shapes[i] is not None
-        )
-        # If any overload has a VAR_POSITIONAL tensor param, it can accept
-        # any number of tensors — skip the count check entirely.
-        has_var_pos = any(
-            any(getattr(p, "is_var_positional", False) for p in ov.params if p.is_tensor_like and p.name != "out")
-            for ov in info.overloads
-        )
-        if has_var_pos:
-            return False
-        max_input = max(sum(1 for p in ov.params if p.is_tensor_like and p.name != "out") for ov in info.overloads)
-        if input_count > max_input:
-            self.is_valid = False
-            self.fail_reason = "INPUT_COUNT_EXCEEDED"
-            logging.error(
-                f"[{self.testcase_name}] API [{self.api_name}] has at most {max_input} input tensor "
-                f"parameters (excluding out), but testcase configured {input_count} "
-                f"input tensor(s) (excluding {len(out_indices)} output tensor(s)). "
-                f"(source: {info.source})"
-            )
-            return True
-        return False
-
-    def _is_factory_api(self, info):
-        """Return True if API requires no input tensors (factory function like torch.zeros)."""
-        required_min = min(
+    @staticmethod
+    def _required_input_tensor_count(info):
+        """所有重载中必选输入张量参数（非 out）数量的最小值。"""
+        return min(
             sum(1 for p in [pp for pp in ov.params if pp.is_tensor_like and pp.name != "out"] if not p.is_optional)
             for ov in info.overloads
         )
-        return required_min == 0
+
+    @staticmethod
+    def _has_no_required_input(info) -> bool:
+        """输入张量全部可选：所有重载均无必选输入张量（如 torch.zeros，out 为可选）。"""
+        return TestcaseE2e._required_input_tensor_count(info) == 0
+
+    def _check_tensor_declaration(self, info):
+        """张量声明对账：全输出拒绝 + 重载匹配；输入张量全部可选的算子
+        （如 torch.zeros）没有必选输入可对账，直接豁免。"""
+        if self._has_no_required_input(info):
+            return
+        if self._check_all_tensors_output(info):
+            return
+        self._check_overload_match(info)
 
     def _check_all_tensors_output(self, info):
         """Fail if all tensors are marked as output with none left as input."""
@@ -652,10 +646,7 @@ class TestcaseE2e(ApiTestcaseBase):
             input_count = sum(1 for i in range(top_count) if i not in out_indices)
         if input_count > 0:
             return False
-        required_min = min(
-            sum(1 for p in [pp for pp in ov.params if pp.is_tensor_like and pp.name != "out"] if not p.is_optional)
-            for ov in info.overloads
-        )
+        required_min = self._required_input_tensor_count(info)
         self.is_valid = False
         self.fail_reason = "ALL_TENSORS_MARKED_OUTPUT"
         logging.error(
@@ -668,20 +659,13 @@ class TestcaseE2e(ApiTestcaseBase):
 
     @staticmethod
     def _classify_input_types(input_shapes):
-        """Classify each input shape as nested (TensorList) or None placeholder."""
-        nested_flags = []
-        has_none = []
-        for element in input_shapes:
-            if element is None:
-                nested_flags.append(False)
-                has_none.append(True)
-            else:
-                is_nested = (
-                    isinstance(element, (tuple, list)) and len(element) > 0 and isinstance(element[0], (tuple, list))
-                )
-                nested_flags.append(is_nested)
-                has_none.append(False)
-        return nested_flags, has_none
+        """逐位标出是否 TensorList 嵌套；None 槽标 False（无形状信息）。"""
+        return [
+            False
+            if element is None
+            else isinstance(element, (tuple, list)) and len(element) > 0 and isinstance(element[0], (tuple, list))
+            for element in input_shapes
+        ]
 
     def _count_scalar_attrs_for_tensor_params(self, info):
         """Count tensor-like params satisfied by scalar values in attributes."""
@@ -696,6 +680,14 @@ class TestcaseE2e(ApiTestcaseBase):
                     ov_count += 1
             count = max(count, ov_count)
         return count
+
+    def _try_match_inputs(self, input_shapes, skip_flags, info) -> bool:
+        """按该对位结果试匹配：命中则查必选属性并返回 True。"""
+        nested_flags = self._classify_input_types(input_shapes)
+        matched, _, oidx = info.match_overload(len(input_shapes), nested_flags, skip_flags)
+        if matched:
+            self._check_required_attrs(info, oidx)
+        return matched
 
     def _align_shapes_to_overload(self, input_params, out_indices):
         """按给定重载的张量参数表对位 top-level shapes。
@@ -719,37 +711,35 @@ class TestcaseE2e(ApiTestcaseBase):
         return input_shapes, skip_flags
 
     def _check_overload_match(self, info):
-        """Fail if input tensors don't match any overload in count/type/nesting.
+        """输入张量声明与重载对账：逐重载匹配，任一命中即通过并查必选属性；
+        全失配按三档报错（类型/嵌套不对、超数量上限、低于必选下限）。
 
-        None 槽的对位（省略可选 Tensor vs TensorList 占位）与重载相关：
-        逐重载对位并尝试匹配，任一重载匹配即通过（与 match_overload 的
-        匹配语义一致）。scalar 补偿与报错口径沿用首个重载的对位结果。
+        四步：① inplace 方法原样对位 ② 普通函数逐重载对位（输出位剔除、
+        None 槽按该重载布局判"省略可选 vs TensorList 占位"）③ attributes
+        标量顶替张量位后合并数量再试 ④ 失配报错（口径取首个重载对位结果）。
         """
         out_indices = set(self.output_tensor_indexes or ())
+        # ① inplace Tensor 方法：shapes 原样即输入位（self 在第 0 槽）
         if self._is_inplace_tensor_method(self.api_name):
             input_shapes = list(self.tensor_view_shapes)
             skip_flags = [shape is None for shape in input_shapes]
-            input_count = len(input_shapes)
-            nested_flags, has_none = self._classify_input_types(input_shapes)
-            matched, _, oidx = info.match_overload(input_count, nested_flags, skip_flags)
-            if matched:
-                self._check_required_attrs(info, oidx)
+            if self._try_match_inputs(input_shapes, skip_flags, info):
                 return
+            input_count = len(input_shapes)
         else:
+            # ② 逐重载对位：输出位剔除、None 槽按该重载的 Tensor 位置对齐
+            first_aligned = None
             for ov in info.overloads:
                 input_shapes, skip_flags = self._align_shapes_to_overload(ov.layout.input_params, out_indices)
-                nested_flags, _has_none = self._classify_input_types(input_shapes)
-                matched, _, oidx = info.match_overload(len(input_shapes), nested_flags, skip_flags)
-                if matched:
-                    self._check_required_attrs(info, oidx)
+                if first_aligned is None:
+                    first_aligned = input_shapes  # 全部失配时按首个重载对位结果报错
+                if self._try_match_inputs(input_shapes, skip_flags, info):
                     return
-            # 全部重载未匹配：报错口径沿用首个重载的对位结果
-            input_shapes, skip_flags = self._align_shapes_to_overload(
-                info.overloads[0].layout.input_params, out_indices
-            )
+            input_shapes = first_aligned
             input_count = len(input_shapes)
-            nested_flags, has_none = self._classify_input_types(input_shapes)
+        nested_flags = self._classify_input_types(input_shapes)
 
+        # ③ attributes 标量顶替张量位：合并数量再试一次
         scalar_attr_count = self._count_scalar_attrs_for_tensor_params(info)
         if scalar_attr_count > 0:
             effective_count = input_count + scalar_attr_count
@@ -758,13 +748,12 @@ class TestcaseE2e(ApiTestcaseBase):
                 self._check_required_attrs(info, oidx)
                 return
 
-        required_min = min(
-            sum(1 for p in [pp for pp in ov.params if pp.is_tensor_like and pp.name != "out"] if not p.is_optional)
-            for ov in info.overloads
-        )
+        # ④ 全失配：三档报错
+        required_min = self._required_input_tensor_count(info)
         required_min -= scalar_attr_count
         count_matched = info.match_overload(input_count, None, None)
         if count_matched[0]:
+            # 数量对得上某重载，但 Tensor/TensorList 嵌套不符
             self.is_valid = False
             self.fail_reason = "PARAM_TYPE_MISMATCH"
             logging.error(
@@ -773,16 +762,19 @@ class TestcaseE2e(ApiTestcaseBase):
                 f"nested={nested_flags}. "
                 f"(source: {info.source})"
             )
-        elif input_count > info.tensor_count:
+        elif input_count > self._max_input_tensors(info):
+            # 任何重载都容不下这个数量（VAR_POSITIONAL 重载在前序循环恒匹配，
+            # 到不了这里）：按跨重载最大输入数报超界
             self.is_valid = False
-            self.fail_reason = "TENSOR_COUNT_MISMATCH"
+            self.fail_reason = "INPUT_COUNT_EXCEEDED"
             logging.error(
-                f"API [{self.api_name}] has at most {info.tensor_count} tensor parameters "
-                f"in any overload, but testcase configured {input_count} input tensors "
-                f"(excluding {len(out_indices)} output tensors). "
+                f"API [{self.api_name}] has at most {self._max_input_tensors(info)} input tensor "
+                f"parameters (excluding out), but testcase configured {input_count} "
+                f"input tensor(s) (excluding {len(out_indices)} output tensor(s)). "
                 f"(source: {info.source})"
             )
         else:
+            # 数量低于必选下限（含 scalar 补偿后的折算）
             self.is_valid = False
             self.fail_reason = "TENSOR_COUNT_MISMATCH"
             logging.error(
@@ -849,7 +841,7 @@ class TestcaseE2e(ApiTestcaseBase):
             f"{sorted(attrs)}. (source: {info.source})"
         )
 
-    def _check_output_configuration(self):
+    def _check_output_slots(self):
         """Validate output_tensor_indexes against API's out parameter definition.
 
         Checks:
@@ -927,7 +919,7 @@ class TestcaseE2e(ApiTestcaseBase):
                     f"(source: {info.source})"
                 )
 
-    def _check_top_level_counts(self):
+    def _check_field_counts(self):
         """Validate that all fields have matching top-level count after normalization."""
         if not self.is_valid:
             return

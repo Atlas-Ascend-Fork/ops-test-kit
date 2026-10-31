@@ -75,7 +75,7 @@ class TestFlatTensorViewShapes:
 class TestFlatTensorDtypesCompression:
     """Tests for flat_tensor_dtypes: flatten nested TensorList structure.
 
-    In production, _normalize_compressed_fields runs first, expanding
+    In production, _expand_compressed_fields runs first, expanding
     compressed forms like ('float32',) to (('float32','float32'),'float32').
     The flat property then just flattens nesting.
     """
@@ -86,12 +86,12 @@ class TestFlatTensorDtypesCompression:
 
     def test_top_level_compression_after_normalize(self, make_testcase):
         case = make_testcase(tensor_view_shapes=NESTED_SHAPES, tensor_dtypes=("float32",))
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_dtypes == ("float32", "float32", "float32")
 
     def test_per_param_compression_after_normalize(self, make_testcase):
         case = make_testcase(tensor_view_shapes=NESTED_SHAPES, tensor_dtypes=("float32", "float32"))
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_dtypes == ("float32", "float32", "float32")
 
     def test_per_tensor_list_explicit(self, make_testcase):
@@ -100,7 +100,7 @@ class TestFlatTensorDtypesCompression:
 
     def test_per_tensor_list_broadcast_after_normalize(self, make_testcase):
         case = make_testcase(tensor_view_shapes=NESTED_SHAPES, tensor_dtypes=(("float32",), "float32"))
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_dtypes == ("float32", "float32", "float32")
 
     def test_flat_no_nesting(self, make_testcase):
@@ -115,7 +115,7 @@ class TestFlatTensorDtypesCompression:
 class TestFlatTensorViewOffsetsCompression:
     """Tests for flat_tensor_view_offsets: flatten nested TensorList structure.
 
-    After _normalize_compressed_fields, offsets are fully expanded; the flat
+    After _expand_compressed_fields, offsets are fully expanded; the flat
     property just needs to flatten nesting.  Without normalization the raw
     compressed form is preserved (broadcast is normalize's job).
     """
@@ -130,12 +130,12 @@ class TestFlatTensorViewOffsetsCompression:
 
     def test_compressed_after_normalize(self, make_testcase):
         case = make_testcase(tensor_view_shapes=NESTED_SHAPES, tensor_view_offsets=(0,))
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_view_offsets == (0, 0, 0)
 
     def test_per_param_after_normalize(self, make_testcase):
         case = make_testcase(tensor_view_shapes=NESTED_SHAPES, tensor_view_offsets=(5, 10))
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_view_offsets == (5, 5, 10)
 
     def test_none(self, make_testcase):
@@ -233,7 +233,7 @@ class TestNormalizeInputDataRanges:
         )
         if ranges is not None:
             case.input_data_ranges = ranges
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         return case
 
     def test_single_range_broadcast_to_all_params(self):
@@ -361,7 +361,7 @@ class TestFlatInputDataRangesPadding:
             input_data_ranges=input_data_ranges,
             output_tensor_indexes=output_tensor_indexes,
         )
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         if expected_pure_output is not None:
             assert case.pure_output_indexes == expected_pure_output
         assert case.flat_input_data_ranges == expected_flat
@@ -401,7 +401,7 @@ class TestTensorListFlatFields:
             tensor_view_strides=((4, 1),),
             tensor_storage_shapes=(((3, 2, 4),),),
         )
-        case._normalize_compressed_fields()
+        case._expand_compressed_fields()
         assert case.flat_tensor_view_strides == ((4, 1), (4, 1), (4, 1))
         assert case.flat_tensor_storage_shapes == ((3, 2, 4), (3, 2, 4), (3, 2, 4))
 

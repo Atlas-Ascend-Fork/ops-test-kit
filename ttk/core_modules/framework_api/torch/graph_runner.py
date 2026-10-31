@@ -32,9 +32,13 @@ from ttk.switches import get_global_storage
 
 from ...common.invoke import Invoke
 from ...common.profiler import ProfilerConfig, get_profiler
-from ..utils import compute_output_md5, finalize_det_status, prepare_device_args, resolve_npu_preprocess_hook
-
-WARMUP_COUNT = 1
+from ..utils import (
+    WARMUP_COUNT,
+    compute_output_md5,
+    finalize_det_status,
+    prepare_device_args,
+    resolve_npu_preprocess_hook,
+)
 
 # debug_per_op_max_core_num（单算子满核验证）仅 aclgraph/npugraph_ex 的
 # super_kernel_debug_options 支持；GE 图模式 scope options 走 op 编译白名单

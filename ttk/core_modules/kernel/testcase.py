@@ -743,7 +743,7 @@ class TestcaseKernel(TestcaseBase):
         # Step 2: output distribution (output_shapes now resolved)
         self._compute_output_distribution()
         # Step 3: normalize all compressed fields
-        self._normalize_compressed_fields()
+        self._expand_compressed_fields()
         self._check_manual_binaries()
         self._check_manual_output_binaries()
         self._check_manual_xpu_binaries()
@@ -961,7 +961,7 @@ class TestcaseKernel(TestcaseBase):
         self._compute_input_distribution()
         self._compute_output_distribution()
 
-    def _normalize_compressed_fields(self):
+    def _expand_compressed_fields(self):
         """Expand compressed fields to match distribution nesting exactly."""
         input_dist = self.input_distribution
         output_dist = self.output_distribution

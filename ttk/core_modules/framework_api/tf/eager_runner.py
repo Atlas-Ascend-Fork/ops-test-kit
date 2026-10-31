@@ -52,29 +52,12 @@ def _wrap_eager_cpu(resolved, api_name):
 
 
 def _wrap_eager_npu(resolved, api_name):
-    """Wrap API in tf.function so eager ops dispatch to NPU kernels.
+    """NPU eager：tf.function(autograph=False) 包装，使算子经 GE 编译在 NPU 执行
+    （npu_device 只对 tf.function 内的 op 触发 NPU 分发，裸 eager 落 CPU）。
 
-    npu_device registers NPU as a custom device whose execute callback
-    only triggers GE graph compilation (and thus real NPU kernel launches)
-    for ops inside tf.function.  Bare eager calls fall back to CPU.
-    Wrapping with tf.function(autograph=False) preserves single-op
-    semantics (no input_signature, TF auto-traces by actual shape) while
-    ensuring the op runs on NPU.
-
-    tf.raw_ops.* require keyword args; we generate a wrapper that binds
-    positional inputs to the API's tensor parameter names at call time,
-    so tf.function tracing passes them as kwargs. Non-tensor params use
-    the API's own defaults.
-
-    tf.raw_ops.Resource* ops (DT_RESOURCE inputs) additionally need the
-    tf.Variable's .handle: at the op boundary a Variable is auto-
-    dereferenced to its value tensor, which fails the resource type
-    check. Conversion happens inside the traced wrapper so profiling
-    still sees Variables outside (per-round clones keep working).
-    No-output stateful ops return an Operation under tracing, which
-    tf.function rejects — downgraded to None (eager already returns
-    None).
-    """
+    - raw_ops 按参数名绑 kwargs（tf.raw_ops 只收关键字）；
+    - Resource* 的 Variable 在 trace 内换 .handle（op 边界解引用会挂类型校验）；
+    - 无输出有状态 op trace 下返回 Operation，tf.function 拒绝 → 置 None。"""
     import tensorflow as tf
 
     from .param_extractor import resource_param_names

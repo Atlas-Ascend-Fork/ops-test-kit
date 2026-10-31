@@ -20,11 +20,11 @@ import pytest
 
 from ttk.core_modules.framework_api.api_model import ParamInfo
 from ttk.core_modules.framework_api.api_param import (
-    build_positional_args as _real_build_positional_args,
+    _coerce_value,
+    match_overload,
 )
 from ttk.core_modules.framework_api.api_param import (
-    coerce_value,
-    match_overload,
+    build_positional_args as _real_build_positional_args,
 )
 from ttk.core_modules.framework_api.info_keeper import FrameworkApiInfoKeeper
 from ttk.core_modules.framework_api.torch.param_extractor import _MANUAL_OVERRIDES
@@ -105,6 +105,8 @@ class TestMatchOverload:
         params, oidx = _match_overload("torch.t4", 3)
         assert params is None
         assert oidx == -1
+        params, oidx = _match_overload("nonexistent.api", 1)
+        assert params is None
 
     def test_tensor_distribution_filter(self):
         _register(
@@ -136,10 +138,6 @@ class TestMatchOverload:
         params_flat, oidx_flat = _match_overload("tf.raw_ops.AccumulateNV2", 1, attrs, tensor_distribution=[False])
         assert params_flat is None
         assert oidx_flat == -1
-
-    def test_unknown_api_returns_none(self):
-        params, oidx = _match_overload("nonexistent.api", 1)
-        assert params is None
 
 
 class TestScoreAttrTypeCompatibility:
@@ -310,12 +308,12 @@ class TestCoerceValue:
             "float-native",
         ],
     )
-    def test_coerce_value(self, value, target_type, expected):
-        assert coerce_value(value, target_type) == expected
+    def test__coerce_value(self, value, target_type, expected):
+        assert _coerce_value(value, target_type) == expected
 
     def test_unknown_type_raises(self):
         with pytest.raises(ValueError, match="unsupported type"):
-            coerce_value(42, "UnknownType")
+            _coerce_value(42, "UnknownType")
 
 
 class TestBuildPositionalArgs:
@@ -444,7 +442,7 @@ class TestVarPositional:
         assert kwargs == {}
         assert oidx == 0
 
-    def test_match_overload_var_positional_accepts_any_count(self):
+    def test_var_positional_matching_matrix(self):
         _register(
             "torch.vp_match",
             [
@@ -458,7 +456,6 @@ class TestVarPositional:
         assert params2 is not None
         assert oidx2 == 0
 
-    def test_match_overload_non_var_still_enforces_upper_bound(self):
         _register(
             "torch.vp_no_var",
             [
@@ -472,7 +469,9 @@ class TestVarPositional:
 class TestParamPlanBuildArgs:
     """Tests for ParamPlan.build_args (reusable plan)."""
 
-    def test_plan_reused_produces_same_result(self):
+    def test_plan_reused_and_with_out_tensor(self):
+        from ttk.core_modules.framework_api.api_param import ParamPlan
+
         _register(
             "torch.plan_reuse",
             [
@@ -480,8 +479,6 @@ class TestParamPlanBuildArgs:
                 ParamInfo(name="dim", type="int", default="0"),
             ],
         )
-        from ttk.core_modules.framework_api.api_param import ParamPlan
-
         params, oidx = _match_overload("torch.plan_reuse", 1)
         plan = ParamPlan("torch.plan_reuse", params, oidx, (), {})
 
@@ -493,6 +490,8 @@ class TestParamPlanBuildArgs:
         assert kwargs2 == {}
 
     def test_plan_with_out_tensor(self):
+        from ttk.core_modules.framework_api.api_param import ParamPlan
+
         _register(
             "torch.plan_out",
             [
@@ -500,7 +499,6 @@ class TestParamPlanBuildArgs:
                 ParamInfo(name="out", type="Tensor", is_keyword_only=True, is_optional=True),
             ],
         )
-        from ttk.core_modules.framework_api.api_param import ParamPlan
 
         params, oidx = _match_overload("torch.plan_out", 1)
         plan = ParamPlan("torch.plan_out", params, oidx, (0,), {})
@@ -526,19 +524,16 @@ class TestGetParamPlan:
         case.validate()
         return case
 
-    def test_plan_cached(self):
+    def test_plan_cached_none_and_build(self):
+        import numpy as np
+
         case = self._make_testcase("torch.abs", ((2, 3), (2, 3)), ("float32", "float32"), output_indexes=(1,))
         plan1 = case.get_param_plan()
         plan2 = case.get_param_plan()
         assert plan1 is plan2
 
-    def test_plan_none_for_no_api(self):
         case = self._make_testcase("nonexistent.api", ((2, 3),), ("float32",))
-        plan = case.get_param_plan()
-        assert plan is None
-
-    def test_plan_build_args_integration(self):
-        import numpy as np
+        assert case.get_param_plan() is None
 
         _register(
             "torch.np_test",
@@ -707,7 +702,7 @@ class TestInplaceTensorMethodBuildArgs:
 
 
 class TestCheckInputCountExceededVarPos:
-    """Tests for _check_input_count_exceeded skipping VAR_POSITIONAL overloads."""
+    """Tests for VAR_POSITIONAL overloads skipping the input count bound."""
 
     def _make_testcase(self, api_name, shapes, dtypes, attrs=None, output_indexes=()):
         from ttk.core_modules.framework_api.testcase import TestcaseE2e
@@ -721,7 +716,7 @@ class TestCheckInputCountExceededVarPos:
         case.validate()
         return case
 
-    def test_var_pos_overload_skips_input_count_check(self):
+    def test_var_pos_skips_non_var_checked(self):
         _register(
             "torch.block_diag",
             [
@@ -732,7 +727,6 @@ class TestCheckInputCountExceededVarPos:
         assert case.is_valid
         assert case.fail_reason != "INPUT_COUNT_EXCEEDED"
 
-    def test_non_var_pos_overload_still_checked(self):
         _register(
             "torch.strict_two_tensors",
             [

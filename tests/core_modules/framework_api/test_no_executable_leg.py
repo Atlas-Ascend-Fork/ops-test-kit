@@ -46,6 +46,9 @@ class _NoOpAdapter:
     def run_graph(self, *args, **kwargs):
         return [], None, None, None
 
+    def setup_device_state(self, _backend, _testcase, _process_ctx):
+        return None
+
 
 def _case():
     case = TestcaseE2e()

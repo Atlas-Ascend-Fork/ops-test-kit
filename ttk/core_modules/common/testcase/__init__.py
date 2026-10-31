@@ -44,14 +44,12 @@ __all__ = [
     "ApiTestcaseBase",
     "UniversalTestcaseFactory",
     "ResolveApiParamBase",
-    "coerce_value",
-    "match_overload",
     "Tensor",
     "TensorSlot",
 ]
 
 from .api_base import ApiTestcaseBase
-from .api_param import ResolveApiParamBase, coerce_value, match_overload
+from .api_param import ResolveApiParamBase
 from .base import TestcaseBase
 from .factory import UniversalTestcaseFactory
 from .reader import Table, iter_tables, read_table, resolved_sheet

@@ -83,19 +83,11 @@ def test_peak_memory_unsupported_backend_keeps_none():
     assert rs.npu_memory is None
 
 
-def test_peak_memory_reset_failure_degrades():
-    """reset API failure degrades to no capture; fn still runs and returns."""
+@pytest.mark.parametrize("failing_api", ["reset_peak_memory_stats", "max_memory_allocated"])
+def test_peak_memory_api_failure_degrades(failing_api):
+    """reset / max_memory_allocated 失败降级为不采集；fn 结果不被掩盖。"""
     backend = _npu_backend()
-    backend.reset_peak_memory_stats.side_effect = RuntimeError("reset boom")
-    rs = types.SimpleNamespace(npu_memory=None)
-    assert e2e_profiling._capture_peak_memory(backend, 0, rs, lambda: "ok") == "ok"
-    assert rs.npu_memory is None
-
-
-def test_peak_memory_read_failure_degrades():
-    """max_memory_allocated failure degrades to no capture and never masks fn's result."""
-    backend = _npu_backend()
-    backend.max_memory_allocated.side_effect = RuntimeError("read boom")
+    getattr(backend, failing_api).side_effect = RuntimeError(f"{failing_api} boom")
     rs = types.SimpleNamespace(npu_memory=None)
     assert e2e_profiling._capture_peak_memory(backend, 0, rs, lambda: "ok") == "ok"
     assert rs.npu_memory is None

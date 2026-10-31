@@ -26,11 +26,7 @@ ACL so 加载只发生在 runtime.py 的懒 CDLL（模块 import 零 .so 触碰�
 
 __all__ = ["ADAPTER", "OnnxAdapter", "OnnxOpHandle"]
 
-import contextlib
-import hashlib
 import logging
-import os
-import tempfile
 from collections import OrderedDict
 
 from ..adapter import FrameworkAdapter
@@ -90,7 +86,6 @@ class OnnxAdapter(FrameworkAdapter):
     # LRU 上限防 HBM 无限累积）
     _sessions: "OrderedDict[str, object]" = OrderedDict()
     _MAX_SESSIONS = 4
-    _acl = None
 
     # ── 三件套 ──────────────────────────────────────────────
 
@@ -198,64 +193,21 @@ class OnnxAdapter(FrameworkAdapter):
         return session.execute_round()
 
     def _session_key(self, handle, input_specs, kwargs) -> str:
-        raw = "|".join(
-            [
-                handle.op_type,
-                str(handle.opset),  # 显式版本段区分同名算子不同 opset（om 不同不得复用会话）
-                handle.param_info.source,
-                repr([(name, shape, dtype) for name, shape, dtype in input_specs]),
-                repr(sorted((name, repr(value)) for name, value in kwargs.items())),
-                handle.soc_version,
-                str(handle.dev_id),
-            ]
-        )
-        return hashlib.md5(raw.encode()).hexdigest()  # noqa: S324  # 非安全用途：会话结构键
+        from .runner import session_key
+
+        return session_key(handle, input_specs, kwargs)
 
     @staticmethod
     def _case_dir_name(handle) -> str:
-        """onnx_om 按用例名 + opset 归组（对齐 log/msprof 的 per-case 目录惯例：
-        <root>/onnx_om/<testcase_name>/<opset>/model.om）。
+        from .runner import session_case_dir
 
-        worker 进程名即用例名（process_context.change_name →
-        set_process_name，编译只发生在 worker 进程）；非 worker 环境
-        （单测直调 / MainProcess）回退 op_type 归组（legacy 布局）。
-        """
-        import multiprocessing
-
-        name = getattr(multiprocessing.current_process(), "name", "") or ""
-        if name.startswith("MP "):
-            name = name[3:]
-        if name and name != "MainProcess":
-            return name
-        return handle.op_type
+        return session_case_dir(handle)
 
     def _create_session(self, handle, input_specs, host_inputs, kwargs):
-        from .model_builder import build_model_bytes, resolve_opset
-        from .om_compiler import compile_om
-        from .runner import OmSession
+        # 会话构建实现在 runner.create_om_session；保留本钩子供测试替换
+        from .runner import create_om_session
 
-        model_bytes = build_model_bytes(handle.op_type, input_specs, kwargs, opset=handle.opset)
-        root_path = self._root_path()
-        # onnx_om/<testcase_name>/<opset>/model.om：opset 层区分同名用例的
-        # 显式版本段与裸名（env 最高）——同名不同 opset 互不覆盖
-        work_dir = os.path.join(root_path, "onnx_om", self._case_dir_name(handle), str(resolve_opset(handle.opset)))
-        os.makedirs(work_dir, exist_ok=True)
-        fd, tmp_onnx = tempfile.mkstemp(prefix="ttk_onnx_", suffix=".onnx", dir=work_dir)
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(model_bytes)
-            om_path = compile_om(
-                tmp_onnx,
-                {name: shape for name, shape, _dtype in input_specs},
-                handle.soc_version,
-                work_dir,
-            )
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_onnx)
-
-        acl = self._acl_interface()
-        return OmSession(acl, handle.dev_id or 0, om_path, host_inputs, handle.op_type)
+        return create_om_session(handle, input_specs, host_inputs, kwargs)
 
     def _store_session(self, key, session) -> None:
         old = self._sessions.get(key)
@@ -266,20 +218,6 @@ class OnnxAdapter(FrameworkAdapter):
         while len(self._sessions) > self._MAX_SESSIONS:
             _evicted_key, evicted = self._sessions.popitem(last=False)
             evicted.unload()
-
-    @staticmethod
-    def _root_path() -> str:
-        from ttk.switches import get_global_storage
-
-        return getattr(get_global_storage(), "root_path", os.getcwd())
-
-    @classmethod
-    def _acl_interface(cls):
-        if cls._acl is None:
-            from .runtime import AclModelInterface
-
-            cls._acl = AclModelInterface()
-        return cls._acl
 
 
 _HANDLE_CACHE: dict = {}

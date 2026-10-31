@@ -621,7 +621,7 @@ class ApiTestcaseBase(TestcaseBase):
     def flat_input_data_ranges(self):
         """Flat per-tensor ranges.
 
-        Assumes _normalize_compressed_fields has already expanded compressed
+        Assumes _expand_compressed_fields has already expanded compressed
         forms.  Simply flattens the normalized nested structure.
         """
         if self._flat_input_data_ranges is not None:
@@ -954,7 +954,7 @@ class ApiTestcaseBase(TestcaseBase):
         if dtypes is not None:
             self._merge_described("tensor_dtypes", dtypes)
 
-    def _normalize_compressed_fields(self):
+    def _expand_compressed_fields(self):
         if not self.is_valid or not self.tensor_view_shapes:
             return
         dist = self.tensor_list_dist

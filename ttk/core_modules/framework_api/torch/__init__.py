@@ -102,5 +102,12 @@ class TorchAdapter(FrameworkAdapter):
         register_api_params(api_name, params, source)
         return get_api_params(api_name)
 
+    # ── 设备态 ──
+
+    def setup_device_state(self, backend, testcase, process_ctx):
+        from .cube_math_type import setup_cube_math_type
+
+        setup_cube_math_type(backend, testcase, process_ctx)
+
 
 ADAPTER = TorchAdapter()

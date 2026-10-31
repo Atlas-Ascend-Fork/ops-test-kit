@@ -7,8 +7,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""CubeMathType 精度模式支持（worker._setup_cube_math_type / _cube_math_type_value）
-与 4bit golden dtype 归一化（worker._normalize_output_dtype_for_4bit_golden）。
+"""CubeMathType 精度模式支持（torch/cube_math_type.py 的
+cube_math_type_value / setup_cube_math_type，经 TorchAdapter.setup_device_state 触达）
+与 4bit golden dtype 对齐（utils.align_4bit_golden）。
 
 - 门控：非 NPU 后端 / 非 torch 框架直接返回（不导入 torch_npu）；
 - 按需复位：未携带 CubeMathType 且本进程未改写过时不触碰 torch_npu 默认；
@@ -23,7 +24,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from ttk.core_modules.framework_api import worker as e2e_worker
+from ttk.core_modules.framework_api import utils as e2e_utils
+from ttk.core_modules.framework_api.torch import cube_math_type
 
 
 def _cpu_backend():
@@ -67,17 +69,14 @@ def _missing_ml_dtypes() -> bool:
 
 
 class TestCubeMathTypeValue:
-    def test_torch_case_reads_attribute(self):
-        assert e2e_worker._cube_math_type_value(_case(attributes={"CubeMathType": 3})) == 3
-
-    def test_missing_attribute_is_none(self):
-        assert e2e_worker._cube_math_type_value(_case(attributes={})) is None
-        assert e2e_worker._cube_math_type_value(_case(attributes=None)) is None
-
-    def test_tf_case_is_none(self):
+    def test_reads_attribute_torch_only(self):
+        assert cube_math_type.cube_math_type_value(_case(attributes={"CubeMathType": 3})) == 3
+        assert cube_math_type.cube_math_type_value(_case(attributes={})) is None
+        assert cube_math_type.cube_math_type_value(_case(attributes=None)) is None
         # TF 通路无 cube 精度模式概念，即使误填属性也不取值
         assert (
-            e2e_worker._cube_math_type_value(_case(api_name="tf.linalg.matmul", attributes={"CubeMathType": 3})) is None
+            cube_math_type.cube_math_type_value(_case(api_name="tf.linalg.matmul", attributes={"CubeMathType": 3}))
+            is None
         )
 
 
@@ -85,18 +84,18 @@ class TestSetupCubeMathType:
     def test_cpu_backend_skips_without_importing_torch_npu(self, monkeypatch):
         # sys.modules 占位 None：import torch_npu 会抛 ImportError，借此断言早退不触发导入
         monkeypatch.setitem(sys.modules, "torch_npu", None)
-        e2e_worker._setup_cube_math_type(_cpu_backend(), _case(attributes={"CubeMathType": 3}), _ctx())
+        cube_math_type.setup_cube_math_type(_cpu_backend(), _case(attributes={"CubeMathType": 3}), _ctx())
 
     def test_tf_framework_skips_without_importing_torch_npu(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "torch_npu", None)
-        e2e_worker._setup_cube_math_type(
+        cube_math_type.setup_cube_math_type(
             _npu_backend(), _case(api_name="tf.linalg.matmul", attributes={"CubeMathType": 3}), _ctx()
         )
 
     def test_clean_process_skips_without_importing_torch_npu(self, monkeypatch):
         # 未携带该键且前序用例未改写过：不触碰 torch_npu 进程默认（不导入）
         monkeypatch.setitem(sys.modules, "torch_npu", None)
-        e2e_worker._setup_cube_math_type(_npu_backend(), _case(attributes={}), _ctx())
+        cube_math_type.setup_cube_math_type(_npu_backend(), _case(attributes={}), _ctx())
 
     @pytest.mark.skipif(not _has_torch_npu(), reason="torch_npu is not installed")
     def test_clean_process_keeps_torch_npu_state_without_key(self):
@@ -106,7 +105,7 @@ class TestSetupCubeMathType:
             torch_npu.npu.matmul.allow_hf32,
             torch_npu.npu.conv.allow_hf32,
         )
-        e2e_worker._setup_cube_math_type(_npu_backend(), _case(attributes={}), _ctx())
+        cube_math_type.setup_cube_math_type(_npu_backend(), _case(attributes={}), _ctx())
         after = (
             torch_npu.npu.matmul.cube_math_type,
             torch_npu.npu.matmul.allow_hf32,
@@ -119,10 +118,10 @@ class TestSetupCubeMathType:
         torch_npu = _import_torch_npu()
         npu = _npu_backend()
         ctx = _ctx()
-        e2e_worker._setup_cube_math_type(npu, _case(attributes={"CubeMathType": 3}), ctx)
+        cube_math_type.setup_cube_math_type(npu, _case(attributes={"CubeMathType": 3}), ctx)
         assert torch_npu.npu.matmul.cube_math_type == torch_npu.npu.CubeMathType.USE_HF32
         # 前序改写过：无键用例须复位基线，防跨用例状态泄漏
-        e2e_worker._setup_cube_math_type(npu, _case(attributes={}), ctx)
+        cube_math_type.setup_cube_math_type(npu, _case(attributes={}), ctx)
         assert torch_npu.npu.matmul.cube_math_type == torch_npu.npu.CubeMathType.KEEP_DTYPE
         assert torch_npu.npu.matmul.allow_hf32 is False
         assert torch_npu.npu.conv.allow_hf32 is False
@@ -133,18 +132,18 @@ class TestSetupCubeMathType:
         npu = _npu_backend()
         ctx = _ctx()
 
-        e2e_worker._setup_cube_math_type(npu, _case(attributes={"CubeMathType": 3}), ctx)
+        cube_math_type.setup_cube_math_type(npu, _case(attributes={"CubeMathType": 3}), ctx)
         assert torch_npu.npu.matmul.cube_math_type == torch_npu.npu.CubeMathType.USE_HF32
         assert torch_npu.npu.matmul.allow_hf32 is True
         assert torch_npu.npu.conv.allow_hf32 is True
 
         # 值 2：USE_FP16，allow_hf32 不额外置位
-        e2e_worker._setup_cube_math_type(npu, _case(attributes={"CubeMathType": "2"}), ctx)
+        cube_math_type.setup_cube_math_type(npu, _case(attributes={"CubeMathType": "2"}), ctx)
         assert torch_npu.npu.matmul.cube_math_type == torch_npu.npu.CubeMathType.USE_FP16
         assert torch_npu.npu.matmul.allow_hf32 is False
 
         # 同进程前序已改写（ctx 标记）：无属性用例复位基线，无跨用例泄漏
-        e2e_worker._setup_cube_math_type(npu, _case(attributes={}), ctx)
+        cube_math_type.setup_cube_math_type(npu, _case(attributes={}), ctx)
         assert torch_npu.npu.matmul.cube_math_type == torch_npu.npu.CubeMathType.KEEP_DTYPE
         assert torch_npu.npu.matmul.allow_hf32 is False
         assert torch_npu.npu.conv.allow_hf32 is False
@@ -153,7 +152,7 @@ class TestSetupCubeMathType:
     def test_invalid_value_warns_and_keeps_baseline(self, caplog):
         torch_npu = _import_torch_npu()
         with caplog.at_level("WARNING"):
-            e2e_worker._setup_cube_math_type(_npu_backend(), _case(attributes={"CubeMathType": 99}), _ctx())
+            cube_math_type.setup_cube_math_type(_npu_backend(), _case(attributes={"CubeMathType": 99}), _ctx())
         assert torch_npu.npu.matmul.cube_math_type == torch_npu.npu.CubeMathType.KEEP_DTYPE
         assert "CubeMathType" in caplog.text
 
@@ -170,7 +169,7 @@ class TestNormalize4BitGolden:
         golden = np.array([1, 2, 3, 4], dtype=int4)
         packed = np.array([0x21, 0x43], dtype=np.uint8)  # 低半字节在前
         outputs = [packed]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden])
+        e2e_utils.align_4bit_golden(outputs, [golden])
         assert outputs[0].dtype == int4
         assert outputs[0].tolist() == golden.tolist()
 
@@ -179,21 +178,21 @@ class TestNormalize4BitGolden:
         int4 = self._int4()
         golden = np.array([1, 2, 0, 0, 0, 0, 0, 0], dtype=int4)
         outputs = [np.array([0x21], dtype=np.int32)]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden])
+        e2e_utils.align_4bit_golden(outputs, [golden])
         assert outputs[0].dtype == int4
         assert outputs[0].tolist() == golden.tolist()
 
     def test_non_4bit_golden_untouched(self):
         golden = np.zeros((2, 2), dtype=np.float32)
         outputs = [np.ones((2, 2), dtype=np.int32)]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden])
+        e2e_utils.align_4bit_golden(outputs, [golden])
         assert outputs[0].dtype == np.int32
 
     def test_same_dtype_and_none_slots_skipped(self):
         int4 = self._int4()
         golden = np.array([1, 2], dtype=int4)
         outputs = [np.array([1, 2], dtype=int4), None]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden, None])
+        e2e_utils.align_4bit_golden(outputs, [golden, None])
         assert outputs[0].tolist() == [1, 2]
         assert outputs[1] is None
 
@@ -201,7 +200,7 @@ class TestNormalize4BitGolden:
         int4 = self._int4()
         golden = [np.array([1, 2], dtype=int4)]
         outputs = [np.array([0x21], dtype=np.uint8), np.array([9], dtype=np.int32)]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, golden)
+        e2e_utils.align_4bit_golden(outputs, golden)
         assert outputs[0].dtype == int4
         assert outputs[1].dtype == np.int32
 
@@ -210,7 +209,7 @@ class TestNormalize4BitGolden:
         int4 = self._int4()
         golden = np.array([1, 2, 3, 4, 5], dtype=int4)
         outputs = [np.array([0x21, 0x43, 0x05], dtype=np.uint8)]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden])
+        e2e_utils.align_4bit_golden(outputs, [golden])
         assert outputs[0].dtype == int4
         assert outputs[0].tolist() == golden.tolist()
 
@@ -219,7 +218,7 @@ class TestNormalize4BitGolden:
         int4 = self._int4()
         golden = np.array([1, 2, 3, 4, 5], dtype=int4)
         outputs = [np.array([0x00054321], dtype=np.int32)]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden])
+        e2e_utils.align_4bit_golden(outputs, [golden])
         assert outputs[0].tolist() == golden.tolist()
 
     def test_size_anomaly_beyond_pack_granularity_not_trimmed(self):
@@ -227,7 +226,7 @@ class TestNormalize4BitGolden:
         int4 = self._int4()
         golden = np.array([1, 2, 3, 4, 5], dtype=int4)
         outputs = [np.array([0x21, 0x43, 0x05, 0x00], dtype=np.uint8)]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden])
+        e2e_utils.align_4bit_golden(outputs, [golden])
         assert outputs[0].size == 8
 
     def test_nonzero_tail_not_trimmed(self):
@@ -235,6 +234,6 @@ class TestNormalize4BitGolden:
         int4 = self._int4()
         golden = np.array([1, 2, 3, 4, 5], dtype=int4)
         outputs = [np.array([0x21, 0x43, 0x65], dtype=np.uint8)]
-        e2e_worker._normalize_output_dtype_for_4bit_golden(outputs, [golden])
+        e2e_utils.align_4bit_golden(outputs, [golden])
         assert outputs[0].size == 6
         assert outputs[0].tolist() == [1, 2, 3, 4, 5, 6]

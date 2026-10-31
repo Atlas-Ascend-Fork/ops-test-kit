@@ -77,7 +77,7 @@ __all__ = [
     "Backend",
     "get_backend",
     "resolve_api",
-    # xpu.py
+    # xpu/
     "XpuResolver",
     "get_xpu_resolver",
     "register_xpu_resolver",
@@ -109,8 +109,6 @@ __all__ = [
     "TestcaseBase",
     "ApiTestcaseBase",
     "UniversalTestcaseFactory",
-    "coerce_value",
-    "match_overload",
 ]
 
 from . import backend as backend
@@ -192,9 +190,7 @@ from .testcase import (
     Table,
     TestcaseBase,
     UniversalTestcaseFactory,
-    coerce_value,
     iter_tables,
-    match_overload,
     read_table,
     resolved_sheet,
 )

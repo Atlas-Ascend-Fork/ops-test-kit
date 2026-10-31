@@ -18,6 +18,9 @@ torch 参数类型启发式与归一化。
 
 import ast
 import re
+from typing import List
+
+from ..api_model import ParamInfo
 
 _ARGS_TYPE_NORMALIZE = {
     "Tensor": "Tensor",
@@ -219,7 +222,7 @@ def _normalize_args_type(type_str: str) -> str:
 def _infer_type_from_name(name: str) -> str:
     """按参数名推断类型（命名启发式表：input/weight→Tensor、dim→int、dtype→
     torch.dtype、p→float…）。供 docstring/inspect 等无类型标注的源兜底；产物经
-    _is_inferred_type 识别，后续可被 annotations/别名覆盖。
+    _is_name_inferred_type 识别，后续可被 annotations/别名覆盖。
     """
     tensor_names = {
         "input",
@@ -460,3 +463,56 @@ def _coerce_default_value(raw: str, type_hint: str):
         except (ValueError, TypeError):
             return raw
     return raw
+
+
+def _is_name_inferred_type(type_str: str) -> bool:
+    """Check if a type was inferred from name rather than from an authoritative source.
+
+    For union types (e.g., 'int|tuple of ints'), returns True only if ALL members
+    are inferred types. If any member comes from an authoritative source (e.g.,
+    Args section), the whole type is considered non-inferred.
+    """
+    _INFERRED = frozenset(
+        {
+            "Tensor",
+            "float",
+            "int",
+            "bool",
+            "str",
+            "tuple of Tensors",
+            "tuple of ints",
+            "tuple of floats",
+            "list of Numbers",
+            "Number",
+            "Dtype",
+            "Device",
+            "Layout",
+        }
+    )
+    return all(t in _INFERRED for t in type_str.split("|"))
+
+
+def _enrich_types_from_annotations(params: List[ParamInfo], ann_params: List[ParamInfo]) -> List[ParamInfo]:
+    """Replace inferred types with real types from __annotations__.
+
+    Only overwrites types that came from _infer_type_from_name.
+    Authoritative types from docstring Args section or TypeError are kept.
+    Union types (containing '|') from Args section are considered authoritative
+    and are not overwritten by annotations.
+    Also fills in defaults from annotations/signature when missing.
+    """
+    if not ann_params:
+        return params
+    ann_map = {p.name: p for p in ann_params if p.type}
+    for p in params:
+        ann_p = ann_map.get(p.name)
+        if ann_p is None:
+            continue
+        # Union types from Args section are authoritative — don't overwrite
+        if _is_name_inferred_type(p.type) and "|" not in p.type and ann_p.type:
+            p.type = ann_p.type
+        if p.default is None and ann_p.default is not None:
+            p.default = ann_p.default
+        if not p.is_optional and ann_p.is_optional:
+            p.is_optional = ann_p.is_optional
+    return params

@@ -27,268 +27,33 @@ from ..api_model import (
     APIParamInfo,
     OverloadTensorLayout,
     ParamInfo,
+    is_tensor_method_name,
     resolve_function,
-    split_by_comma,
 )
-from .npu_declaration import _extract_params_from_op_declaration, _normalize_npu_type
-from .pyi_loader import _extract_params_from_pyi
-from .type_inference import _coerce_default_value, _infer_type_from_name, _infer_type_from_value, _normalize_args_type
-
-
-def _parse_params_from_signature(sig: str) -> Optional[List[ParamInfo]]:
-    """签名参数串 → List[ParamInfo]（docstring 首行 / TypeError 报错共用）。
-
-    支持 "Type name" / "name" / "name=default" 三形态；`*` 起置 kw-only、`/` 跳过；
-    未知类型按参数名推断、默认值串按推断类型还原。空/纯空白返回 None。
-    """
-    if not sig or sig.isspace():
-        return None
-    sig = sig.strip()
-    if sig.startswith("(") and sig.endswith(")"):
-        sig = sig[1:-1]
-    params = []
-    parts = split_by_comma(sig)
-    keyword_only = False
-    for part in parts:
-        part_s = part.strip()
-        if not part_s or part_s == "/":
-            continue
-        if part_s in ("*", "\\*"):
-            keyword_only = True
-            continue
-        default = None
-        is_optional = False
-        is_var_positional = False
-        if "=" in part_s:
-            main_part, default = part_s.split("=", 1)
-            main_part = main_part.strip()
-            default = default.strip()
-            is_optional = True
-        else:
-            main_part = part_s
-        if re.search(r"Optional\[|\|\s*None\b", part_s):
-            is_optional = True
-        # Detect *args (VAR_POSITIONAL) prefix, e.g. "*operands" or "*tensors"
-        if main_part.startswith("*") and not main_part.startswith("**"):
-            is_var_positional = True
-            main_part = main_part[1:].strip()
-        tokens = main_part.split()
-        if len(tokens) >= 2 and not tokens[0].startswith('"'):
-            first = tokens[0]
-            if ":" in first:
-                name = first.split(":")[0]
-                type_hint = main_part.split(":", 1)[1].strip()
-                type_hint = _normalize_doc_type(type_hint)
-                if not type_hint:
-                    type_hint = _infer_type_from_value(default) if default is not None else ""
-                    if not type_hint or type_hint == "Optional[Tensor]":
-                        type_hint = _infer_type_from_name(name)
-            else:
-                type_hint = tokens[0]
-                name = tokens[-1].rstrip("?)")
-                if type_hint in ("tuple", "list") and len(tokens) >= 3:
-                    type_hint = f"{tokens[0]} of {tokens[2]}"
-        elif len(tokens) == 1:
-            tok = tokens[0].strip("\"'")
-            if ":" in tok:
-                name, type_hint = tok.split(":", 1)
-                name = name.strip()
-                type_hint = type_hint.strip()
-                type_hint = _normalize_doc_type(type_hint)
-                if not type_hint:
-                    # Priority: default value inference > name inference
-                    # _infer_type_from_value returns empty string for unrecognizable
-                    # values (e.g., 'torch.xxx') and 'Optional[Tensor]' for None —
-                    # in both cases, fall back to name-based inference.
-                    type_hint = ""
-                    if default is not None:
-                        type_hint = _infer_type_from_value(default)
-                    if not type_hint or type_hint == "Optional[Tensor]":
-                        type_hint = _infer_type_from_name(name)
-            else:
-                name = tok
-                # Priority: default value inference > name inference
-                type_hint = ""
-                if default is not None:
-                    type_hint = _infer_type_from_value(default)
-                if not type_hint or type_hint == "Optional[Tensor]":
-                    type_hint = _infer_type_from_name(name)
-        else:
-            continue
-        if default is not None and isinstance(default, str):
-            value_type = _infer_type_from_value(default)
-            if type_hint == "Tensor" and value_type not in ("Tensor", "Optional[Tensor]", "tuple of Tensors"):
-                type_hint = value_type
-            default = _coerce_default_value(default, type_hint)
-        # Strip trailing '?' from type — it indicates optional in some
-        # docstring formats (e.g., 'str?', 'int[]?'). Mark as optional.
-        if type_hint.endswith("?"):
-            type_hint = type_hint[:-1]
-            is_optional = True
-        params.append(
-            ParamInfo(
-                name=name,
-                type=type_hint,
-                default=default,
-                is_optional=is_optional,
-                is_keyword_only=keyword_only,
-                is_var_positional=is_var_positional,
-            )
-        )
-    return params if params else None
-
-
-def _normalize_union_members(members_str: str, exclude_tensors: bool) -> str:
-    """联合成员归一：未知名（_complex 等）剔除、去重保序、'|' 拼接。
-
-    exclude_tensors=True 用于 Union[...]（Tensor 重载成员由 TypeError 解析覆盖）；
-    False 用于 '|' 联合——它是参数自身的显式注解，Tensor 成员保留。
-    """
-    tensor_members = {"Tensor", "tuple of Tensors", "list of Tensors", "List[Tensor]", "Tensor[]"}
-    members = []
-    for member in split_by_comma(members_str):
-        member_s = member.strip()
-        # 归一化前按原文排除 Tensor 类成员：Tuple[Tensor, ...] 经 _normalize_args_type
-        # 会退化成 tuple of ints，黑名单拦不住
-        if exclude_tensors and "Tensor" in member_s:
-            continue
-        normalized = _normalize_args_type(member_s)
-        if not normalized or normalized in members:
-            continue
-        if exclude_tensors and normalized in tensor_members:
-            continue
-        members.append(normalized)
-    return "|".join(members) if members else ""
-
-
-def _normalize_doc_type(type_str: str) -> str:
-    """Normalize type annotations from docstrings.
-
-    Examples: Tensor, Optional[Tensor], List[Tensor], Union[Number, Tensor], int, float, bool, str
-    """
-    type_str = type_str.strip()
-    if not type_str:
-        return ""
-    none_stripped = re.sub(r"\s*\|\s*None\b\s*$", "", type_str).strip()
-    if none_stripped != type_str:
-        return _normalize_doc_type(none_stripped)
-    if type_str.startswith("Optional["):
-        inner = type_str[len("Optional[") : -1]
-        return _normalize_doc_type(inner)
-    if type_str.startswith("List["):
-        inner = type_str[len("List[") : -1]
-        normalized_inner = _normalize_doc_type(inner)
-        return f"List[{normalized_inner}]" if normalized_inner else ""
-    if type_str.startswith("Union[") and type_str.endswith("]"):
-        return _normalize_union_members(type_str[len("Union[") : -1], exclude_tensors=True)
-    if "|" in type_str:
-        return _normalize_union_members(type_str.replace("|", ","), exclude_tensors=False)
-    return type_str
-
-
-def _parse_docstring_args_section(doc: str) -> Dict[str, Tuple[str, bool]]:
-    """Parse param types from docstring Args/Keyword arguments sections.
-
-    Matches lines like:
-        input (Tensor): the input tensor.
-        other (Tensor or Number): ...
-        out (Tensor, optional): ...
-
-    Returns dict of {param_name: (raw_type_string, is_optional)}.
-    """
-    if not doc:
-        return {}
-    type_map = {}
-    in_args = False
-    args_indent = 0
-    args_terminators = {
-        "Returns:",
-        "Example::",
-        "Examples::",
-        "Raises:",
-        "Note:",
-        "Notes:",
-        "Warning:",
-        "Warnings:",
-        "See Also:",
-        "References::",
-        "References:",
-        "Todo:",
-    }
-    for line in doc.split("\n"):
-        stripped = line.strip()
-        if stripped in ("Args:", "Arguments:", "Keyword arguments:", "Keyword Args:", "Keyword args:", "Kwargs:"):
-            in_args = True
-            args_indent = len(line) - len(line.lstrip())
-            continue
-        if not in_args:
-            continue
-        if (
-            stripped in args_terminators
-            or stripped.startswith(tuple(args_terminators))  # noqa: PIE810 保持
-            or (not stripped.startswith((" ", "\t", "*", ".")) and stripped.endswith(":") and stripped == line.rstrip())
-        ):
-            break
-        # Sphinx directives like ".. versionchanged::" appear inside Args
-        # sections but should not terminate parsing — just skip them.
-        if stripped.startswith(".."):
-            continue
-        if not stripped:
-            continue
-        line_indent = len(line) - len(line.lstrip())
-        # Skip continuation lines: indent strictly deeper than the first
-        # parameter definition level (args_indent + 4).  Using relative
-        # indentation instead of a hardcoded threshold (>= 12) ensures
-        # correctness for deeply-indented docstrings (e.g. torch.meshgrid).
-        if line_indent > args_indent + 4:
-            continue
-        m = re.match(r"\*{0,2}(\w+)\s*\(([^)]+)\).*:", stripped)
-        if m:
-            name = m.group(1)
-            type_str = m.group(2).strip()
-            is_opt = "optional" in type_str.lower()
-            type_str = re.sub(r",\s*optional\s*$", "", type_str, flags=re.IGNORECASE)
-            type_str = re.sub(r",\s*required\s*$", "", type_str, flags=re.IGNORECASE)
-            if type_str:
-                type_map[name] = (type_str, is_opt)
-            continue
-        m = re.match(r"\*{0,2}(\w+)\s*:\s*(.+)", stripped)
-        if m:
-            name = m.group(1)
-            desc = m.group(2).strip()
-            if name.lower().startswith(("default", "attr", "note", "example", "deprecated", "version", "see", "if")):
-                continue
-            if desc:
-                type_map.setdefault(name, (desc, False))
-    return type_map
-
-
-def _parse_return_count_from_first_line(first_line: str) -> int:
-    """Extract the number of return tensors from a docstring first-line ``->`` annotation.
-
-    Examples::
-
-        "func(...) -> Tensor"                          → 1
-        "func(...) -> (Tensor, LongTensor)"            → 2
-        "func(...) -> (Tensor, Tensor, Tensor)"        → 3
-        "func(...) -> None"                             → 0
-        "func(...) -> torch.return_types.sort"          → 0  (unresolvable custom type)
-        "func(...)"                                     → 0  (no annotation)
-    """
-    m = re.search(r"\)\s*->\s*(.+)$", first_line)
-    if not m:
-        return 0
-    ret = m.group(1).strip()
-    if ret.startswith("(") and ret.endswith(")"):
-        parts = [p.strip() for p in ret[1:-1].split(",") if p.strip()]
-        return len(parts)
-    if ret.lower() in ("none", ""):
-        return 0
-    # Single named type like "Tensor" → 1; unresolvable types like
-    # "torch.return_types.sort" → 0 (we cannot count fields).
-    if re.match(r"^[A-Za-z_]\w*$", ret):
-        return 1
-    return 0
+from .extract_cpp import (
+    _probe_cpp_signature,
+)
+from .extract_declaration import _extract_params_from_op_declaration
+from .extract_docstring import (
+    _extract_params_from_docstring,
+    _parse_docstring_args_section,  # noqa: F401  # re-export（测试直引）
+    _parse_params_from_signature,
+    _parse_return_count_from_first_line,  # noqa: F401  # re-export（测试直引）
+)
+from .extract_pyi import _extract_params_from_pyi
+from .extract_schema import (
+    _extract_params_from_aten_schemas,
+    _torch_dtype_type,
+    _torch_tensor_type,
+)
+from .type_inference import (
+    _coerce_default_value,  # noqa: F401  # re-export（测试直引）
+    _enrich_types_from_annotations,
+    _infer_type_from_name,  # noqa: F401  # re-export（测试直引）
+    _infer_type_from_value,  # noqa: F401  # re-export（测试直引）
+    _is_name_inferred_type,
+    _normalize_args_type,  # noqa: F401  # re-export（测试直引）
+)
 
 
 def _extract_params_from_type_error(obj) -> Optional[Tuple[List[ParamInfo], str, List[List[ParamInfo]]]]:
@@ -326,227 +91,8 @@ def _extract_params_from_type_error(obj) -> Optional[Tuple[List[ParamInfo], str,
     return None
 
 
-def _resolve_alias_from_docstring(api_name: str) -> Optional[str]:
-    """从 docstring 的 "Alias for :func:`xxx`" 引用解析别名目标名。"""
-    doc = getattr(resolve_function(api_name), "__doc__", "") or ""
-    m = re.search(r"Alias for :func:`([^`]+)`", doc)
-    if m:
-        return m.group(1)
-    return None
-
-
-def _extract_params_from_docstring(obj, api_name: str) -> Optional[Tuple[List[ParamInfo], str, int]]:
-    """Parse params from __doc__, supporting three docstring formats:
-
-    Format 1: first line is a signature like "func(input, other, *, out=None) -> Tensor"
-              → parse first line for names/defaults, enrich types from Args section
-    Format 2: first line is description, but Args section has typed params like "input (Tensor): ..."
-              → extract names/types directly from Args section
-    Format 3: first line has inline type annotations like "func(input: Tensor, *, out: Optional[Tensor])"
-              → parse types directly from first line, enrich from Args section
-
-    Returns (params, source, return_count) where return_count is the number of return
-    tensors parsed from the ``->`` annotation (0 when absent or unresolvable).
-    """
-    doc = getattr(obj, "__doc__", None)
-    if not doc:
-        return None
-
-    args_types = _parse_docstring_args_section(doc)
-    first_line = doc.strip().split("\n")[0].strip()
-    m = re.match(r"[\w.]+\((.+?)\)\s*(?:->.*)?$", first_line)
-
-    if m:
-        # Format 1 or 3: first line contains a signature
-        sig = m.group(1)
-        params = _parse_params_from_signature(sig)
-        if params:
-            # Priority 1: Args/Keyword Args section types
-            if args_types:
-                for p in params:
-                    if p.name in args_types:
-                        raw_type, is_opt = args_types[p.name]
-                        normalized = _normalize_args_type(raw_type)
-                        if normalized:
-                            p.type = normalized
-                        elif any(kw in raw_type.lower() for kw in ("list", "tuple")):
-                            elem_type = _infer_type_from_name(p.name)
-                            p.type = f"tuple of {elem_type}s"
-                        if is_opt:
-                            p.is_optional = True
-            # Priority 3: alias API types (for params with inferred types only)
-            alias_name = _resolve_alias_from_docstring(api_name)
-            if alias_name:
-                alias_result = extract_api_params(alias_name)
-                if alias_result:
-                    alias_map = {p.name: p for p in alias_result.params if p.type}
-                    for p in params:
-                        if p.name in alias_map and _is_inferred_type(p.type):
-                            p.type = alias_map[p.name].type
-            return (
-                params,
-                "docstring(first-line+Args)" if args_types else "docstring(first-line)",
-                _parse_return_count_from_first_line(first_line),
-            )
-
-    # Format 2: no signature in first line, but Args section has typed params
-    # Only use Args-only if at least some params had (Type) bracket format.
-    # If all params were parsed from "name: description" fallback (no brackets),
-    # the types are unreliable — let inspect.signature take priority.
-    if args_types:
-        has_bracket_types = any(
-            _normalize_args_type(raw_type) not in (None, "") for _, (raw_type, _) in args_types.items()
-        )
-        if not has_bracket_types:
-            return None
-        params = []
-        for name, (raw_type, is_opt) in args_types.items():
-            normalized = _normalize_args_type(raw_type)
-            params.append(
-                ParamInfo(
-                    name=name,
-                    type=normalized or _infer_type_from_name(name),
-                    default=None,
-                    is_optional=is_opt or normalized in ("Layout", "Device", "Dtype"),
-                )
-            )
-        if params:
-            # Format 2 has no signature line, so is_optional and default come
-            # only from the Args section's ", optional" marker.  Many params
-            # have default values in the actual Python signature (e.g.
-            # ``size=None``) that the docstring omits the optional tag for.
-            # Fall back to inspect.signature to enrich these fields.
-            inspect_result = _extract_params_from_inspect(obj)
-            if inspect_result:
-                _enrich_types_from_annotations(params, inspect_result[0])
-            return params, "docstring(Args-only)", 0
-
-    return None
-
-
-def _extract_params_from_aten_schemas(
-    api_name: str,
-) -> Optional[Tuple[List[ParamInfo], str, List[List[ParamInfo]], List[int]]]:
-    """从 torch 算子注册表解析（链上第一优先级源，FunctionSchema 权威元数据）。
-
-    OpOverloadPacket 带复数 _schemas；api_name 钉死具名重载时 resolve_function 返回
-    OpOverload 只有单数 _schema（不取则退 inspect 得 (*args, **kwargs)）。钉死重载时
-    只收该重载——防整个 packet 混入 *_out 变体（is_out_required 会让按返回值取输出的
-    用例误判 MISSING_REQUIRED_OUTPUT）。返回 (主参数表, source, 全重载, 返回数列表)。
-    """
-    obj = resolve_function(api_name)
-    if obj is None:
-        return None
-    if hasattr(obj, "_schemas"):
-        schemas = obj._schemas
-    elif hasattr(obj, "_schema"):
-        # api_name 钉死具名重载时 resolve_function 返回 OpOverload, 它只有单数 _schema;
-        # 不取这一支会退到 inspect.signature, 而 OpOverload.__call__ 的签名是
-        # (*args, **kwargs), 只能解析出一个 "args", 下游按形参名派发时长度对不上。
-        schemas = {api_name.rsplit(".", 1)[-1]: obj._schema}
-    else:
-        return None
-    if not schemas:
-        return None
-    # api_name 若钉死了具体重载(如 torch.ops.aten._foreach_addcmul.Tensor)，只解析该重载。
-    # resolve_function 会退回到 OpOverloadPacket(丢掉重载后缀)，若不在此过滤，整个
-    # packet 的重载都会被收进来——其中的 *_out 变体带 is_out_required=True，会让本来
-    # 靠返回值取输出的用例被误判为 MISSING_REQUIRED_OUTPUT；多重载并存也会导致
-    # CASE_FIELD_AMBIGUOUS。
-    overload_tail = api_name.rsplit(".", 1)[-1]
-    if overload_tail in schemas:
-        schemas = {overload_tail: schemas[overload_tail]}
-    all_overloads = []
-    return_counts = []
-    for schema in schemas.values():
-        params = _parse_aten_schema_arguments(schema)
-        if params:
-            all_overloads.append(params)
-            return_counts.append(len(schema.returns) if hasattr(schema, "returns") else 0)
-    if not all_overloads:
-        return None
-    primary = max(all_overloads, key=lambda ov: sum(1 for p in ov if p.is_optional))
-    _first_schema = next(iter(schemas.values()))
-    namespace = getattr(_first_schema, "name", api_name.rsplit(".", 1)[0]).split("::")[0]
-    source = (
-        f"{namespace}._schemas({len(all_overloads)} overloads)" if len(all_overloads) > 1 else f"{namespace}._schemas"
-    )
-    return primary, source, all_overloads, return_counts
-
-
-def _parse_aten_schema_arguments(schema) -> Optional[List[ParamInfo]]:
-    """FunctionSchema.arguments → List[ParamInfo]（默认值 / Optional[...] 可选性 / kwarg_only）。
-
-    写别名（alias_info.is_write，如 add_ 的 Tensor(a!) self）逐参数落 is_mutable ——
-    参数级可变性与签名同源，解析期即确定。
-    """
-    params = []
-    for arg in schema.arguments:
-        name = arg.name
-        if not name:
-            continue
-        type_str = _normalize_aten_schema_type(str(arg.type))
-        default = None
-        is_optional = False
-        if arg.has_default_value():
-            default = arg.default_value
-            is_optional = True
-            if isinstance(default, (list, tuple)):
-                default = list(default)
-        elif str(arg.type).startswith("Optional["):
-            is_optional = True
-        is_keyword_only = arg.kwarg_only if hasattr(arg, "kwarg_only") else False
-        alias = getattr(arg, "alias_info", None)
-        params.append(
-            ParamInfo(
-                name=name,
-                type=type_str,
-                default=default,
-                is_optional=is_optional,
-                is_keyword_only=is_keyword_only,
-                is_mutable=bool(alias and alias.is_write),
-            )
-        )
-    return params if params else None
-
-
-def _normalize_aten_schema_type(t: str) -> str:
-    """schema 类型词归一：Optional[...] 剥壳、List[...] → tuple of xxx，余者走 npu 词表。"""
-    if t.startswith("Optional[") and t.endswith("]"):
-        inner = t[len("Optional[") : -1]
-        return _normalize_aten_schema_type(inner)
-    if t.startswith("List[") and t.endswith("]"):
-        inner = t[len("List[") : -1]
-        inner_mapped = _normalize_aten_schema_type(inner)
-        if inner_mapped == "Tensor":
-            return "tuple of Tensors"
-        return f"tuple of {inner_mapped}s"
-    return _normalize_npu_type(t)
-
-
-_SCALAR_ANNOTATION_TYPES = {bool: "bool", int: "int", float: "float", str: "str"}
-
 _SEQUENCE_INNER_TYPES = {"Tensor": "tuple of Tensors", "int": "tuple of ints", "float": "tuple of floats"}
-
-
-def _torch_tensor_type():
-    """torch.Tensor;torch 不可用时返回一个不会与任何注解相等的哨兵。"""
-    try:
-        import torch
-
-        return torch.Tensor
-    except ImportError:
-        return object()
-
-
-def _torch_dtype_type():
-    """torch.dtype;torch 不可用时返回一个不会与任何注解相等的哨兵。"""
-    try:
-        import torch
-
-        return torch.dtype
-    except ImportError:
-        return object()
+_SCALAR_ANNOTATION_TYPES = {bool: "bool", int: "int", float: "float", str: "str"}
 
 
 def _sequence_annotation_to_type(annotation) -> str:
@@ -675,7 +221,7 @@ def _extract_params_from_inspect(obj) -> Optional[Tuple[List[ParamInfo], str]]:
             type_hint = _annotation_to_type(param.annotation)
         else:
             type_hint = _infer_type_from_name(pname)
-        if _is_inferred_type(type_hint) and param.default != _inspect.Parameter.empty:
+        if _is_name_inferred_type(type_hint) and param.default != _inspect.Parameter.empty:
             if isinstance(param.default, bool):
                 type_hint = "bool"
             elif isinstance(param.default, int):
@@ -696,59 +242,6 @@ def _extract_params_from_inspect(obj) -> Optional[Tuple[List[ParamInfo], str]]:
     return (params, "inspect.signature") if params else None
 
 
-def _is_inferred_type(type_str: str) -> bool:
-    """Check if a type was inferred from name rather than from an authoritative source.
-
-    For union types (e.g., 'int|tuple of ints'), returns True only if ALL members
-    are inferred types. If any member comes from an authoritative source (e.g.,
-    Args section), the whole type is considered non-inferred.
-    """
-    _INFERRED = frozenset(
-        {
-            "Tensor",
-            "float",
-            "int",
-            "bool",
-            "str",
-            "tuple of Tensors",
-            "tuple of ints",
-            "tuple of floats",
-            "list of Numbers",
-            "Number",
-            "Dtype",
-            "Device",
-            "Layout",
-        }
-    )
-    return all(t in _INFERRED for t in type_str.split("|"))
-
-
-def _enrich_types_from_annotations(params: List[ParamInfo], ann_params: List[ParamInfo]) -> List[ParamInfo]:
-    """Replace inferred types with real types from __annotations__.
-
-    Only overwrites types that came from _infer_type_from_name.
-    Authoritative types from docstring Args section or TypeError are kept.
-    Union types (containing '|') from Args section are considered authoritative
-    and are not overwritten by annotations.
-    Also fills in defaults from annotations/signature when missing.
-    """
-    if not ann_params:
-        return params
-    ann_map = {p.name: p for p in ann_params if p.type}
-    for p in params:
-        ann_p = ann_map.get(p.name)
-        if ann_p is None:
-            continue
-        # Union types from Args section are authoritative — don't overwrite
-        if _is_inferred_type(p.type) and "|" not in p.type and ann_p.type:
-            p.type = ann_p.type
-        if p.default is None and ann_p.default is not None:
-            p.default = ann_p.default
-        if not p.is_optional and ann_p.is_optional:
-            p.is_optional = ann_p.is_optional
-    return params
-
-
 def _strip_inplace_if_separate_exists(api_name: str, params: List[ParamInfo]) -> List[ParamInfo]:
     """torch.xxx_ 存在独立原地 API 时移除 inplace 参数（原地变体单独测试的设计约定）。"""
     if not api_name.startswith("torch.") or api_name.startswith("torch.nn."):  # noqa: PIE810 保持
@@ -765,290 +258,6 @@ def _strip_inplace_if_separate_exists(api_name: str, params: List[ParamInfo]) ->
 
 
 # Step 4 kw-only 校验的类型修正探测表（窄表：仅标量类型互转）
-_KW_ONLY_ALT_PROBES = {
-    "str": [("int", 1)],
-    "int": [("str", "mean")],
-    "Dtype": [("int", 0)],
-    "torch.dtype": [("int", 0)],
-    "bool": [("str", "mean")],
-}
-
-# Step 3 fallback 可选参数校验的探测表（宽表：含 Tensor 类型名互转）
-_OPTIONAL_ALT_PROBES = {
-    "str": [("int", 1)],
-    "int": [("str", "mean")],
-    "Dtype": [("int", 0)],
-    "torch.dtype": [("int", 0)],
-    "bool": [("str", "mean")],
-    "torch.Tensor": "Tensor",
-    "torch.BoolTensor": "Tensor",
-    "torch.IntTensor": "Tensor",
-    "torch.LongTensor": "Tensor",
-    "torch.FloatTensor": "Tensor",
-    "torch.DoubleTensor": "Tensor",
-}
-
-
-def _build_probes(params: List[ParamInfo]) -> Optional[list]:
-    """按参数类型构造探测值列表；遇到未知类型返回 None。"""
-    import torch as _torch
-
-    _PROBE_MAP = {
-        "int": 0,
-        "float": 1.0,
-        "Number": 1.0,
-        "bool": False,
-        "str": "mean",
-        "torch.dtype": _torch.float32,
-        "Dtype": _torch.float32,
-        "torch.memory_format": _torch.contiguous_format,
-    }
-
-    dummy = _torch.zeros(2, 3)
-    probes = []
-    for p in params:
-        if p.is_tensor_like:
-            probes.append(dummy)
-        else:
-            val = _PROBE_MAP.get(p.type)
-            if val is None:
-                return None
-            probes.append(val)
-    return probes
-
-
-def _extract_cpp_param_names(obj) -> Optional[set]:
-    """从 "missing N required positional" TypeError 提取 C++ 实参名集。"""
-    try:
-        obj()
-    except TypeError as e:
-        msg = str(e)
-        m = re.search(r"missing \d+ required positional arguments?: (.+)", msg)
-        return {n.strip().strip("\"'") for n in m.group(1).split(",")} if m else None
-    except Exception:
-        return None
-
-
-def _detect_max_positional(obj, probes, param_count: int) -> int:
-    """渐进调用探测最大位置参数边界。
-
-    已知权衡：任意异常（"error"）按"执行失败≠签名拒绝"计为有效边界（与
-    _fix_param_type_by_alt_probes 的探测协议一致），设备级错误会污染判定——
-    探测仅发生在解析期，调用方须保证探测环境可用。"""
-
-    def _classify(n):
-        try:
-            obj(*probes[:n])
-            return "ok"
-        except TypeError as e:
-            msg = str(e).lower()
-            if "too many" in msg or ("takes" in msg and "positional" in msg):
-                return "too_many"
-            if "invalid combination" in msg:
-                return "too_many"
-            if "missing" in msg:
-                return "missing"
-            return "error"
-        except Exception:
-            return "error"
-
-    max_pos = 0
-    found_valid = False
-    for n in range(param_count + 1):
-        result = _classify(n)
-        if result in ("ok", "error"):
-            max_pos = n
-            found_valid = True
-        elif result == "missing":
-            continue
-        elif result == "too_many" and found_valid:
-            break
-    return max_pos
-
-
-def _first_optional_index(params: List[ParamInfo]) -> int:
-    for i, p in enumerate(params):
-        if p.is_optional:
-            return i
-    return len(params)
-
-
-def _remove_deprecated_loss_params(params: List[ParamInfo], cpp_param_set: set) -> set:
-    """剔除 C++ 签名中不存在的废弃 loss 参数（size_average/reduce），返回剔除名集。"""
-    _DEPRECATED_LOSS_PARAMS = {"size_average": "bool", "reduce": "bool"}
-    to_remove = []
-    removed_names = set()
-    for i, p in enumerate(params):
-        if (
-            p.name in _DEPRECATED_LOSS_PARAMS
-            and _DEPRECATED_LOSS_PARAMS[p.name] == p.type
-            and p.name not in cpp_param_set
-        ):
-            to_remove.append(i)
-            removed_names.add(p.name)
-    for idx in reversed(to_remove):
-        params.pop(idx)
-    return removed_names
-
-
-def _fix_param_type_by_alt_probes(obj, call_args, p: ParamInfo, alt_probes) -> bool:
-    """按 alt 探测表尝试修正参数类型/默认值；返回是否修正成功。
-
-    TypeError 视为该 alt 值不被接受（换下一个）；其他异常视为"接受但执行
-    失败"，同样完成类型修正（与原始探测协议一致）。
-    """
-    fixed = False
-    for alt_type, alt_val in alt_probes.get(p.type, []):
-        try:
-            obj(*call_args, **{p.name: alt_val})
-            p.type = alt_type
-            p.default = alt_val
-            fixed = True
-            break
-        except TypeError:
-            continue
-        except Exception:
-            p.type = alt_type
-            p.default = alt_val
-            fixed = True
-            break
-    return fixed
-
-
-def _verify_keyword_only_params(obj, params: List[ParamInfo], probes, max_pos: int):
-    """验证 kw-only 参数确实被 C++ 接受；类型不符尝试 alt 探测修正，仍失败则剔除。"""
-    kw_only_params = [(i, params[i], probes[i]) for i in range(len(params)) if params[i].is_keyword_only]
-    if not kw_only_params:
-        return
-
-    base = probes[: _first_optional_index(params)]
-
-    to_remove = []
-    for idx, p, val in kw_only_params:
-        try:
-            obj(*base, **{p.name: val})
-        except TypeError as _te:
-            _te_msg = str(_te).lower()
-            if "unexpected keyword" not in _te_msg:
-                continue
-            if not _fix_param_type_by_alt_probes(obj, base, p, _KW_ONLY_ALT_PROBES):
-                to_remove.append(idx)
-        except Exception as _e:
-            logging.debug("param extract skipped: %s", _e)
-    for idx in reversed(to_remove):
-        params.pop(idx)
-
-
-def _verify_optional_params_by_kwargs(obj, params: List[ParamInfo], probes, max_pos: int):
-    """kwarg 探测验证可选参数（Step 3 fallback）；剔除后经约定恢复（size_average→reduction）。"""
-    first_optional = _first_optional_index(params)
-    if first_optional >= len(params):
-        return
-
-    kw_params = [(i, params[i], probes[i]) for i in range(first_optional, len(params))]
-    to_remove = []
-    for idx, p, val in kw_params:
-        test_pos = [probes[j] for j in range(max_pos) if j != idx]
-        try:
-            obj(*test_pos, **{p.name: val})
-        except TypeError as _te:
-            _te_msg = str(_te).lower()
-            if "missing" in _te_msg and "required positional" in _te_msg:
-                continue
-            if "unexpected keyword" not in _te_msg and "got an unexpected keyword" not in _te_msg:
-                continue
-            if not _fix_param_type_by_alt_probes(obj, test_pos, p, _OPTIONAL_ALT_PROBES):
-                to_remove.append(idx)
-        except Exception as _e:
-            logging.debug("param extract skipped: %s", _e)
-    removed_names = set()
-    for idx in reversed(to_remove):
-        removed_names.add(params[idx].name)
-        params.pop(idx)
-
-    if removed_names:
-        _try_recover_removal(obj, probes[:first_optional], params, removed_names)
-
-
-def _detect_keyword_only_by_probing(obj, params: List[ParamInfo]):
-    """Probe a C++ builtin to detect keyword-only boundary and validate param names.
-
-    Strategy:
-    1. Extract actual C++ param names from "missing N required positional" TypeError
-    2. Detect max positional boundary by progressive calling
-    3. Remove params not in C++ signature, recover via convention (size_average→reduction)
-
-    Only called for C++ builtins (no inspect.signature available).
-    """
-    if not params or any(p.is_keyword_only for p in params):
-        return
-
-    probes = _build_probes(params)
-    if probes is None:
-        return
-
-    # Step 1: Extract actual C++ param names from TypeError
-    cpp_param_set = _extract_cpp_param_names(obj)
-
-    # Step 2: Detect max positional boundary
-    max_pos = _detect_max_positional(obj, probes, len(params))
-    for i in range(max_pos, len(params)):
-        params[i].is_keyword_only = True
-
-    # Step 3: Remove deprecated params not in C++ signature (if we have ground truth)
-    if cpp_param_set is not None:
-        removed_names = _remove_deprecated_loss_params(params, cpp_param_set)
-        if removed_names:
-            _try_recover_removal(obj, probes[: _first_optional_index(params)], params, removed_names)
-
-    # Step 4: Verify keyword-only params are actually accepted by C++.
-    # 无 kw-only 参数时提前返回——原逻辑此时整个探测收尾，fallback 不再执行。
-    if not any(p.is_keyword_only for p in params):
-        return
-    _verify_keyword_only_params(obj, params, probes, max_pos)
-
-    # Step 3 fallback: verify optional params by kwarg probing
-    _verify_optional_params_by_kwargs(obj, params, probes, max_pos)
-
-
-def _try_recover_removal(obj, pos_probes, params, removed_names):
-    """probing 剔除参数后的恢复：已废弃名（size_average/reduce）映射现代等价 reduction——
-    已存在则改写其类型/默认；不存在则探调验证可接受后按 kw-only 补插。
-    """
-    import importlib.util
-
-    if importlib.util.find_spec("torch") is None:
-        return
-
-    _DEPRECATED_TO_MODERN = {
-        "size_average": ("reduction", "int", 1),
-        "reduce": ("reduction", "int", 1),
-    }
-
-    for old_name in removed_names:
-        if old_name not in _DEPRECATED_TO_MODERN:
-            continue
-        new_name, new_type, new_default = _DEPRECATED_TO_MODERN[old_name]
-        existing = next((p for p in params if p.name == new_name), None)
-        if existing is not None:
-            existing.type = new_type
-            existing.default = new_default
-            existing.is_keyword_only = True
-            continue
-        try:
-            obj(*pos_probes, **{new_name: new_default})
-        except TypeError:
-            continue
-        except Exception as _e:
-            logging.debug("param extract skipped: %s", _e)
-        existing_kw = [p for p in params if p.is_keyword_only]
-        insert_idx = len(params)
-        if existing_kw:
-            insert_idx = params.index(existing_kw[0])
-        params.insert(
-            insert_idx,
-            ParamInfo(name=new_name, type=new_type, default=new_default, is_optional=True, is_keyword_only=True),
-        )
 
 
 def _strip_alias_extra_params(api_name: str, params: List[ParamInfo]) -> List[ParamInfo]:
@@ -1070,7 +279,7 @@ def _strip_alias_extra_params(api_name: str, params: List[ParamInfo]) -> List[Pa
     is_cpp = obj is not None and type(obj).__name__ == "builtin_function_or_method"
 
     if is_cpp:
-        _detect_keyword_only_by_probing(obj, params)
+        _probe_cpp_signature(obj, params)
 
     return params
 
@@ -1150,6 +359,133 @@ def _extract_params_from_functional_alias(api_name: str) -> Optional[Tuple[List[
     return None
 
 
+def _prefer_inspect_var_args(obj, params, api_name, ann_result=None):
+    """当前源缺 *args 张量位、inspect.signature 有 → 换 inspect 结果。
+
+    docstring 把 ``*tensors`` 记成普通参数、__annotations__ 直接省略 *args
+    条目，两类源都表达不了 VAR_POSITIONAL；inspect 能查到即更准确，返回
+    换源后的 APIParamInfo（source="inspect.signature"），否则 None。
+    ann_result 给定时顺带补类型。"""
+    has_var_pos = any(getattr(p, "is_var_positional", False) for p in params)
+    if has_var_pos:
+        return None
+    inspect_result = _extract_params_from_inspect(obj)
+    if not inspect_result:
+        return None
+    inspect_has_var_pos = any(getattr(p, "is_var_positional", False) for p in inspect_result[0])
+    if not inspect_has_var_pos:
+        return None
+    inspect_params = inspect_result[0]
+    inspect_names = {p.name for p in inspect_params}
+    if inspect_names <= {"args", "kwargs"}:
+        return None
+    if ann_result:
+        _enrich_types_from_annotations(inspect_result[0], ann_result[0])
+    _strip_alias_extra_params(api_name, inspect_result[0])
+    return APIParamInfo(api_name=api_name, params=inspect_result[0], source="inspect.signature")
+
+
+def _prefer_inspect_keyword_only(obj, params, api_name):
+    """当前源无 kw-only 参数、inspect.signature 有 → 换 inspect 结果。
+
+    docstring 保不住 ``*`` 分隔，kw-only 边界丢失；inspect 查到即更准确。
+    返回换源后的 APIParamInfo（source="inspect.signature"），否则 None。"""
+    has_kw = any(getattr(p, "is_keyword_only", False) for p in params)
+    if has_kw:
+        return None
+    inspect_result = _extract_params_from_inspect(obj)
+    if not inspect_result:
+        return None
+    inspect_has_kw = any(getattr(p, "is_keyword_only", False) for p in inspect_result[0])
+    if not inspect_has_kw:
+        return None
+    inspect_names = {p.name for p in inspect_result[0]}
+    if inspect_names <= {"args", "kwargs"}:
+        return None
+    _strip_alias_extra_params(api_name, inspect_result[0])
+    return APIParamInfo(api_name=api_name, params=inspect_result[0], source="inspect.signature")
+
+
+def extract_api_params(api_name: str) -> Optional[APIParamInfo]:
+    """解析入口（异常收敛）：链上任一源抛异常 → warning 日志 + None。"""
+    try:
+        return _extract_api_params_impl(api_name)
+    except Exception as e:
+        logging.warning(f"extract_api_params({api_name}) raised {type(e).__name__}: {e}")
+        return None
+
+
+def _extract_api_params_impl(api_name: str) -> Optional[APIParamInfo]:
+    """多源解析链编排：纯路由（对象解析归各族函数），矩阵见 _extract_params_from_generic。
+
+    A schema 注册表 —— _extract_params_from_aten_schemas：resolved 对象带
+                      _schemas（torch.ops.*、torch_npu.* ≥2.9）即 FunctionSchema
+                      权威直出，任意 api_name 形态均先试；
+    B npu 族        —— _extract_params_from_npu：Declaration → docstring → inspect
+                      族内闭合链。torch_npu.* 三级穷尽即终止（不出族）；
+                      torch.npu_*（deprecated 别名）仅 Declaration 一级；
+    C 通用          —— 其余全部（含 B 出族的 torch.npu_* 别名）：
+                      D/T/A 组合裁决 + 后备链（inspect → 别名 → pyi）。
+    """
+    # The extension package is imported by FrameworkApiInfoKeeper.get before
+    # this is reached; no import here.
+    info = _extract_params_from_aten_schemas(api_name)
+    if info:
+        return info
+
+    info = _extract_params_from_npu(api_name)
+    if info is not None:
+        return info
+
+    if api_name.startswith("torch_npu."):
+        return None  # npu 族内穷尽（Declaration/docstring/inspect 全败），不出族
+
+    return _extract_params_from_generic(api_name)
+
+
+def _extract_params_from_npu(api_name: str) -> Optional[APIParamInfo]:
+    """npu 族内闭合链：Declaration → docstring → inspect（首到先得）。
+
+    域：torch_npu.*（三级全走，穷尽返回 None，编排层终止）+ torch.npu_*
+    （deprecated 别名，仅 Declaration 一级——None 后由编排层路由至通用链）。
+    Declaration 入口自门控（extract_declaration.py，内部自行 resolve）；本函数
+    只做族内编排与包装。
+    """
+    result = _extract_params_from_op_declaration(api_name)
+    if result:
+        params, source, return_count = result
+        return APIParamInfo(api_name=api_name, params=params, source=source, _return_counts=[return_count])
+
+    if not api_name.startswith("torch_npu."):
+        return None
+    obj = resolve_function(api_name)
+    if obj is None:
+        return None
+    doc_result = _extract_params_from_docstring(obj, api_name)
+    if doc_result:
+        params, source, doc_rc = doc_result
+        return APIParamInfo(api_name=api_name, params=params, source=source, _return_counts=[doc_rc] if doc_rc else [])
+    result = _extract_params_from_inspect(obj)
+    if result:
+        params, source = result
+        return APIParamInfo(api_name=api_name, params=params, source=source)
+    return None
+
+
+def _apply_inspect_preference(obj, params, api_name, ann, kw_first: bool = False):
+    """inspect 更准时换用：docstring 缺 kw-only 或 *args 张量位时。
+
+    kw_first：先探 kw-only（docstring 源特有），再探 *args；
+    不换源返回 None，由调用方 finalize。
+    """
+    if kw_first:
+        upgraded = _prefer_inspect_keyword_only(obj, params, api_name)
+        if upgraded:
+            return upgraded
+    upgraded = _prefer_inspect_var_args(obj, params, api_name, ann)
+    return upgraded
+
+
 def _merge_docstring_and_type_error(
     doc_params: List[ParamInfo], te_params: List[ParamInfo]
 ) -> Optional[List[ParamInfo]]:
@@ -1182,9 +518,9 @@ def _merge_docstring_and_type_error(
         # Pick type: prefer authoritative over inferred
         if bp.type == op.type:
             ptype = bp.type
-        elif _is_inferred_type(bp.type) and not _is_inferred_type(op.type):
+        elif _is_name_inferred_type(bp.type) and not _is_name_inferred_type(op.type):
             ptype = op.type
-        elif not _is_inferred_type(bp.type) and _is_inferred_type(op.type):
+        elif not _is_name_inferred_type(bp.type) and _is_name_inferred_type(op.type):
             ptype = bp.type
         else:
             # Both are specific but different — prefer TypeError (C++ ground truth)
@@ -1210,140 +546,7 @@ def _merge_docstring_and_type_error(
     return merged if merged else None
 
 
-def _try_upgrade_to_inspect_if_var_pos(obj, params, api_name, ann_result=None):
-    """Try replacing *params* with inspect.signature result when VAR_POSITIONAL is needed.
-
-    Docstring and annotation sources cannot capture ``*args`` tensor parameters:
-    - ``__annotations__`` omits ``*args`` entries entirely
-    - Docstring Args sections list ``*tensors`` as a normal param without
-      the ``is_var_positional`` flag
-
-    When the current extraction source has no VAR_POSITIONAL tensor param
-    but inspect.signature finds one, the inspect result is strictly more
-    accurate and should be used instead.
-
-    Args:
-        obj: Resolved callable.
-        params: Current extraction result (list of ParamInfo).
-        api_name: Full API name (e.g. "torch.meshgrid").
-        ann_result: Optional annotation result for type enrichment.
-
-    Returns:
-        APIParamInfo built from inspect params if an upgrade was performed,
-        otherwise None.
-    """
-    has_var_pos = any(getattr(p, "is_var_positional", False) for p in params)
-    if has_var_pos:
-        return None
-    inspect_result = _extract_params_from_inspect(obj)
-    if not inspect_result:
-        return None
-    inspect_has_var_pos = any(getattr(p, "is_var_positional", False) for p in inspect_result[0])
-    if not inspect_has_var_pos:
-        return None
-    inspect_params = inspect_result[0]
-    inspect_names = {p.name for p in inspect_params}
-    if inspect_names <= {"args", "kwargs"}:
-        return None
-    if ann_result:
-        _enrich_types_from_annotations(inspect_result[0], ann_result[0])
-    _strip_alias_extra_params(api_name, inspect_result[0])
-    return APIParamInfo(api_name=api_name, params=inspect_result[0], source="inspect.signature")
-
-
-def _try_upgrade_to_inspect_if_kw_mismatch(obj, params, api_name):
-    """Upgrade to inspect.signature when keyword-only params are missing.
-
-    Docstring-based extraction cannot detect keyword-only boundaries (the ``*``
-    separator is not preserved).  If inspect.signature reports KEYWORD_ONLY
-    params but the current params have none, inspect is strictly more accurate.
-    """
-    has_kw = any(getattr(p, "is_keyword_only", False) for p in params)
-    if has_kw:
-        return None
-    inspect_result = _extract_params_from_inspect(obj)
-    if not inspect_result:
-        return None
-    inspect_has_kw = any(getattr(p, "is_keyword_only", False) for p in inspect_result[0])
-    if not inspect_has_kw:
-        return None
-    inspect_names = {p.name for p in inspect_result[0]}
-    if inspect_names <= {"args", "kwargs"}:
-        return None
-    _strip_alias_extra_params(api_name, inspect_result[0])
-    return APIParamInfo(api_name=api_name, params=inspect_result[0], source="inspect.signature")
-
-
-def extract_api_params(api_name: str) -> Optional[APIParamInfo]:
-    """解析入口（异常收敛）：链上任一源抛异常 → warning 日志 + None。"""
-    try:
-        return _extract_api_params_impl(api_name)
-    except Exception as e:
-        logging.warning(f"extract_api_params({api_name}) raised {type(e).__name__}: {e}")
-        return None
-
-
-def _extract_api_params_impl(api_name: str) -> Optional[APIParamInfo]:
-    """多源解析链编排：纯路由（对象解析归各族函数），矩阵见 _combine_generic_sources。
-
-    A schema 注册表 —— _extract_params_from_aten_schemas：resolved 对象带
-                      _schemas（torch.ops.*、torch_npu.* ≥2.9）即 FunctionSchema
-                      权威直出，任意 api_name 形态均先试；
-    B npu 族        —— _from_npu_sources：Declaration → docstring → inspect
-                      族内闭合链。torch_npu.* 三级穷尽即终止（不出族）；
-                      torch.npu_*（deprecated 别名）仅 Declaration 一级；
-    C 通用          —— 其余全部（含 B 出族的 torch.npu_* 别名）：
-                      D/T/A 组合裁决 + 后备链（inspect → 别名 → pyi）。
-    """
-    # The extension package is imported by FrameworkApiInfoKeeper.get before
-    # this is reached; no import here.
-    result = _extract_params_from_aten_schemas(api_name)
-    if result:
-        params, source, overloads, return_counts = result
-        return APIParamInfo(
-            api_name=api_name, params=params, source=source, overloads=overloads, _return_counts=return_counts
-        )
-
-    info = _from_npu_sources(api_name)
-    if info is not None:
-        return info
-
-    if api_name.startswith("torch_npu."):
-        return None  # npu 族内穷尽（Declaration/docstring/inspect 全败），不出族
-
-    return _combine_generic_sources(api_name)
-
-
-def _from_npu_sources(api_name: str) -> Optional[APIParamInfo]:
-    """npu 族内闭合链：Declaration → docstring → inspect（首到先得）。
-
-    域：torch_npu.*（三级全走，穷尽返回 None，编排层终止）+ torch.npu_*
-    （deprecated 别名，仅 Declaration 一级——None 后由编排层路由至通用链）。
-    Declaration 入口自门控（npu_declaration.py，内部自行 resolve）；本函数
-    只做族内编排与包装。
-    """
-    result = _extract_params_from_op_declaration(api_name)
-    if result:
-        params, source, return_count = result
-        return APIParamInfo(api_name=api_name, params=params, source=source, _return_counts=[return_count])
-
-    if not api_name.startswith("torch_npu."):
-        return None
-    obj = resolve_function(api_name)
-    if obj is None:
-        return None
-    doc_result = _extract_params_from_docstring(obj, api_name)
-    if doc_result:
-        params, source, doc_rc = doc_result
-        return APIParamInfo(api_name=api_name, params=params, source=source, _return_counts=[doc_rc] if doc_rc else [])
-    result = _extract_params_from_inspect(obj)
-    if result:
-        params, source = result
-        return APIParamInfo(api_name=api_name, params=params, source=source)
-    return None
-
-
-def _combine_generic_sources(api_name: str) -> Optional[APIParamInfo]:
+def _extract_params_from_generic(api_name: str) -> Optional[APIParamInfo]:
     """通用家族组合裁决矩阵（D=docstring，T=TypeError，A=annotations，三者先并行采集）。
 
     首个命中即返回：
@@ -1379,13 +582,8 @@ def _combine_generic_sources(api_name: str) -> Optional[APIParamInfo]:
 
     if doc:  # ③
         params, source, doc_rc = doc
-        upgraded = _try_upgrade_to_inspect_if_kw_mismatch(obj, params, api_name)
-        if upgraded:
-            return upgraded
-        upgraded = _try_upgrade_to_inspect_if_var_pos(obj, params, api_name, ann)
-        if upgraded:
-            return upgraded
-        return _finalize(api_name, params, source, ann, return_counts=[doc_rc] if doc_rc else [])
+        upgraded = _apply_inspect_preference(obj, params, api_name, ann, kw_first=True)
+        return upgraded or _finalize(api_name, params, source, ann, return_counts=[doc_rc] if doc_rc else [])
 
     if te:  # ④
         params, source, _overloads = te
@@ -1393,12 +591,8 @@ def _combine_generic_sources(api_name: str) -> Optional[APIParamInfo]:
 
     if ann:  # ⑤
         params, source = ann
-        # __annotations__ 完全省略 *args（VAR_POSITIONAL）参数：零张量参数时
-        # 升级 inspect 以捕获 *args 张量位。
-        upgraded = _try_upgrade_to_inspect_if_var_pos(obj, params, api_name)
-        if upgraded:
-            return upgraded
-        return _finalize(api_name, params, source)
+        upgraded = _apply_inspect_preference(obj, params, api_name, None)
+        return upgraded or _finalize(api_name, params, source)
 
     result = _extract_params_from_inspect(obj)  # ⑥
     if result:
@@ -1470,12 +664,6 @@ def register_api_params(api_name: str, params: List[ParamInfo], source: str = "m
     _MANUAL_OVERRIDES[api_name] = APIParamInfo(api_name=api_name, params=params, source=source)
 
 
-def _is_tensor_method(api_name: str) -> bool:
-    """torch.Tensor.xxx 方法名判定（≥3 段且第二段为 Tensor）。"""
-    parts = api_name.split(".")
-    return len(parts) >= 3 and parts[0] == "torch" and parts[1] == "Tensor"
-
-
 def get_api_params(api_name: str) -> Optional[APIParamInfo]:
     """keeper 面解析入口：manual 表首查（惰性装载 hccl 表）→ 六源链 → Tensor 方法
     补 self 位（别名结果已含 self 等价张量的除外）→ 置解析标志（is_tensor_method /
@@ -1485,21 +673,32 @@ def get_api_params(api_name: str) -> Optional[APIParamInfo]:
     if api_name in _MANUAL_OVERRIDES:
         return _MANUAL_OVERRIDES[api_name]
     result = extract_api_params(api_name)
-    if result is not None and _is_tensor_method(api_name):
-        # Functional alias params already include the self-equivalent tensor
-        # (e.g. 'input' from torch.nn.functional.relu_), so skip insertion.
-        is_alias = "alias(" in (result.source or "")
-        # 重入防护：首参已是 self（重复调用/inspect 源自带 self）不再叠加
-        if not is_alias and not (result.params and result.params[0].name == "self"):
-            self_param = ParamInfo(name="self", type="Tensor")
-            if result.overloads:
-                for ov in result.overloads:
-                    ov.params.insert(0, self_param)
-                    ov.layout = OverloadTensorLayout.build(ov.params, ov.return_count)
-                best = max(result.overloads, key=lambda oi: sum(1 for p in oi.params if p.is_optional))
-                result.params = best.params
-            else:
-                result.params.insert(0, self_param)
     if result is not None:
-        result._resolve_api_flags()
+        result.is_tensor_method = is_tensor_method_name(api_name)
+        if result.is_tensor_method:
+            _inject_self_param(result)
+        result.mark_inplace_mutable()
     return result
+
+
+def _inject_self_param(info: APIParamInfo) -> None:
+    """Tensor 方法首参补 self 位。
+
+    跳过两类：functional 别名结果已含等价张量（source 带 alias(，
+    如 torch.nn.functional.relu_ 的 input）；首参已是 self（重复调用/
+    inspect 源自带，防叠加）。多重重载逐表插入并重建 layout，params
+    取可选参数最多的重载。
+    """
+    if "alias(" in (info.source or ""):
+        return
+    if info.params and info.params[0].name == "self":
+        return
+    self_param = ParamInfo(name="self", type="Tensor")
+    if info.overloads:
+        for ov in info.overloads:
+            ov.params.insert(0, self_param)
+            ov.layout = OverloadTensorLayout.build(ov.params, ov.return_count)
+        best = max(info.overloads, key=lambda oi: sum(1 for p in oi.params if p.is_optional))
+        info.params = best.params
+    else:
+        info.params.insert(0, self_param)

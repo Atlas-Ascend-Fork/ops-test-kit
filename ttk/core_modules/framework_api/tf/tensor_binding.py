@@ -31,20 +31,12 @@ from ...common.backend.framework_hooks import register_input_factory
 
 
 def np_to_tf_inputs(testcase, raw_inputs):
-    """Convert numpy arrays to tf.Tensor.
+    """numpy → tf.Tensor（L1 构造，经 framework_hooks 注册给 TfBackend）。
 
-    TF tensors are immutable, so non-contiguous views cannot use as_strided.
-    Instead, we generate contiguous tensors from the raw numpy views.
-    Attribute-sourced slots are materialized as tf.constant with the declared
-    dtype pinned (incl. quantized dtypes) — a backend-agnostic representation.
-    tf.constant does NOT fold into Const nodes under tf.function (it traces as
-    a Placeholder); graph-mode const folding happens later in bind_tensors,
-    which swaps these slots to plain Python values (const_input_values). The
-    tf.constant form remains the fallback when no Python value was recorded
-    (e.g. TensorList positions).
-    Mutable-ref params (OpDef is_ref) are wrapped as tf.Variable — see
-    param_extractor.py.
-    """
+    - TF 张量不可变：非连续视图统一转连续；
+    - attributes 声明位物化为 tf.constant（dtype 钉死，含量化）；
+      tf.function 下 constant 不折叠，Const 折叠由 L2 bind_tensors 换 Python 值；
+    - mutable-ref 位包 tf.Variable。"""
     import tensorflow as tf
 
     from ttk.utilities import get
@@ -85,13 +77,9 @@ def np_to_tf_inputs(testcase, raw_inputs):
 def bind_tensors(testcase, backend, dev_tensors, raw_inputs):
     """L2 绑定特化（TfAdapter.bind_tensors 委托）。
 
-    1. mutable-ref 变量复位：eager/graph/ golden 三个模式共用同一批 tf.Variable
-       （testcase.tensors 只创建一次），每个模式入口按 raw_inputs（原始 numpy，
-       不被任何执行阶段改写）复位到初值。
-    2. const 位以记录的 Python 值传入：tf.function 只把 Python 值（0-D 标量 /
-       N-D list）折叠为 Const 节点，EagerTensor（含 tf.constant）与 ndarray 入参
-       一律 trace 成 Placeholder，GE infershape 对 value-depend 输入读不到值。
-    """
+    1. mutable-ref 变量按 raw_inputs 复位到初值（三模式共用同一批 Variable）；
+    2. const 位换成记录的 Python 值（tf.function 只折叠 Python 值为 Const 节点，
+       EagerTensor/ndarray 会 trace 成 Placeholder，GE 读不到值）。"""
     from .param_extractor import reset_ref_variables
 
     reset_ref_variables(dev_tensors, raw_inputs)

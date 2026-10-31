@@ -5,9 +5,9 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""e2e XPU 采集输入的输出槽过滤回归（compare.py）。
+"""e2e XPU 采集输入的输出槽过滤回归（framework_api/xpu.py）。
 
-看护：output_tensor_indexes 是 top-level 槽位索引（对齐 _check_output_configuration
+看护：output_tensor_indexes 是 top-level 槽位索引（对齐 _check_output_slots
 与 e2e_xpu_input_names），TensorList 槽只占一个槽位。修复前 inputs/dtypes 按
 子张量数递增 real_idx，TensorList 之后的输出槽过滤失效——输出张量漏进 XPU
 输入列表，且与 names 列表长度错位（193da3e 引入，重构搬家未改）。"""
@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from ttk.core_modules.framework_api.compare import (
+from ttk.core_modules.framework_api.xpu import (
     e2e_xpu_input_dtypes,
     e2e_xpu_input_names,
     e2e_xpu_inputs,
