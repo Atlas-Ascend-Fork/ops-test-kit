@@ -430,3 +430,60 @@ def test_exponential_chunked_is_seed_reproducible():
     np.random.seed(20260917)
     second = RandomData._gen_exponential_data("float32", (n,))
     assert np.array_equal(first, second)
+
+
+_INT_DTYPES = ("uint8", "int8", "int16", "int32", "int64", "uint16", "uint32", "uint64")
+
+
+@pytest.mark.parametrize("dtype", list(_INT_DTYPES))
+@pytest.mark.parametrize(
+    "data_range",
+    [
+        (float("nan"), float("nan")),
+        (float("nan"), 10),
+        (-float("inf"), float("inf")),
+        (0, float("inf")),
+        (-float("inf"), 0),
+        (10, float("inf")),
+        (-float("inf"), -10),
+        (float("inf"), float("inf")),
+        (-float("inf"), -float("inf")),
+    ],
+    ids=[
+        "both-nan",
+        "nan-low",
+        "full-span",
+        "inf-high",
+        "inf-low",
+        "inf-high-offset",
+        "inf-low-offset",
+        "both-pos-inf",
+        "both-neg-inf",
+    ],
+)
+def test_integer_nonfinite_range_generates(dtype, data_range):
+    """整型槽声明 nan/inf 区间必须能生成，不得抛异常。
+
+    nan/inf 是 field_parser 刻意支持的写法（裸 token 被重写成 float("nan")/float("inf")），
+    在浮点槽上全仓用量很大；整型槽上原先会抛 ValueError(nan) / OverflowError(inf)，
+    因为 _must_contain_values 的 math.ceil/floor 跑在 isfinite 过滤之前。
+    语义由 _digitize_inf_nan 定义：nan -> 0，±inf -> dtype 边界。
+    """
+    arr = RandomData(dtype, (64,), data_range).generate()
+    assert arr.dtype == np.dtype(dtype)
+    info = np.iinfo(dtype)
+    assert arr.min() >= info.min
+    assert arr.max() <= info.max
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32", "uint64"])
+@pytest.mark.parametrize("data_range", [(-3.33, -1), (-10, -2), (-1.6, -1.02), (-0.5, -0.2)])
+def test_unsigned_range_entirely_below_domain(dtype, data_range):
+    """无符号 dtype 的声明区间整段落在 dtype 域下方时，取最近可表示值而非报错。
+
+    原先 hi 只对 info.max 上钳、没对 info.min 下钳，于是 hi 留在负数，
+    随后 lo > hi 的回退把 lo 也置成负数，numpy 报 "low is out of bounds"。
+    """
+    arr = RandomData(dtype, (16,), data_range).generate()
+    assert arr.dtype == np.dtype(dtype)
+    assert np.all(arr == 0)

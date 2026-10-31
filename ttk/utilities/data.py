@@ -154,6 +154,12 @@ class RandomData:
             # 声明的区间端点会拿到符号相反的值。
             info = numpy.iinfo(dtype)
             lo, hi = self._data_range[:2]
+            # 端点先落位再取整：math.ceil/floor 对 nan 抛 ValueError、对 inf 抛 OverflowError，
+            # 下一行那个 isfinite 过滤**排在取整之后**，守卫不住。_digitize_inf_nan 对有限值与
+            # 整型端点是恒等映射（含 2^53/2^63 以上的大整数，走 isinstance(int) 分支原样返回），
+            # 所以不改变"向内取整不越声明闭区间"的既有语义。
+            lo = self._digitize_inf_nan(lo, dtype)
+            hi = self._digitize_inf_nan(hi, dtype)
             # 固定值保持向零截断（(1.5, 1.5)→1）；非固定区间向内取整，混入值不越界
             declared = [lo] if lo == hi else [math.ceil(lo), math.floor(hi)]
             declared = [x for x in declared if numpy.isfinite(numpy.float64(x))]
@@ -345,8 +351,12 @@ class RandomData:
         """
         info = numpy.iinfo(dtype)
         # ceil/floor 向内取整不越声明闭区间（向外 [1.5,2.5]→[1,3]）；整数端点恒等
-        lo = max(int(math.ceil(low)), int(info.min))
-        hi = min(int(math.floor(high)), int(info.max))
+        # 两个端点都要**双向**钳进 [info.min, info.max]：只对 info.max 上钳时，整段落在 dtype
+        # 域下方的声明区间（如 uint8 的 (-1.6,-1.02)）会让 hi 留在负数，随后 lo>hi 的回退把 lo
+        # 也置成负数，numpy 直接报 "low is out of bounds for uint8"。钳完后该例得到 lo==hi==0，
+        # 即"声明区间整段低于 dtype 域时取最近可表示值"。
+        lo = min(max(int(math.ceil(low)), int(info.min)), int(info.max))
+        hi = min(max(int(math.floor(high)), int(info.min)), int(info.max))
         if lo > hi:
             # 区间内无可表示整数：不拒绝用例，告警后回退为钳位后的单点固定值
             warnings.warn(
