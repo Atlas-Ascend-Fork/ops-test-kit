@@ -651,6 +651,35 @@ def test_none_slots_are_explicit_empty_data_files(tmp_path, file_format):
 
 
 @pytest.mark.parametrize("file_format", ["bin", "npy", "pt"])
+def test_none_storage_slot_falls_back_to_view_shape(tmp_path, file_format):
+    """storage 为 None 的槽位回落 view shape（连续张量），dump 不再触发 NoneType 迭代。"""
+    case = _e2e_case("none_storage_slot")
+    case.tensor_view_shapes = ((2, 2), (3, 2))
+    case.tensor_storage_shapes = (None, (3, 4))
+    case.tensor_view_offsets = (0, 0)
+    case.tensor_view_strides = (None, (4, 1))
+    case._flat_tensor_view_shapes = None
+    case._flat_tensor_storage_shapes = None
+    case._flat_tensor_view_offsets = None
+    case._flat_tensor_view_strides = None
+    case_dir = ManualDataStore(tmp_path).write_case(
+        case,
+        "e2e",
+        [np.ones((2, 2), np.float32), np.ones((3, 4), np.float32)],
+        [np.ones((3, 2), np.float32)],
+        file_format=file_format,
+    )
+
+    assert (case_dir / f"input_0_float32.{file_format}").exists()
+    assert (case_dir / f"input_1_float32.{file_format}").exists()
+
+    loaded = ManualDataStore(tmp_path).load_case(case, "e2e")
+
+    assert loaded.inputs[0].shape == (2, 2)
+    assert loaded.inputs[1].shape == (3, 4)
+
+
+@pytest.mark.parametrize("file_format", ["bin", "npy", "pt"])
 def test_missing_none_marker_is_rejected(tmp_path, file_format):
     """None 标记文件被删除后加载报错。"""
     case = _e2e_case("missing_none_marker")

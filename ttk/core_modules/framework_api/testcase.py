@@ -324,7 +324,10 @@ class TestcaseE2e(ApiTestcaseBase):
         s_shapes = self.flat_tensor_storage_shapes
         if not s_shapes:
             return flat_shapes[idx]
-        return get(s_shapes, idx, out_of_range=flat_shapes[idx])
+        val = get(s_shapes, idx, out_of_range=flat_shapes[idx])
+        if val is None:
+            return flat_shapes[idx]
+        return val
 
     def flat_view_stride(self, idx: int):
         """Get view stride for flat tensor at idx. Auto-compute from shape if not specified."""
