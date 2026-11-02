@@ -12,3 +12,4 @@ tf_matmul,tf.linalg.matmul,"((2,3),(3,4))","('float16','float16')",,,,,,,linalg 
 tf_scatter_div_stateful,tf.compat.v1.scatter_div,"((6,),(3,),(3,))","('float32','int32','float32')",,{'use_locking':False},,"((1,10),(0,5),(2,5))",,,Resource* 有状态算子：mutable ref 槽自动 tf.Variable 化 + 更新值回读；bool 属性 use_locking 下发
 tf_dequantize_scaled,tf.quantization.dequantize,"((2,2),(),())","('quint8','float32','float32')",,{'mode':'SCALED'},,"((0,255),(0.5,0.5),(1.5,1.5))",,,量化 dtype quint8（numpy 存储别名 uint8）+ 字符串属性 mode 原值透传；golden 须 --compare close（mixed 会 Promote float32 标量参数触发该算子 fp32 强校验报错）
 tf_range_valuedepend,tf.raw_ops.Range,"((),(),())","('int32','int32','int32')",,,,"((0,0),(8,10),(3,3))",,,0-D value-depend 输入：以 Python 值折叠 Const 供 GE infershape；输出 shape 数据相关（0/3/6/9 序列）
+tf_inplace_add_unique,tf.raw_ops.InplaceAdd,"((8,4),(1,),(1,4))","('uint8','int32','uint8')",,,,"((0,10),(1,1),(0,3))",,,别名写确定性：x 与输出共享 buffer（OpDef 未标 ref，注册表识别），逐轮从初值复位，多轮 3 次执行结果一致

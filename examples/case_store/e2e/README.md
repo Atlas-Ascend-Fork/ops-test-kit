@@ -1,6 +1,6 @@
 # E2E 通路示例用例
 
-按框架分文件：`torch_cases.csv`（torch/torch_npu，24 例）、`tf_cases.csv`（TensorFlow，13 例）与 `onnx_cases.csv`（ONNX，7 例），每条用例的 `remark` 列即测试项。同一 CSV 不得混用不同框架 API（onnx 与 torch/tf 的执行环境互斥，torch 与 tf 亦不能同一进程加载）。
+按框架分文件：`torch_cases.csv`（torch/torch_npu，24 例）、`tf_cases.csv`（TensorFlow，14 例）与 `onnx_cases.csv`（ONNX，7 例），每条用例的 `remark` 列即测试项。同一 CSV 不得混用不同框架 API（onnx 与 torch/tf 的执行环境互斥，torch 与 tf 亦不能同一进程加载）。
 
 > 较新 dtype/算子用例（fp8 族、`causal_conv1d_fn_basic`、`add_bool` 等）的通过依赖本地 CANN 版本的算子支持面，不支持时的预期错误签名见上级 [README 的 CANN 版本配套说明](../README.md)。
 
@@ -62,6 +62,7 @@ CSV 以 `api_name` 声明被测 API（`tf.raw_ops.*` / `tf.math.*` / `tf.nn.*` /
 | `tf_math_add` | `tf.math` 命名空间 |
 | `tf_matmul` | f16 声明（NPU f16 matmul 原生计算）；f32 变体经 GE 立方指令含 fp16 量化，默认 mix 比对可能数据相关不稳，如需 f32 用例须 `--compare close` 配 CSV 容差列（mix 的容差按分档表和 Spec.tolerance 取值，不读 CSV 容差列） |
 | `tf_scatter_div_stateful` | Resource* 有状态算子：mutable ref 输入自动转 tf.Variable，并回读更新后的值；bool 属性 use_locking 传给算子 |
+| `tf_inplace_add_unique` | 别名写确定性用例：InplaceAdd 的 x 与输出共享 buffer（OpDef 未标 is_ref，TTK 按内置 Inplace* 注册表补标 mutable），逐轮从初值复位，`--run=3` 三轮结果一致（deterministic PASS） |
 | `tf_dequantize_scaled` | 量化 dtype quint8（numpy 存储别名 uint8）+ 字符串属性 `mode="SCALED"` 原样传给算子；0-D 标量输入（min_range/max_range） |
 | `tf_range_valuedepend` | 0-D value-depend 输入：先按 Python 值折叠为常量，供 GE 推导 shape；输出 shape 数据相关 |
 
@@ -71,6 +72,7 @@ CSV 以 `api_name` 声明被测 API（`tf.raw_ops.*` / `tf.math.*` / `tf.nn.*` /
 - **图模式**：tf.function 原生图编译（无独立编译器后端）；`-c` 固定 input_signature（固定 shape）、`-d` 放开维度（None 维）；`--aclgraph` 不支持（跳过并告警）；
 - **raw_ops 绑定**：`tf.raw_ops.*` 只收关键字参数，TTK 按 API 声明的参数名把位置输入绑成 kwargs；
 - **mutable ref**：OpDef 声明 is_ref 的输入自动转 tf.Variable，执行后读回更新值（`tf_scatter_div_stateful`），各模式入口按 raw_inputs 复位初值；
+- **别名写（确定性）**：`tf_inplace_add_unique` 的 x 在 OpDef 中无 is_ref 标记、但 kernel 原地写输入，TTK 按内置 Inplace* 注册表补标 mutable（自动 tf.Variable 化 + 逐轮复位），多轮执行从同一初值出发——修复前三轮结果逐轮累加、MD5 不一致；
 - **const 折叠**：0-D value-depend 输入先按 Python 值折叠为 Const 节点，GE 才能推导输出 shape（`tf_range_valuedepend`）；
 - **性能**：经 msprof 采集（`--task-prof=false` 时该列留空）。
 

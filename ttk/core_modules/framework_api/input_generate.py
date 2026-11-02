@@ -16,6 +16,8 @@ Generates numpy arrays from testcase metadata, applies custom plugin overrides,
 and converts to framework tensors (torch).
 """
 
+import numpy as np
+
 from ttk.core_modules.common.testcase.input_data import (
     assign_tensor_value,
     broadcast_tensorlist_values,
@@ -23,7 +25,7 @@ from ttk.core_modules.common.testcase.input_data import (
 )
 from ttk.core_modules.common.testcase.tensor import make_storage_view
 from ttk.utilities import get
-from ttk.utilities.container import nest_by_distribution
+from ttk.utilities.container import deep_flatten, nest_by_distribution
 from ttk.utilities.dtypes import DTYPE_MAP
 
 from ..common.plugin import get_plugin_function
@@ -31,11 +33,11 @@ from .utils import build_plugin_call
 
 
 def _cpu_placement_scope(backend, enabled):
-    """张量物化作用域：TF 后端且 enabled 时强制 CPU 放置，其余返回空上下文。
+    """CPU 放置上下文：TF 后端且 enabled 时强制 CPU 放置，其余返回空上下文。
 
     TF 侧 npu_device open 后默认设备为 NPU、tf.device 的设备参数失效，
-    CPU 物化须经 context.device 原语（cpu_tf_backend.cpu_device_context）。
-    torch 的 from_numpy 产物即 CPU 张量，不进作用域（也不触达 tensorflow）。"""
+    在 CPU 创建张量须经 context.device 原语（cpu_tf_backend.cpu_device_context）。
+    torch 的 from_numpy 产物即 CPU 张量，不进上下文（也不触达 tensorflow）。"""
     if enabled and hasattr(backend, "tf_device_type"):
         from ..common.backend.cpu_tf_backend import cpu_device_context
 
@@ -47,8 +49,9 @@ def _cpu_placement_scope(backend, enabled):
 
 def generate_inputs(testcase, switches, backend, plan, stored_inputs=None, cpu_placement=False):
     """输入生成入口：replay（stored_inputs）装载，或 默认生成 → attributes 覆盖 →
-    input 插件改写。插件按 ParamPlan 装配调用、无返回值（x[:] = value 原地改）。
-    cpu_placement=True 时框架张量在 CPU 作用域物化（设备张量执行侧重建）。"""
+    input 插件改写。插件返回 None = 原地改写；返回序列 = 按槽位回写 raw_inputs
+    （见 _apply_input_plugin_result）。cpu_placement=True 时框架张量在 CPU
+    上创建，设备张量由执行侧重建。"""
     if stored_inputs is not None:
         testcase.np_storages = list(stored_inputs)
         raw_inputs = build_views_from_storages(testcase)
@@ -75,7 +78,8 @@ def generate_inputs(testcase, switches, backend, plan, stored_inputs=None, cpu_p
             use_numpy=use_numpy,
             input_ranges=testcase.input_data_ranges,
         )
-        input_func(*args, **kwargs)
+        result = input_func(*args, **kwargs)
+        _apply_input_plugin_result(result, raw_inputs, testcase, backend)
     # 统一重建 runtime tensors：数据/shape 恒来自 raw_inputs（插件对象不进入）；
     # 插件命中的仅回放其置的 requires_grad（部分算子按该标志门控输入）。
     set_runtime_tensors(
@@ -88,13 +92,65 @@ def generate_inputs(testcase, switches, backend, plan, stored_inputs=None, cpu_p
     return raw_inputs
 
 
+def _apply_input_plugin_result(result, raw_inputs, testcase, backend):
+    """处理 customize_inputs 返回值：按槽位写回 raw_inputs 视图（穿透到
+    np_storages）。
+
+    返回 None 表示原地写法，直接跳过。否则嵌套展平后逐槽对齐（TensorList
+    可嵌套/平铺，单张量算子可裸返回张量）：槽位 None 保留生成值，其余转
+    numpy 写回；shape 不符、dynamic 槽返回非 None 时显式报错。
+    """
+    if result is None:
+        return
+    flat = deep_flatten(result) if isinstance(result, (tuple, list)) else (result,)
+    if len(flat) != len(raw_inputs):
+        raise RuntimeError(
+            f"[{testcase.testcase_name}] customize_inputs returned {len(flat)} tensor(s), "
+            f"expected {len(raw_inputs)} input tensor slot(s); return None when customizing in-place"
+        )
+    for slot, val in enumerate(flat):
+        if val is None:
+            continue
+        view = raw_inputs[slot]
+        if view is None:
+            raise RuntimeError(
+                f"[{testcase.testcase_name}] customize_inputs returned a value for flat slot "
+                f"{slot} which has no generated tensor (dynamic/optional); write into shared "
+                "views in-place instead"
+            )
+        arr = _plugin_value_to_numpy(val, backend)
+        if np.asarray(arr).shape != view.shape:
+            raise RuntimeError(
+                f"[{testcase.testcase_name}] customize_inputs returned shape "
+                f"{np.asarray(arr).shape} for flat slot {slot}, expected {view.shape}"
+            )
+        view[...] = arr
+
+
+def _plugin_value_to_numpy(val, backend):
+    """插件返回值 → numpy：ndarray 直用；否则 backend.to_numpy，回退
+    .numpy()/np.asarray。"""
+    if isinstance(val, np.ndarray):
+        return val
+    to_numpy = getattr(backend, "to_numpy", None)
+    if to_numpy is not None:
+        try:
+            return to_numpy(val)
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            pass
+    fn = getattr(val, "numpy", None)
+    if fn is not None:
+        return fn()
+    return np.asarray(val)
+
+
 def set_runtime_tensors(testcase, raw_inputs, backend, plugin_tensors=None, cpu_placement=False):
     """Rebuild framework tensors and TensorList nesting from backing storages.
 
     plugin_tensors: 可选，input 插件处理过的 flat tensor 列表（与 raw_inputs 逐索引
     对齐）。重建后按索引把插件置的 requires_grad 重放到新 tensor 上——重建产物
     （数据/shape）始终来自 raw_inputs，插件对象不进 testcase.tensors，净化语义统一。
-    cpu_placement: TF 侧在 CPU 作用域物化（输入生成/golden 阶段形态）；False 时
+    cpu_placement: TF 侧在 CPU 上创建张量（输入生成/golden 阶段形态）；False 时
     随默认设备（open 后 = NPU，执行侧的设备张量重建用此形态）。
     """
     with _cpu_placement_scope(backend, cpu_placement):

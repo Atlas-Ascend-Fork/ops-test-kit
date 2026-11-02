@@ -44,38 +44,101 @@ def test_onnx_routing_and_adapter_registry():
 
 
 def test_run_graph_fast_failures():
+    from ttk.core_modules.framework_api.utils import RunCtx
+
     adapter = get_adapter("onnx")
+    ctx = RunCtx(
+        backend=None,
+        dev_id=0,
+        switches=None,
+        resolved=None,
+        is_tensor_method=False,
+        deterministic_level=0,
+        run_count=1,
+        warmup_count=0,
+    )
     with pytest.raises(ValueError, match="ONNX_ACLGRAPH_UNSUPPORTED"):
-        adapter.run_graph(None, None, 0, None, None, None, False, False, None, dynamic=False, is_aclgraph=True)
+        adapter.run_graph(
+            ctx, testcase=None, plan=None, is_inplace=False, raw_inputs=None, dynamic=False, is_aclgraph=True
+        )
     with pytest.raises(ValueError, match="ONNX_DYNAMIC_GRAPH_UNSUPPORTED"):
-        adapter.run_graph(None, None, 0, None, None, None, False, False, None, dynamic=True)
+        adapter.run_graph(ctx, testcase=None, plan=None, is_inplace=False, raw_inputs=None, dynamic=True)
 
 
 def test_run_graph_returns_run_graph_phase_protocol(monkeypatch):
     """run_graph 成功路径返回 4 元组 (nps, perf, det, err)。
 
     worker._run_graph_phase 按 4 元组解包（torch/tf 的 execute_graph 同构）；
-    onnx 委托 _execute_eager（3 元组）曾漏补错误位——`--eager=false -c` 单开
-    全量 GRAPH_EXEC_FAILURE（not enough values to unpack）。
+    onnx 执行编排自持（不复用 run_eager）——曾漏补错误位导致
+    `--eager=false -c` 单开全量 GRAPH_EXEC_FAILURE（not enough values to unpack）。
     """
-    from ttk.core_modules.framework_api import execute
+    import contextlib
+
+    from ttk.core_modules.common import profiler as prof_mod
+    from ttk.core_modules.framework_api import utils as e2e_utils
+    from ttk.core_modules.framework_api.onnx import OnnxAdapter
+    from ttk.core_modules.framework_api.utils import RunCtx
+
+    class _Backend:
+        @staticmethod
+        def is_npu():
+            return False
+
+        def set_device(self, _d):
+            return None
+
+        @staticmethod
+        def device_scope(_d):
+            return contextlib.nullcontext()
+
+        @staticmethod
+        def synchronize(_d):
+            return None
+
+        @staticmethod
+        def result_to_numpy(result):
+            return [result]
+
+    class _Profiler:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        @staticmethod
+        def step():
+            return None
+
+        @staticmethod
+        def result(run_count):
+            return {"wall_us": float(run_count)}
+
+    class _Resolved:
+        def attach_backend(self, _backend):
+            self.backend = _backend
 
     adapter = get_adapter("onnx")
-    marker = ([np.zeros(2)], {"wall_us": 1.0}, None)
-    forwarded = {}
-
-    def _fake_execute_eager(*args, **kwargs):
-        forwarded["args"] = args
-        forwarded["kwargs"] = kwargs
-        return marker
-
-    monkeypatch.setattr(execute, "_execute_eager", _fake_execute_eager)
-    nps, perf, det, err = adapter.run_graph(  # 4 元组解包：3 元组会在此抛 ValueError
-        "tc", "backend", 3, "switches", "plan", "resolved", False, False, ["raw"], dynamic=False
+    output = np.zeros(2)
+    monkeypatch.setattr(OnnxAdapter, "eager_call", lambda self, resolved, args, kwargs, _itm: output)
+    monkeypatch.setattr(e2e_utils, "prepare_device_args", lambda *a, **k: ([], {}))
+    monkeypatch.setattr(prof_mod, "get_profiler", lambda *a, **k: _Profiler())
+    run_ctx = RunCtx(
+        backend=_Backend(),
+        dev_id=0,
+        switches=SimpleNamespace(task_profiling=True, root_path="ut_root"),
+        resolved=_Resolved(),
+        is_tensor_method=False,
+        deterministic_level=0,
+        run_count=2,
+        warmup_count=0,
     )
-    assert (nps, perf, det, err) == (*marker, None)  # err 位恒 None（异常经 _run_graph_phase 收敛）
-    assert forwarded["args"][:3] == ("tc", "backend", 3)  # 位置参数原样透传
-    assert forwarded["kwargs"] == {"deterministic_level": None}
+    case = SimpleNamespace(api_name="onnx.Add", testcase_name="ut_proto", inplace_input_indexes=(), backward_mode=False)
+    nps, perf, det, err = adapter.run_graph(  # 4 元组解包：3 元组会在此抛 ValueError
+        run_ctx, testcase=case, plan=None, is_inplace=False, raw_inputs=[], dynamic=False
+    )
+    assert (nps, perf, det, err) == ([output], {"wall_us": 2.0}, None, None)
+    assert run_ctx.resolved.backend is run_ctx.backend  # wrap_eager 已 attach 后端
 
 
 def test_cpu_backend_domain_and_execution_rejection(onnx_registry):

@@ -13,26 +13,27 @@
 签名解析 —— inspect.signature 直解（TF ops are standard Python functions,
 unlike torch which needs aten schema / pyi stub parsing）。
 
-参数级可变性（ParamInfo.is_mutable / is_resource，解析期落位）—— 判定依据
-是 OpDef 注册表的 input_arg 元数据（is_ref / DT_RESOURCE），而非算子名或
-参数名：参数名叫 ref 的输入不全是 mutable（部分 ref 实为 resource handle）；
-mutable 输入也不全叫 ref（存在 var/accum/handle 等命名）。snake_case 函数名
-做 CamelCase 归一化后查 OpDef —— 注意这是代理查询：元数据描述概念算子
-（ScatterDiv），运行期 wrapper 实际分发 Resource 变体（ResourceScatterDiv），
-槽位对齐依赖 Resource* 从 TF1 算子机械派生（输入序保持、ref→resource 改名）
-的约定。tf.raw_ops.* 的 is_ref 输入要求 TF1 ref-dtype 可变张量，TF2 无法构造
-（即使在 tf.function 图内，resource 变量也会被 op_def_library 以 "be a mutable
-tensor" 拒绝），CSV 的 api_name 应直接写 TF2 可调用接口（tf.compat.v1 对应的
-snake_case 封装）。tf.raw_ops.Resource* 系的 DT_RESOURCE 位要求 resource 句柄：
-tf.Variable 在 op 边界会被自动解引用为值，须显式传 .handle（snake_case 封装
-能工作正因其内部自行取 handle 分发，raw op 直调则由本模块的
+参数级可变性（ParamInfo.is_mutable / is_resource，解析期落位）以 OpDef
+注册表的 input_arg 元数据（is_ref / DT_RESOURCE）为据，另并 kernel 别名写
+注册表（_KERNEL_ALIAS_WRITE_INPUTS），不按算子名/参数名泛化：参数名叫 ref
+的输入不全是 mutable（部分 ref 实为 resource handle）；mutable 输入也不全
+叫 ref（存在 var/accum/handle 等命名）。snake_case 函数名做 CamelCase
+归一化后查 OpDef —— 注意这是代理查询：元数据描述概念算子（ScatterDiv），
+运行期 wrapper 实际分发 Resource 变体（ResourceScatterDiv），槽位对齐依赖
+Resource* 从 TF1 算子机械派生（输入序保持、ref→resource 改名）的约定。
+tf.raw_ops.* 的 is_ref 输入要求 TF1 ref-dtype 可变张量，TF2 无法构造（即使
+在 tf.function 图内，resource 变量也会被 op_def_library 以 "be a mutable
+tensor" 拒绝），CSV 的 api_name 应直接写 TF2 可调用接口（tf.compat.v1 对应
+的 snake_case 封装）。tf.raw_ops.Resource* 系的 DT_RESOURCE 位要求 resource
+句柄：tf.Variable 在 op 边界会被自动解引用为值，须显式传 .handle（snake_case
+封装能工作正因其内部自行取 handle 分发，raw op 直调则由本模块的
 convert_variables_to_handles 代劳）。
 
-模型读取 —— resource_param_names / mutable_flat_indexes 经 FrameworkApiInfoKeeper
-单源读取签名模型（运行期钩子：handle 转换 / 图模式槽位排除与 L1 变量包装），
-非 TF 前缀短路（torch 进程不触达 TF C 扩展，torch_npu 与 TF 同进程段错误）。
-参数槽位/谓词类读取（is_mutable_api / mutable_slots）已上提 FrameworkAdapter
-基类（模型驱动，经 keeper 单源）。
+模型读取 —— resource_param_names / mutable_flat_indexes 经
+FrameworkApiInfoKeeper 单源读取签名模型（运行期钩子：handle 转换 / 图模式
+槽位排除与 L1 变量包装），非 TF 前缀短路（torch 进程不触达 TF C 扩展，
+torch_npu 与 TF 同进程段错误）。参数槽位/谓词类读取（is_mutable_api /
+mutable_slots）已上提 FrameworkAdapter 基类（模型驱动，经 keeper 单源）。
 
 变量放置 —— np_to_tf_inputs 自身不做放置决策（随调用方作用域）：输入生成/
 golden 阶段在 CPU 作用域物化（input_generate._cpu_placement_scope），执行
@@ -209,6 +210,26 @@ def _is_mutable_input_arg(arg):
     return arg.is_ref or arg.type == _DT_RESOURCE
 
 
+# kernel 别名写输入补充注册表：Inplace* 族（inplace_ops.cc，InplaceOpBase）
+# 的 x 在 OpDef 中无 is_ref 标记，但 kernel 原地写输入 buffer。缺登记时该
+# 槽不包 Variable、不复位，多轮执行在改过的值上累加。
+_KERNEL_ALIAS_WRITE_INPUTS = {
+    "InplaceAdd": ("x",),
+    "InplaceSub": ("x",),
+    "InplaceUpdate": ("x",),
+}
+
+
+def _inplace_builtin_input_names(api_name):
+    """查内置 Inplace* 族注册表：返回被 kernel 原地写的输入参数名集；
+    snake_case 名 CamelCase 归一化后查询。"""
+    op_name = api_name.rsplit(".", 1)[-1]
+    names = _KERNEL_ALIAS_WRITE_INPUTS.get(op_name)
+    if names is None and op_name[:1].islower():
+        names = _KERNEL_ALIAS_WRITE_INPUTS.get("".join(p.capitalize() for p in op_name.split("_")))
+    return frozenset(names or ())
+
+
 def tensor_list_input_names(api_name):
     """OpDef 列表输入参数名集（N*T / type-list 形 input_arg）。
 
@@ -249,11 +270,13 @@ def mutable_input_flags(api_name):
     供 extract_tf_params 按参数名落 ParamInfo.is_mutable / is_resource:
     is_ref 或 DT_RESOURCE 记 mutable; DT_RESOURCE 额外记 resource(handle
     转换的驱动位)。无 OpDef / 解析失败返回空集(普通 API 无 mutable 输入)。
+    另并 kernel 别名写注册表（Inplace* 族），resource 不受影响。
     """
     op_def = _lookup_op_def(api_name)
     if op_def is None:
-        return frozenset(), frozenset()
+        return _inplace_builtin_input_names(api_name), frozenset()
     mutable = frozenset(arg.name for arg in op_def.input_arg if _is_mutable_input_arg(arg))
+    mutable |= _inplace_builtin_input_names(api_name)
     resource = frozenset(arg.name for arg in op_def.input_arg if arg.type == _DT_RESOURCE)
     return mutable, resource
 
@@ -294,6 +317,28 @@ def mutable_flat_indexes(api_name):
     if not info:
         return ()
     return tuple(j for j, p in enumerate(info.tensors) if p.is_mutable)
+
+
+def flat_tensor_param_names(api_name):
+    """张量序参数名表（flat 张量位次 → 参数名）；非 TF 前缀短路（不触达 TF C 扩展）。"""
+    info = _api_info(api_name)
+    if not info:
+        return ()
+    return tuple(p.name for p in info.tensors)
+
+
+def declared_inplace_indexes(testcase):
+    """CSV inplace_input_indexes 声明的被写槽（flat 下标）：过滤越界/非整型，
+    TensorList 在场不启用（位次错位）。"""
+    idxs = getattr(testcase, "inplace_input_indexes", None) or ()
+    if not idxs:
+        return ()
+    dist = getattr(testcase, "tensor_list_dist", None) or ()
+    if any(d > 0 for d in dist):
+        return ()
+    info = _api_info(getattr(testcase, "api_name", ""))
+    total = len(info.tensors) if info is not None else len(getattr(testcase, "flat_tensor_view_shapes", None) or ())
+    return tuple(i for i in idxs if isinstance(i, int) and 0 <= i < total)
 
 
 # ── 运行期槽位值操作（调用期 handle 替换 / 调用后状态回读）──────────────

@@ -74,6 +74,9 @@ class _NoOpAdapter:
     def is_inplace(self, _resolved, _is_tensor_method):
         return False
 
+    def run_eager(self, *args, **kwargs):
+        return [], None, None
+
     def run_graph(self, *args, **kwargs):
         return [], None, None, None
 
@@ -135,7 +138,7 @@ def test_golden_generated_before_execution(monkeypatch):
         order.append("execute")
         return list(result), None, None
 
-    monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", execute)
 
     def evaluate(testcase, raw_inputs, result_nps, golden_nps, *_rest):
         compared["golden"] = golden_nps
@@ -162,7 +165,7 @@ def test_golden_failure_placeholder_does_not_block_execution(monkeypatch):
     monkeypatch.setattr(e2e_golden, "process_context", _process_context)
     monkeypatch.setattr(e2e_golden, "generate_golden", MagicMock(side_effect=RuntimeError("golden boom")))
     executed = MagicMock(return_value=(list(result), None, None))
-    monkeypatch.setattr(e2e_worker, "_execute_eager", executed)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", executed)
 
     def evaluate(testcase, raw_inputs, result_nps, golden_nps, *_rest):
         compared["golden"] = golden_nps
@@ -219,7 +222,7 @@ def test_static_replay_golden_loaded_once_before_execution(monkeypatch):
         order.append("execute")
         return list(result), None, None
 
-    monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", execute)
     return_struct = FrameworkApiReturnStructure()
     e2e_worker._run_profile(case, _backend(), {}, {}, 0, switches, return_struct)
 
@@ -253,7 +256,7 @@ def test_dynamic_case_loads_replay_golden_statically(monkeypatch):
         order.append("execute")
         return list(result), None, None
 
-    monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", execute)
 
     def evaluate(testcase, raw_inputs, result_nps, golden_nps, *_rest):
         compared["golden"] = golden_nps
@@ -297,7 +300,7 @@ def test_static_load_failure_fails_case(monkeypatch):
         executed.append(True)
         return list(result), None, None
 
-    monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", execute)
     return_struct = FrameworkApiReturnStructure()
     e2e_worker._run_profile(case, _backend(), {}, {}, 0, switches, return_struct)
 

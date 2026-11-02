@@ -51,37 +51,38 @@ class TfAdapter(FrameworkAdapter):
 
     def run_graph(
         self,
+        ctx,
+        *,
         testcase,
-        backend,
-        dev_id,
-        switches,
         plan,
-        resolved,
-        is_tensor_method,  # noqa: ARG002  # 签名对齐 torch（tf 恒 False）
-        is_inplace,  # noqa: ARG002  # 签名对齐 torch（tf 恒 False）
+        is_inplace,
         raw_inputs,
         dynamic,
         is_aclgraph=False,
-        deterministic_level=None,
     ):
         from .graph_runner import execute_tf_graph
 
         return execute_tf_graph(
             testcase,
-            backend,
-            dev_id,
-            switches,
+            ctx.backend,
+            ctx.dev_id,
+            ctx.switches,
             plan,
-            resolved,
-            is_tensor_method,
+            ctx.resolved,
+            ctx.is_tensor_method,
             is_inplace,
             raw_inputs,
             dynamic,
             is_aclgraph=is_aclgraph,
-            deterministic_level=deterministic_level,
+            deterministic_level=ctx.deterministic_level,
         )
 
     # ── mutability（统一钩子的 tf 实现） ──
+
+    def tensor_param_names(self, api_name):
+        from .param_extractor import flat_tensor_param_names
+
+        return flat_tensor_param_names(api_name)
 
     def mutable_readback(self, api_name, args, kwargs):
         from .eager_runner import readback_mutable
@@ -94,6 +95,33 @@ class TfAdapter(FrameworkAdapter):
         from .eager_runner import call
 
         return call(resolved, args, kwargs, is_tensor_method)
+
+    def eager_rounds(
+        self,
+        ctx,
+        *,
+        api_name,
+        args,
+        kwargs,
+        inplace_input_indexes,
+        mutable_loader,
+        profiler,
+        backward_mode,
+    ):
+        # 关采集时 run_tf_eager_rounds 只跑正确性轮（不进计时段），不再委托基类
+        from .eager_runner import run_tf_eager_rounds
+
+        return run_tf_eager_rounds(
+            self,
+            ctx,
+            api_name=api_name,
+            args=args,
+            kwargs=kwargs,
+            inplace_input_indexes=inplace_input_indexes,
+            mutable_loader=mutable_loader,
+            profiler=profiler,
+            backward_mode=backward_mode,
+        )
 
     # ── golden 复位钩子 ──
 

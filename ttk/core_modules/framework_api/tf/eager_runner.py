@@ -97,6 +97,84 @@ def _wrap_eager_npu(resolved, api_name):
     return tf.function(autograph=False)(wrapper)
 
 
+def run_tf_eager_rounds(
+    adapter,
+    ctx,
+    *,
+    api_name,
+    args,
+    kwargs,
+    inplace_input_indexes,
+    mutable_loader,
+    profiler,
+    backward_mode,
+):
+    """TF eager 两阶段执行（与 graph 一致）。
+
+    正确性轮（复位 + 调用 + MD5）在采集窗外，结果在正确性轮末尾取回：复位
+    assign 是真实设备 op，落进采集窗会被 msprof 算成额外 kernel；计时段
+    不复位会让别名 buffer 持续累积，事后取读已被污染。warmup 轮后 step()
+    开窗，窗口内纯调用（kernel 耗时只与 shape/dtype 相关）。任务采集关闭
+    （task_profiling=False）时不跑计时段，避免双倍执行。
+    """
+    from ...kernel.device_state import clear_device_state
+    from ..utils import compute_output_md5, output_nps, round_nps
+
+    profiling_enabled = bool(getattr(ctx.switches, "task_profiling", True))
+
+    # ctx.resolved 由 worker 共享给 graph，包装产物仅在 eager 内使用、不回写 ctx
+    resolved = adapter.wrap_eager(ctx.resolved, api_name, ctx.backend)
+    result = None
+    md5_list = []
+    deterministic = ctx.deterministic_level > 0
+    for _ in range(ctx.run_count):
+        clear_device_state(ctx.switches)
+        mutable_loader(0)
+        with ctx.backend.device_scope(ctx.dev_id):
+            r = adapter.eager_call(resolved, args, kwargs, ctx.is_tensor_method)
+        result = r
+        if deterministic:
+            ctx.backend.synchronize(ctx.dev_id)
+            run_nps = round_nps(
+                ctx.backend,
+                r,
+                args,
+                inplace_input_indexes,
+                api_name=api_name,
+                kwargs=kwargs,
+                adapter=adapter,
+                backward_mode=backward_mode,
+            )
+            md5_list.append(compute_output_md5(run_nps))
+    ctx.backend.synchronize(ctx.dev_id)
+    result_nps = output_nps(
+        ctx.backend,
+        result,
+        args,
+        kwargs,
+        inplace_input_indexes,
+        api_name=api_name,
+        adapter=adapter,
+        backward_mode=backward_mode,
+    )
+    if ctx.warmup_count:
+        for _ in range(ctx.warmup_count):
+            clear_device_state(ctx.switches)
+            mutable_loader(0)
+            with ctx.backend.device_scope(ctx.dev_id):
+                adapter.eager_call(resolved, args, kwargs, ctx.is_tensor_method)
+        ctx.backend.synchronize(ctx.dev_id)
+        profiler.step()
+    if ctx.run_count and profiling_enabled:
+        with profiler:
+            for _ in range(ctx.run_count):
+                clear_device_state(ctx.switches)
+                with ctx.backend.device_scope(ctx.dev_id):
+                    adapter.eager_call(resolved, args, kwargs, ctx.is_tensor_method)
+            ctx.backend.synchronize(ctx.dev_id)
+    return result, result_nps, md5_list
+
+
 def call(resolved, args, kwargs, is_tensor_method):  # noqa: ARG001
     """单次调用（tf 无 Tensor 方法分发，is_tensor_method 恒 False）。"""
     return resolved(*args, **kwargs)

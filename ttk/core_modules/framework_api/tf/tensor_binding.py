@@ -42,7 +42,7 @@ def np_to_tf_inputs(testcase, raw_inputs):
     from ttk.utilities import get
     from ttk.utilities.dtypes import normalize_to_tf_dtype, tf_quantized_dtype
 
-    from .param_extractor import mutable_flat_indexes
+    from .param_extractor import declared_inplace_indexes, mutable_flat_indexes
 
     const_indexes = getattr(testcase, "const_input_indexes", None) or set()
     # mutable 下标(ParamInfo.is_mutable, 张量序位次)与张量参数列表对位;
@@ -50,6 +50,8 @@ def np_to_tf_inputs(testcase, raw_inputs):
     # 参数, 此时直接不启用 (dist 编码: 0=普通张量, >0=TensorList 子张量数)
     dist = testcase.tensor_list_dist or ()
     mutable_idx = set(mutable_flat_indexes(testcase.api_name)) if not any(d > 0 for d in dist) else set()
+    # CSV 声明的被写位并入模型推导的 mutable 槽
+    mutable_idx |= set(declared_inplace_indexes(testcase))
     flat_dtypes = getattr(testcase, "flat_tensor_dtypes", None) or ()
     result = []
     for idx, arr in enumerate(raw_inputs):
@@ -68,7 +70,8 @@ def np_to_tf_inputs(testcase, raw_inputs):
             result.append(tf.constant(contiguous, dtype=tf_dtype))
         elif idx in mutable_idx:
             # tf.Variable 随默认设备放置; 勿强制 CPU 放置(见 param_extractor 模块 docstring)
-            result.append(tf.Variable(contiguous, dtype=tf_dtype))
+            # .copy() 断 numpy 零拷贝链: raw_inputs 是复位数据源, 不得被 kernel 原地写污染
+            result.append(tf.Variable(contiguous.copy(), dtype=tf_dtype))
         else:
             result.append(tf.convert_to_tensor(contiguous, dtype=tf_dtype))
     return result

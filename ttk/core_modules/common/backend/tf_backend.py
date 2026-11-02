@@ -83,30 +83,41 @@ class TfBackend(Backend):
         return self.device_name()
 
     def clone(self, tensor):
+        """克隆张量：Variable 经 numpy 副本复制当前值到新变量，其余 identity。"""
         import tensorflow as tf
 
         if isinstance(tensor, tf.Variable):
             # 变量含状态, 克隆需复制当前值到新变量(随默认设备放置)
-            return tf.Variable(tensor.read_value())
+            return tf.Variable(tensor.read_value().numpy().copy())
         return tf.identity(tensor)
 
-    def stage_mutable_rounds(self, args, kwargs, keys, total):  # noqa: ARG002
-        """TF 覆写：同一 tf.Variable 逐轮 assign 复位（语义等价于换新克隆）。
+    def numpy_snapshot(self, tensor):
+        """tf 值 → 独立 numpy 快照；Variable 先 read_value。"""
+        import tensorflow as tf
 
-        npu_device 的 tf.function 对新 Variable 触发重追踪，状态算子（scatter
-        族）的副作用会跨 concrete function 累积——逐轮换新变量时第 N 轮实际
-        应用 N 次更新（纯 CPU/TF 无此行为，同变量复用亦无）。同变量 + 逐轮
-        assign 复位不触发重追踪，每轮从备份初值起恰好一次更新；与主线 graph
-        腿 reset_mutable_refs 同一策略（闭包捕获/trace 固化下克隆不可换）。
+        if isinstance(tensor, tf.Variable):
+            return tensor.read_value().numpy().copy()
+        return tensor.numpy().copy()
+
+    def prepare_mutable_rounds(self, args, kwargs, keys, total):  # noqa: ARG002
+        """TF 覆写：同一 tf.Variable 逐轮 assign 复位（等价于换新克隆）。
+
+        npu_device 下 tf.function 遇到新 Variable 会重追踪，状态算子（scatter
+        族）的副作用跨 concrete function 累积，逐轮换新变量会让第 N 轮实际
+        应用 N 次更新。同变量逐轮 assign 复位不触发重追踪，每轮从备份初值
+        起恰好更新一次。
+
+        备份必须是 numpy 快照：assign(Variable) 会与赋值源共享 buffer，
+        kernel 原地写会连带改掉备份。
         """
-        backups = {key: self.clone(args[key] if isinstance(key, int) else kwargs[key]) for key in keys}
+        backups = {key: self.numpy_snapshot(args[key] if isinstance(key, int) else kwargs[key]) for key in keys}
 
-        def stage(_round):
+        def load(_round):
             for key, backup in backups.items():
                 var = args[key] if isinstance(key, int) else kwargs[key]
                 var.assign(backup)
 
-        return stage
+        return load
 
     def is_npu_only(self, api_name: str) -> bool:
         return api_name.startswith(TF_NPU_ONLY_PREFIXES)

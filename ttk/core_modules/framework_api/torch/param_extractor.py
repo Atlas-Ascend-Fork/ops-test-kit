@@ -292,7 +292,7 @@ def _extract_params_from_functional_alias(api_name: str) -> Optional[Tuple[List[
     """
     if not api_name.startswith("torch."):
         return None
-    func_name = api_name.split(".")[-1]
+    func_name = api_name.rsplit(".", maxsplit=1)[-1]
 
     candidates = [f"torch.nn.functional.{func_name}"]
 

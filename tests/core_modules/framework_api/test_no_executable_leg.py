@@ -43,6 +43,9 @@ class _NoOpAdapter:
     def is_inplace(self, _resolved, _is_tensor_method):
         return False
 
+    def run_eager(self, *args, **kwargs):
+        return [], None, None
+
     def run_graph(self, *args, **kwargs):
         return [], None, None, None
 
@@ -129,7 +132,7 @@ def _run(monkeypatch, switches):
         eager_calls.append(1)
         return [np.array([3.0, 4.0], np.float32)], None, None
 
-    monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", execute)
 
     def evaluate(testcase, raw_inputs, result_nps, golden_nps, switches, perf, return_struct, *_rest):
         return_struct.construct("1.0", "PASS", perf)
@@ -178,7 +181,7 @@ def test_eager_exception_carries_plog_detail(monkeypatch):
     def execute(*_a, **_k):
         raise RuntimeError("eager boom")
 
-    monkeypatch.setattr(e2e_worker, "_execute_eager", execute)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", execute)
     set_global_storage(sw)
     ret = e2e_worker.run(_case(), {}, {}, 0)
 

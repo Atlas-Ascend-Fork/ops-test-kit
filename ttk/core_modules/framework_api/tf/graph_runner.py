@@ -38,7 +38,7 @@ def _build_input_signature(testcase, dynamic):
 
     from ttk.utilities.dtypes import DTYPE_MAP, str_to_tf_dtype
 
-    from .param_extractor import mutable_flat_indexes
+    from .param_extractor import declared_inplace_indexes, mutable_flat_indexes
 
     sig = []
     sig_idx = []
@@ -50,9 +50,11 @@ def _build_input_signature(testcase, dynamic):
     # mutable-ref 位不进 signature：tf.function 按 TensorSpec 追踪会把
     # tf.Variable 降级为 SymbolicTensor，state_ops.*scatter 系列随即在
     # ref.handle/_lazy_read 上崩溃；ref 只能经闭包捕获保持 Variable 身份
-    # (见 param_extractor.py 与 TfGraphWrapper._build_kw_function)
+    # (见 param_extractor.py 与 TfGraphWrapper._build_kw_function)。
+    # CSV 声明的被写位（inplace_input_indexes）同样按闭包捕获处理
     dist = testcase.tensor_list_dist or ()
     mutable_idx = set(mutable_flat_indexes(testcase.api_name)) if not any(d > 0 for d in dist) else set()
+    mutable_idx |= set(declared_inplace_indexes(testcase))
     for idx, (shape, dtype_str) in enumerate(zip(flat_shapes, flat_dtypes)):
         if shape is None or idx in const_indexes or idx in mutable_idx:
             continue
@@ -135,7 +137,9 @@ def execute_tf_graph(
         # 模式)：Phase 1 带复位跑正确性(窗口外)，Phase 2 纯图执行跑计时(窗口内
         # 无复位 op，采集天然干净，无需事后按 op 名剔除)。计时有效性依据：kernel
         # 耗时只与 shape/dtype 相关，与数据值无关，Phase 2 的状态累积不影响计时
-        mutable_backups = [(v, v.read_value()) for v in (*args, *kwargs.values()) if is_tf_variable(v)]
+        # 备份取 numpy 快照: read_value() 与变量 buffer 零拷贝共享, 直接存
+        # tensor 的备份会被 kernel 原地写连带修改, 复位退化为 no-op
+        mutable_backups = [(v, v.read_value().numpy().copy()) for v in (*args, *kwargs.values()) if is_tf_variable(v)]
 
         def reset_mutable_refs():
             for var, backup in mutable_backups:

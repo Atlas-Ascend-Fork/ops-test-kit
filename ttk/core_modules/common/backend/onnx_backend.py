@@ -36,7 +36,7 @@ class OnnxBackend(Backend):
     """onnx 域基类：numpy 直通域（无框架 tensor）。
 
     result_to_numpy 覆写为 ndarray 直通（基类对 ndarray 走 np.array 拷贝）；
-    stage_mutable_rounds 沿用基类默认（ONNX 无原地写，keys 恒空 → no-op）。
+    prepare_mutable_rounds 沿用基类默认（ONNX 无原地写，keys 恒空 → no-op）。
     """
 
     profile: dict = {}
@@ -102,7 +102,7 @@ class NpuOnnxBackend(OnnxBackend):
     """NPU onnx 后端：设备探测/身份全走 DSMI，零 libascendcl 触碰。
 
     set_device 仅记录 dev_id——真正 aclrtSetDevice 由 onnx/runtime 在 OmSession
-    建立时惰性执行（execute.py 保证 set_device 先于 wrap_eager 注入）。
+    建立时惰性执行（run_graph 保证 set_device 先于 wrap_eager 注入）。
     """
 
     _segment_name = "npu"

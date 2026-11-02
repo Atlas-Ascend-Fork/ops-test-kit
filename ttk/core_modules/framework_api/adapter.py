@@ -77,30 +77,133 @@ class FrameworkAdapter(ABC):
     @abstractmethod
     def run_graph(
         self,
+        ctx,
+        *,
         testcase,
-        backend,
-        dev_id,
-        switches,
         plan,
-        resolved,
-        is_tensor_method,
         is_inplace,
         raw_inputs,
         dynamic,
         is_aclgraph=False,
-        deterministic_level=None,
     ):
         """图模式执行器：torch → torch.compile + torchair；tf → tf.function。
 
-        返回 4 元组 (nps, ProfileResult, det_status, err_msg)：执行失败时
-        nps=[]、err_msg 带异常描述；成功或跳过时 err_msg 为 None。
+        ctx 为 RunCtx（deterministic_level 取自 ctx）。返回 4 元组
+        (nps, ProfileResult, det_status, err_msg)：失败时 nps=[]、err_msg
+        为异常描述；成功或跳过时 err_msg 为 None。
         """
 
-    # ── eager 模式钩子（execute._execute_eager 消费） ─────────
+    # ── eager 模式钩子（worker / onnx 委托消费） ─────────
 
     @abstractmethod
     def eager_call(self, resolved, args, kwargs, is_tensor_method):
         """单次 API 调用（torch Tensor 方法经 args[0] 分发；tf 直调）。"""
+
+    def configure_eager_compile_mode(self, backend, switches):  # noqa: B027, ARG002  # 可选钩子：默认无操作
+        """eager 设备前置（默认无操作）。torch：torch_npu 编译模式设置。"""
+
+    def run_eager(self, ctx, *, testcase, plan, is_inplace, raw_inputs):
+        """eager 执行器：公共编排（设备置位 / 输入装配 / 采集 / 逐轮载体）+
+        内层逐轮策略 self.eager_rounds（torch 单窗口；tf 两阶段，关采集时
+        只跑正确性轮）。onnx 无 eager，不走本执行器（经 run_graph 自持编排）。
+
+        ctx 为 RunCtx（worker 构建，eager/graph 共用）。返回
+        (result_nps, perf, det_status)。
+        """
+        from ..common.invoke import Invoke
+        from ..common.profiler import ProfilerConfig, get_profiler
+        from .utils import (
+            _declared_inplace_keys,
+            _eager_mutable_keys,
+            finalize_det_status,
+            prepare_device_args,
+            resolve_npu_preprocess_hook,
+            unpack_4bit_outputs,
+        )
+
+        backend = ctx.backend
+        switches = ctx.switches
+        dev_id = ctx.dev_id
+        backend.set_device(dev_id)
+        self.configure_eager_compile_mode(backend, switches)
+        args, kwargs = prepare_device_args(testcase, backend, dev_id, plan, raw_inputs, adapter=self)
+
+        if backend.is_npu():
+            result = Invoke.npu_preprocess(
+                testcase,
+                resolve_npu_preprocess_hook(testcase, switches),
+                switches,
+                device_args=(args, kwargs),
+                device_scope=lambda: backend.device_scope(dev_id),
+            )
+            testcase.absorb_preprocess(result, plan, args, kwargs)
+
+        profiling_enabled = bool(getattr(switches, "task_profiling", True))
+        profiler = get_profiler(
+            testcase.api_name,
+            backend,
+            ProfilerConfig(
+                testcase_name=testcase.testcase_name,
+                root_path=switches.root_path,
+                dev_id=dev_id,
+                enabled=profiling_enabled,
+                warmup_count=ctx.warmup_count,
+            ),
+        )
+
+        inplace_input_indexes = getattr(testcase, "inplace_input_indexes", None) or ()
+        # 键约定: int = args 下标; str = kwargs 参数名(TF raw_ops 全部按名传参, args 为空)
+        inplace_idxs = _eager_mutable_keys(self, testcase.api_name, args, kwargs, is_inplace)
+        inplace_idxs |= _declared_inplace_keys(self, testcase.api_name, args, kwargs, inplace_input_indexes)
+
+        total = ctx.warmup_count + ctx.run_count
+        # 逐轮可变槽载体预置（backend 封装：torch 逐轮克隆 / tf 同变量 assign 复位）
+        mutable_loader = backend.prepare_mutable_rounds(args, kwargs, inplace_idxs, total)
+
+        backward_mode = getattr(testcase, "backward_mode", False)
+        if backward_mode:
+            # backward：浮点输入自动 requires_grad=True（整数索引类天然无梯度，
+            # autograd.grad allow_unused 兜底）。梯度是第二组返回值（unused 位过滤
+            # 丢弃，golden 侧同构），追加在 outputs 尾部——比对/判据/ dump/结果打包零改动。
+            self.eager_prepare_backward(backend, args)
+
+        result, result_nps, md5_list = self.eager_rounds(
+            ctx,
+            api_name=testcase.api_name,
+            args=args,
+            kwargs=kwargs,
+            inplace_input_indexes=inplace_input_indexes,
+            mutable_loader=mutable_loader,
+            profiler=profiler,
+            backward_mode=backward_mode,
+        )
+
+        perf = profiler.result(ctx.run_count)
+        det_status = finalize_det_status(md5_list, testcase.testcase_name)
+        result_nps = unpack_4bit_outputs(testcase, result_nps)
+        return result_nps, perf, det_status
+
+    def eager_rounds(
+        self,
+        ctx,
+        *,
+        api_name,
+        args,
+        kwargs,
+        inplace_input_indexes,
+        mutable_loader,
+        profiler,
+        backward_mode,
+    ):
+        """eager 内层逐轮策略（各框架自行实现）。
+
+        torch：单窗口内 warmup + 正确性轮（run_torch_eager_rounds）；tf：
+        两阶段（run_tf_eager_rounds）——复位 assign 是真实设备 op，进了采集
+        窗会被 msprof 算成额外 kernel，所以正确性轮留在窗外，窗口内纯调用
+        不复位。返回 (result, result_nps, md5_list)，result_nps 为末轮输出
+        的 numpy。onnx 无 eager，不实现本钩子，误触抛 NotImplementedError。
+        """
+        raise NotImplementedError(f"{self.framework} adapter does not implement eager_rounds")
 
     def eager_prepare_backward(self, backend, args):  # noqa: B027  # 可选钩子：默认无操作
         """backward 前置（默认无操作）。torch：浮点输入置 requires_grad。"""
@@ -132,6 +235,11 @@ class FrameworkAdapter(ABC):
         positions = frozenset(i for i, p in enumerate(info.params) if p.is_mutable and not p.is_keyword_only)
         names = frozenset(p.name for p in info.params if p.is_mutable)
         return positions, names
+
+    def tensor_param_names(self, api_name: str) -> Optional[tuple]:  # noqa: ARG002  # 可选钩子：默认 None
+        """张量序参数名表（flat 位次 → 参数名）。tf 实现（raw_ops 声明下标
+        转 kwargs 键用）；torch 声明下标即 args 位，无需实现。"""
+        return None
 
     def mutable_readback(self, api_name, args, kwargs):  # noqa: ARG002
         """被写参数位的当前值列表（原地更新后的结果）；默认无，框架按需覆写。"""

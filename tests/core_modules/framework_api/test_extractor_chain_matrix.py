@@ -53,7 +53,7 @@ BASELINE_TORCH_NPU = "2.9.0.post7"
 
 
 def _base_version(version: str) -> str:
-    return version.split("+")[0]
+    return version.split("+", maxsplit=1)[0]
 
 
 def _row_on_baseline(api_name: str) -> bool:

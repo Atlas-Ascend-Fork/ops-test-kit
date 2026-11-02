@@ -116,16 +116,16 @@ class Backend(ABC):
 
         return copy.copy(tensor)
 
-    def stage_mutable_rounds(self, args, kwargs, keys, total):
-        """预热/计时多轮的可变槽载体预置：返回逐轮装载函数 stage(i)。
+    def prepare_mutable_rounds(self, args, kwargs, keys, total):
+        """预热/计时多轮的可变槽载体预置：返回逐轮装载函数 load(i)。
 
         键约定：int = args 下标；str = kwargs 参数名。默认实现逐轮换新克隆
-        （torch 原地算子需要干净载体）；keys 为空时 stage 为 no-op。
+        （torch 原地算子需要干净载体）；keys 为空时 load 为 no-op。
         """
         backups = {key: self.clone(args[key] if isinstance(key, int) else kwargs[key]) for key in keys}
         clones = {key: [self.clone(backup) for _ in range(total)] for key, backup in backups.items()}
 
-        def stage(i):
+        def load(i):
             for key, round_carriers in clones.items():
                 value = round_carriers[i]
                 if isinstance(key, int):
@@ -133,7 +133,7 @@ class Backend(ABC):
                 else:
                     kwargs[key] = value
 
-        return stage
+        return load
 
     def is_npu_only(self, api_name: str) -> bool:
         """Whether the API can only run on device (not CPU). Default: False."""

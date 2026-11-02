@@ -67,6 +67,15 @@
     },
     "ttk/remote/server/xpu_server.py": {
       "ttk.core_modules.common.xpu": "server 侧复用 common.xpu"
+    },
+    "ttk/core_modules/framework_api/adapter.py": {
+      "ttk.core_modules.kernel.device_state": "eager 执行循环下沉 adapter 后逐轮 RTS 清仍复用 kernel 共享设施（同 execute.py 存量登记）"
+    },
+    "ttk/core_modules/framework_api/tf/eager_runner.py": {
+      "ttk.core_modules.kernel.device_state": "TF eager 两阶段逐轮 RTS 清复用 kernel 共享设施（同 execute.py 存量登记）"
+    },
+    "ttk/core_modules/framework_api/torch/eager_runner.py": {
+      "ttk.core_modules.kernel.device_state": "torch eager 逐轮 RTS 清复用 kernel 共享设施（同 execute.py 存量登记）"
     }
   },
   "ruff": {
@@ -172,7 +181,7 @@
       "C901": 1
     },
     "ttk/core_modules/framework_api/adapter.py": {
-      "PLR0913": 1
+      "PLR0913": 3
     },
     "ttk/core_modules/framework_api/api_model.py": {
       "C901": 1
@@ -200,7 +209,7 @@
       "C901": 1
     },
     "ttk/core_modules/framework_api/tf/__init__.py": {
-      "PLR0913": 1
+      "PLR0913": 2
     },
     "ttk/core_modules/framework_api/tf/graph_runner.py": {
       "C901": 1,
@@ -208,7 +217,7 @@
       "PLR0915": 1
     },
     "ttk/core_modules/framework_api/torch/__init__.py": {
-      "PLR0913": 1
+      "PLR0913": 2
     },
     "ttk/core_modules/framework_api/torch/graph_runner.py": {
       "C901": 2,
@@ -230,7 +239,7 @@
       "PLR0915": 1
     },
     "ttk/core_modules/framework_api/utils.py": {
-      "PLR0913": 2
+      "PLR0913": 4
     },
     "ttk/core_modules/framework_api/worker.py": {
       "C901": 5,
@@ -365,6 +374,12 @@
     },
     "ttk/core_modules/framework_api/torch/extract_pyi.py": {
       "C901": 1
+    },
+    "ttk/core_modules/framework_api/tf/eager_runner.py": {
+      "PLR0913": 1
+    },
+    "ttk/core_modules/framework_api/torch/eager_runner.py": {
+      "PLR0913": 1
     }
   },
   "underscore": {

@@ -116,7 +116,7 @@ class OnnxAdapter(FrameworkAdapter):
     # ── 执行 ────────────────────────────────────────────────
 
     def wrap_eager(self, resolved, api_name, backend):  # noqa: ARG002
-        # soc/dev_id 注入点：execute.py 保证 backend.set_device 先于本调用
+        # soc/dev_id 注入点：run_graph 保证 backend.set_device 先于本调用
         resolved.attach_backend(backend)
         return resolved
 
@@ -128,43 +128,97 @@ class OnnxAdapter(FrameworkAdapter):
 
     def run_graph(
         self,
+        ctx,
+        *,
         testcase,
-        backend,
-        dev_id,
-        switches,
         plan,
-        resolved,
-        is_tensor_method,
         is_inplace,
         raw_inputs,
         dynamic,
         is_aclgraph=False,
-        deterministic_level=None,
     ):
-        """图模式执行器：cst 委托共享 _execute_eager（om 执行即静态图）。
+        """onnx 执行器（om 恒为静态图，不再复用 eager 编排）。
 
-        返回 4 元组 (nps, perf, det_status, err)——对齐 worker._run_graph_phase
-        的图执行器协议（torch/tf 的 execute_graph 同构；err 位恒 None，执行
-        异常经 _run_graph_phase 统一转 GRAPH_EXEC_FAILURE）。
+        onnx 没有真 eager：worker 按 eager_graph_alias 把 EAGER 请求路由到
+        本执行器，EAGER 与 GRAPH CST 两列同源。这里只做 om 执行必需的部分
+        （set_device / 输入装配 / 采集窗口 / 确定性轮 / 结果取回），不含
+        编译模式、可变键推导、backward 等 eager 步骤。返回 4 元组
+        (nps, perf, det_status, err) 对齐 worker._run_graph_phase：
+        err 位恒 None，执行异常统一由 _run_graph_phase 转 GRAPH_EXEC_FAILURE。
         """
         if is_aclgraph:
             raise ValueError("ONNX_ACLGRAPH_UNSUPPORTED: onnx e2e 不支持 aclgraph 模式")
         if dynamic:
             raise ValueError("ONNX_DYNAMIC_GRAPH_UNSUPPORTED: onnx e2e 不支持动态 shape 图模式")
-        from ..execute import _execute_eager  # 延迟 import 防环
-
-        result_nps, perf, det_status = _execute_eager(
-            testcase,
-            backend,
-            dev_id,
-            switches,
-            plan,
-            resolved,
-            is_tensor_method,
-            is_inplace,
-            raw_inputs,
-            deterministic_level=deterministic_level,
+        from ...common.profiler import ProfilerConfig, get_profiler
+        from ..utils import (
+            compute_output_md5,
+            finalize_det_status,
+            output_nps,
+            prepare_device_args,
+            round_nps,
+            unpack_4bit_outputs,
         )
+
+        backend = ctx.backend
+        switches = ctx.switches
+        dev_id = ctx.dev_id
+        backend.set_device(dev_id)
+        resolved = self.wrap_eager(ctx.resolved, testcase.api_name, backend)
+        args, kwargs = prepare_device_args(testcase, backend, dev_id, plan, raw_inputs, adapter=self)
+
+        profiling_enabled = bool(getattr(switches, "task_profiling", True))
+        profiler = get_profiler(
+            testcase.api_name,
+            backend,
+            ProfilerConfig(
+                testcase_name=testcase.testcase_name,
+                root_path=switches.root_path,
+                dev_id=dev_id,
+                enabled=profiling_enabled,
+                warmup_count=ctx.warmup_count,
+            ),
+        )
+        deterministic = ctx.deterministic_level > 0
+        total = ctx.warmup_count + ctx.run_count
+        result = None
+        md5_list = []
+        with profiler:
+            for i in range(total):
+                is_warmup = i < ctx.warmup_count
+                with backend.device_scope(dev_id):
+                    r = self.eager_call(resolved, args, kwargs, ctx.is_tensor_method)
+                if is_warmup:
+                    profiler.step()
+                    continue
+                result = r
+                if deterministic:
+                    backend.synchronize(dev_id)
+                    run_nps = round_nps(
+                        backend,
+                        r,
+                        args,
+                        (),
+                        api_name=testcase.api_name,
+                        kwargs=kwargs,
+                        adapter=self,
+                        backward_mode=False,
+                    )
+                    md5_list.append(compute_output_md5(run_nps))
+            backend.synchronize(dev_id)
+        result_nps = output_nps(
+            backend,
+            result,
+            args,
+            kwargs,
+            (),
+            api_name=testcase.api_name,
+            adapter=self,
+            backward_mode=False,
+        )
+        perf = profiler.result(ctx.run_count)
+        det_status = finalize_det_status(md5_list, testcase.testcase_name)
+        result_nps = unpack_4bit_outputs(testcase, result_nps)
         return result_nps, perf, det_status, None
 
     # ── 会话执行 ────────────────────────────────────────────

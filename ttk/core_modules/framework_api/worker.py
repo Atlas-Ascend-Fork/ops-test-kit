@@ -13,7 +13,7 @@ E2E worker —— 子进程执行编排。
 
 run 为 worker 顶层入口（经 Task.func 跨进程序列化，须保持模块级可导入）；
 _run_profile / _run_profile_multi_device 编排 eager/graph 模式与 golden 生成/比对
-（比对实现见 compare.py，eager 执行见 execute.py，图模式经 adapter.run_graph）。
+（比对实现见 compare.py，eager 执行见 adapter.run_eager，图模式经 adapter.run_graph）。
 """
 
 import contextlib
@@ -60,11 +60,12 @@ from .compare import (
     evaluate_eager_precision,
     evaluate_graph_precision,
 )
-from .execute import _capture_peak_memory, _execute_eager
 from .golden import generate_golden_data, has_dynamic_golden_source
 from .input_generate import generate_inputs, set_runtime_tensors
 from .result import FrameworkApiReturnStructure
 from .utils import (
+    WARMUP_COUNT,
+    RunCtx,
     align_4bit_golden,
     resolve_npu_preprocess_hook,
 )
@@ -723,6 +724,39 @@ def _run_graph_phase(mode_label, graph_fn, *args, **kwargs):
         return [], None, None, _attach_plog_errors(f"Graph {mode_label} execution failed: {exc}")
 
 
+def _capture_peak_memory(backend, dev_id, return_struct, fn, *args, **kwargs):
+    """NPU: reset peak stats, run *fn*, record max_memory_allocated (MB) into npu_memory.
+
+    Same caliber as the remote XPU executor (remote/server/executor.py:
+    reset_peak -> invoke -> max_memory_allocated / 1e6): peak covers input
+    allocations and execution-time temporaries inside *fn*. CANN-internal
+    workspace does not go through the torch allocator and is not counted
+    (accelerator third-party library workspace is likewise excluded). Non-NPU
+    backends pass through, npu_memory stays None.
+
+    Memory-stat APIs are best-effort: any failure (like the remote executor's
+    peak_memory_mb=NA) leaves npu_memory untouched instead of failing the case,
+    and never masks fn's own result/exception.
+    """
+    if not backend.is_npu():
+        return fn(*args, **kwargs)
+    try:
+        backend.reset_peak_memory_stats(dev_id)
+    except Exception:
+        logging.exception(f"[E2E] reset_peak_memory_stats failed on device {dev_id}; npu_memory not captured")
+        return fn(*args, **kwargs)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        try:
+            peak = backend.max_memory_allocated(dev_id)
+        except Exception:
+            logging.exception(f"[E2E] max_memory_allocated failed on device {dev_id}; npu_memory not captured")
+            peak = None
+        if peak is not None:
+            return_struct.npu_memory = peak / 1e6
+
+
 def _discard_unconsumed(xpu_dispatch):
     """后台三方句柄未被消费时弃置（止损未用请求）。"""
     if xpu_dispatch is not None and xpu_dispatch.pending:
@@ -1211,39 +1245,57 @@ def _device_profiling(ctx):
         ctx.adapter.setup_device_state(ctx.backend, ctx.testcase, ctx.process_ctx)
         _profiling_print(ctx.testcase, ctx.backend, ctx.dev_id, ctx.switches)
 
-        # 模式等价去重（adapter 钩子驱动）：onnx 的 eager ≡ 静态图
-        # （om 恒为静态图）——双开（--eager + -c）时单次执行，(nps, perf, det) 镜像刷
-        # EAGER 与 GRAPH CST 两列（perf/det 是 _execute_eager 侧资产）。
-        # dyn/aclgraph 不去重：run_graph 快速失败落 GRAPH_EXEC_FAILURE。
+        # 模式等价（adapter 钩子驱动）：onnx 的 eager ≡ 静态图（om 恒为静态
+        # 图）——eager 请求改由 static 图执行承载、EAGER 列同源镜像，不走
+        # run_eager；dyn/aclgraph 不去重：run_graph 快速失败落 GRAPH_EXEC_FAILURE。
         # getattr 防御 duck-typed 测试替身。
         eager_alias_fn = getattr(ctx.adapter, "eager_graph_alias", None)
-        dedup_cst = (
-            callable(eager_alias_fn)
-            and eager_alias_fn() == "cst"
-            and _should_run_eager(ctx.switches)
-            and ctx.switches.cst_switches.enabled
+        alias_cst = callable(eager_alias_fn) and eager_alias_fn() == "cst"
+        # eager / graph 共用同一份 RunCtx（deterministic_level 已按用例解析；
+        # run_count/warmup_count 由 switches 推出）
+        run_ctx = RunCtx(
+            backend=ctx.backend,
+            dev_id=ctx.dev_id,
+            switches=ctx.switches,
+            resolved=ctx.api_binding.resolved,
+            is_tensor_method=ctx.api_binding.is_tensor_method,
+            deterministic_level=ctx.deterministic_level,
+            run_count=ctx.switches.run_time,
+            warmup_count=(
+                WARMUP_COUNT if (ctx.switches.warmup and bool(getattr(ctx.switches, "task_profiling", True))) else 0
+            ),
         )
-        if _should_run_eager(ctx.switches):
+        if alias_cst:
+            # eager≡cst 的框架（onnx）：无真 eager，EAGER 列改由 static 图执行
+            # 同源镜像（与旧 eager→cst 镜像方向相反），不再触碰 run_eager
+            ctx.cst_alias = True
+            if _should_run_eager(ctx.switches) or ctx.switches.cst_switches.enabled:
+                ctx.process_ctx.notify_status("OnGraphCst")
+                graph_cst_nps, graph_cst_perf, graph_cst_det, graph_cst_err = _run_graph_phase(
+                    "static",
+                    ctx.adapter.run_graph,
+                    run_ctx,
+                    testcase=ctx.testcase,
+                    plan=ctx.plan,
+                    is_inplace=ctx.api_binding.is_inplace,
+                    raw_inputs=ctx.raw_inputs,
+                    dynamic=False,
+                )
+                if _should_run_eager(ctx.switches):
+                    result_nps, perf, eager_det_status = graph_cst_nps, graph_cst_perf, graph_cst_det
+        elif _should_run_eager(ctx.switches):
             ctx.process_ctx.notify_status("OnEagerProfiling")
             result_nps, perf, eager_det_status = _capture_peak_memory(
                 ctx.backend,
                 ctx.dev_id,
                 ctx.return_struct,
-                _execute_eager,
-                ctx.testcase,
-                ctx.backend,
-                ctx.dev_id,
-                ctx.switches,
-                ctx.plan,
-                ctx.api_binding.resolved,
-                ctx.api_binding.is_tensor_method,
-                ctx.api_binding.is_inplace,
-                ctx.raw_inputs,
-                ctx.deterministic_level,
+                ctx.adapter.run_eager,
+                run_ctx,
+                testcase=ctx.testcase,
+                plan=ctx.plan,
+                is_inplace=ctx.api_binding.is_inplace,
+                raw_inputs=ctx.raw_inputs,
             )
-            if dedup_cst:
-                # 同一份执行结果镜像两列：nps/perf/det 同源，两列恒同值
-                graph_cst_nps, graph_cst_perf, graph_cst_det = result_nps, perf, eager_det_status
         if ctx.api_binding.graph_enabled:
             graph_fn = ctx.adapter.run_graph
             if getattr(ctx.switches, "aclgraph_enabled", False):
@@ -1251,53 +1303,38 @@ def _device_profiling(ctx):
                 graph_aclgraph_nps, graph_aclgraph_perf, graph_aclgraph_det, graph_aclgraph_err = _run_graph_phase(
                     "aclgraph",
                     graph_fn,
-                    ctx.testcase,
-                    ctx.backend,
-                    ctx.dev_id,
-                    ctx.switches,
-                    ctx.plan,
-                    ctx.api_binding.resolved,
-                    ctx.api_binding.is_tensor_method,
-                    ctx.api_binding.is_inplace,
-                    ctx.raw_inputs,
+                    run_ctx,
+                    testcase=ctx.testcase,
+                    plan=ctx.plan,
+                    is_inplace=ctx.api_binding.is_inplace,
+                    raw_inputs=ctx.raw_inputs,
                     dynamic=False,
                     is_aclgraph=True,
-                    deterministic_level=ctx.deterministic_level,
                 )
-            if ctx.switches.cst_switches.enabled and not dedup_cst:
-                # 去重时跳过二次执行（eager 已镜像，本用例无独立 cst 阶段）
+            if ctx.switches.cst_switches.enabled and not alias_cst:
+                # alias 框架已在上面统一执行 static（eager 列同源镜像）
                 ctx.process_ctx.notify_status("OnGraphCst")
                 graph_cst_nps, graph_cst_perf, graph_cst_det, graph_cst_err = _run_graph_phase(
                     "static",
                     graph_fn,
-                    ctx.testcase,
-                    ctx.backend,
-                    ctx.dev_id,
-                    ctx.switches,
-                    ctx.plan,
-                    ctx.api_binding.resolved,
-                    ctx.api_binding.is_tensor_method,
-                    ctx.api_binding.is_inplace,
-                    ctx.raw_inputs,
+                    run_ctx,
+                    testcase=ctx.testcase,
+                    plan=ctx.plan,
+                    is_inplace=ctx.api_binding.is_inplace,
+                    raw_inputs=ctx.raw_inputs,
                     dynamic=False,
-                    deterministic_level=ctx.deterministic_level,
                 )
             if ctx.switches.dyn_switches.enabled:
                 ctx.process_ctx.notify_status("OnGraphDyn")
                 graph_dyn_nps, graph_dyn_perf, graph_dyn_det, graph_dyn_err = _run_graph_phase(
                     "dynamic",
                     graph_fn,
-                    ctx.testcase,
-                    ctx.backend,
-                    ctx.dev_id,
-                    ctx.switches,
-                    ctx.plan,
-                    ctx.api_binding.resolved,
-                    ctx.api_binding.is_tensor_method,
-                    ctx.api_binding.is_inplace,
-                    ctx.raw_inputs,
+                    run_ctx,
+                    testcase=ctx.testcase,
+                    plan=ctx.plan,
+                    is_inplace=ctx.api_binding.is_inplace,
+                    raw_inputs=ctx.raw_inputs,
                     dynamic=True,
-                    deterministic_level=ctx.deterministic_level,
                 )
     gc.collect()
     _collect_sim_report(ctx.testcase, ctx.switches)
@@ -1443,6 +1480,10 @@ def _compare_and_finalize(ctx):
             ctx.return_struct,
             ctx.xpu_outputs,
         )
+
+    if getattr(ctx, "cst_alias", False) and ctx.npu_results.graph_cst_err:
+        # eager≡cst 的框架（onnx）：static 执行失败时 EAGER 列落同源错误文本
+        ctx.return_struct.eager_precision = ctx.npu_results.graph_cst_err
 
     if ctx.api_binding.graph_enabled:
         ctx.process_ctx.notify_status("OnGraphComparison")

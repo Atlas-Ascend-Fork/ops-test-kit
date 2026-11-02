@@ -45,36 +45,45 @@ class TorchAdapter(FrameworkAdapter):
 
     # ── 执行器 ──
 
+    def configure_eager_compile_mode(self, backend, switches):
+        """eager 算子编译模式：-b 默认二进制复用（jitCompile=disable），
+        -b=false 在线编译。进程级全局、幂等；仅 NPU 生效。"""
+        if not backend.is_npu():
+            return
+        import logging
+
+        import torch_npu
+
+        binary = getattr(switches, "e2e_binary", False)
+        logging.info("[E2E] eager aclnn compile mode: %s", "binary reuse (-b)" if binary else "online (-b=false)")
+        torch_npu.npu.set_compile_mode(jit_compile=not binary)
+
     def run_graph(
         self,
+        ctx,
+        *,
         testcase,
-        backend,
-        dev_id,
-        switches,
         plan,
-        resolved,
-        is_tensor_method,
         is_inplace,
         raw_inputs,
         dynamic,
         is_aclgraph=False,
-        deterministic_level=None,
     ):
         from .graph_runner import execute_graph
 
         return execute_graph(
             testcase,
-            backend,
-            dev_id,
-            switches,
+            ctx.backend,
+            ctx.dev_id,
+            ctx.switches,
             plan,
-            resolved,
-            is_tensor_method,
+            ctx.resolved,
+            ctx.is_tensor_method,
             is_inplace,
             raw_inputs,
             dynamic,
             is_aclgraph=is_aclgraph,
-            deterministic_level=deterministic_level,
+            deterministic_level=ctx.deterministic_level,
         )
 
     # ── eager 模式钩子 ──
@@ -83,6 +92,32 @@ class TorchAdapter(FrameworkAdapter):
         from .eager_runner import call
 
         return call(resolved, args, kwargs, is_tensor_method)
+
+    def eager_rounds(
+        self,
+        ctx,
+        *,
+        api_name,
+        args,
+        kwargs,
+        inplace_input_indexes,
+        mutable_loader,
+        profiler,
+        backward_mode,
+    ):
+        from .eager_runner import run_torch_eager_rounds
+
+        return run_torch_eager_rounds(
+            self,
+            ctx,
+            api_name=api_name,
+            args=args,
+            kwargs=kwargs,
+            inplace_input_indexes=inplace_input_indexes,
+            mutable_loader=mutable_loader,
+            profiler=profiler,
+            backward_mode=backward_mode,
+        )
 
     def eager_prepare_backward(self, backend, args):
         from .eager_runner import enable_requires_grad

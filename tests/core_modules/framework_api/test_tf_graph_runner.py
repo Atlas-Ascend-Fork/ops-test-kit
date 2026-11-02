@@ -227,13 +227,14 @@ class TestBuildInputSignature:
     """complex32 → fp16 + 尾维 [2] lanes 签名（与 eager 喂入形态一致）。"""
 
     @staticmethod
-    def _testcase(shapes, dtypes):
+    def _testcase(shapes, dtypes, api_name="tf.raw_ops.FakeBin", inplace_input_indexes=()):
         return SimpleNamespace(
             flat_tensor_view_shapes=shapes,
             flat_tensor_dtypes=dtypes,
             const_input_indexes=set(),
             tensor_list_dist=(),
-            api_name="tf.raw_ops.InplaceAdd",
+            api_name=api_name,
+            inplace_input_indexes=inplace_input_indexes,
         )
 
     @pytest.mark.parametrize(
@@ -260,3 +261,27 @@ class TestBuildInputSignature:
         assert sig[0].dtype == tf.float32
         assert sig[1].shape == (1,)
         assert sig[1].dtype == tf.int32
+
+    @pytest.mark.parametrize(
+        ("api_name", "indexes"),
+        [
+            pytest.param("tf.raw_ops.InplaceAdd", (), id="registry"),
+            pytest.param("tf.raw_ops.FakeBin", (0,), id="declared"),
+        ],
+    )
+    def test_mutable_slot_excluded_from_signature(self, api_name, indexes):
+        """被写槽（kernel 别名写注册表 / CSV 声明）挤出 input_signature，
+        经闭包捕获 Variable，配合 mutable_backups 逐轮复位。"""
+        from ttk.core_modules.framework_api.tf.graph_runner import _build_input_signature
+
+        sig, sig_idx = _build_input_signature(
+            self._testcase(
+                ((8, 4), (1,), (1, 4)),
+                ("uint8", "int32", "uint8"),
+                api_name=api_name,
+                inplace_input_indexes=indexes,
+            ),
+            dynamic=False,
+        )
+        assert sig_idx == [1, 2]
+        assert len(sig) == 2

@@ -33,7 +33,7 @@ def _make_case(api_name, **kw):
 
 
 class TestResultToNumpyFlatBackwardGate:
-    """_result_to_numpy_flat 的元组启发式必须带 backward 门控：原生返回
+    """_result_to_numpy 的元组启发式必须带 backward 门控：原生返回
     (Tensor, list[Tensor]) 的 API 不得被误拆（list 项走 np.array 堆叠语义）。"""
 
     class _KeepListBackend:
@@ -50,20 +50,20 @@ class TestResultToNumpyFlatBackwardGate:
             return out
 
     def test_native_tuple_list_not_split_without_backward(self):
-        from ttk.core_modules.framework_api.execute import _result_to_numpy_flat
+        from ttk.core_modules.framework_api.utils import _result_to_numpy
 
         t0, t1, t2 = torch.ones(2), torch.full((2,), 2.0), torch.full((2,), 3.0)
         result = (t0, [t1, t2])  # API 原生返回形态
-        nps = _result_to_numpy_flat(self._KeepListBackend(), result)
+        nps = _result_to_numpy(self._KeepListBackend(), result)
         assert len(nps) == 2
         assert nps[1].shape == (2, 2)  # list 项整体堆叠，非逐项展开
 
     def test_backward_wrapper_split_with_gate(self):
-        from ttk.core_modules.framework_api.execute import _result_to_numpy_flat
+        from ttk.core_modules.framework_api.utils import _result_to_numpy
 
         t0, t1, t2 = torch.ones(2), torch.full((2,), 2.0), torch.full((2,), 3.0)
         result = (t0, [t1, t2])  # backward 包装 (forward, grads) 同形态
-        nps = _result_to_numpy_flat(self._KeepListBackend(), result, backward=True)
+        nps = _result_to_numpy(self._KeepListBackend(), result, backward=True)
         assert len(nps) == 3
         assert nps[1].tolist() == [2.0, 2.0]
         assert nps[2].tolist() == [3.0, 3.0]

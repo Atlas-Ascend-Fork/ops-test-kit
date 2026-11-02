@@ -72,7 +72,7 @@ def test_torch_naming_projection_fills_first_tensor_param():
 
 def test_eager_mutable_keys_derivation():
     """execute 的克隆轮换键派生：mutable_slots 模型派生（位置+名字），解析降级回退槽 0。"""
-    from ttk.core_modules.framework_api.execute import _eager_mutable_keys
+    from ttk.core_modules.framework_api.utils import _eager_mutable_keys
 
     args = [object(), object(), object()]
 
@@ -92,6 +92,24 @@ def test_eager_mutable_keys_derivation():
     assert _eager_mutable_keys(empty, "torch.fake_", args, {}, True) == {0}
     assert _eager_mutable_keys(empty, "torch.fake_", args, {}, False) == set()
     assert _eager_mutable_keys(empty, "torch.fake_", [None, object()], {}, True) == set()
+
+
+def test_declared_inplace_keys():
+    """CSV inplace_input_indexes 声明键：args 位优先；raw_ops 全走 kwargs 时按
+    张量序名映射（adapter.tensor_param_names）；无该钩子（torch）仅走 args 位。"""
+    from ttk.core_modules.framework_api.utils import _declared_inplace_keys
+
+    adapter = SimpleNamespace(tensor_param_names=lambda _api: ("x", "i"))
+
+    assert _declared_inplace_keys(adapter, "torch.fake", [object(), object()], {}, (0,)) == {0}
+    assert _declared_inplace_keys(adapter, "tf.raw_ops.Fake", [], {"x": object()}, (0,)) == {"x"}
+    assert _declared_inplace_keys(adapter, "tf.raw_ops.Fake", [], {}, (5,)) == set()
+    assert _declared_inplace_keys(SimpleNamespace(), "torch.fake", [], {}, (0,)) == set()
+    # 钩子存在但返回 None（torch/onnx 基类默认）：仅走 args 位，不报错
+    none_hook = SimpleNamespace(tensor_param_names=lambda _api: None)
+    assert _declared_inplace_keys(none_hook, "torch.fake", [], {}, (0,)) == set()
+    # 负下标不入 args 位（防 args[-1] 误取末位参数）
+    assert _declared_inplace_keys(adapter, "torch.fake", [object(), object()], {}, (-1,)) == set()
 
 
 def test_mutable_model_reads_short_circuit_non_tf_names():
@@ -128,12 +146,16 @@ def test_tf_param_flags_filled_from_opdef():
     script = textwrap.dedent(
         """
         import json
+        from types import SimpleNamespace
 
         import tensorflow as tf
 
         from ttk.core_modules.framework_api.adapter import get_adapter
         from ttk.core_modules.framework_api.info_keeper import FrameworkApiInfoKeeper
         from ttk.core_modules.framework_api.tf.param_extractor import (
+            _inplace_builtin_input_names,
+            declared_inplace_indexes,
+            flat_tensor_param_names,
             mutable_flat_indexes,
         )
 
@@ -146,6 +168,14 @@ def test_tf_param_flags_filled_from_opdef():
         def types(api):
             info = keeper.get(api)
             return None if info is None else [[p.name, p.type, p.is_tensor_list] for p in info.params]
+
+        def tc(indexes, dist=(), api="tf.raw_ops.InplaceAdd"):
+            return SimpleNamespace(
+                api_name=api,
+                inplace_input_indexes=indexes,
+                tensor_list_dist=dist,
+                flat_tensor_view_shapes=((8, 4), (1,), (1, 4)),
+            )
 
         adapter = get_adapter("tf")
         v = tf.Variable([1.0, 2.0])
@@ -165,6 +195,14 @@ def test_tf_param_flags_filled_from_opdef():
             "readback_relu": adapter.mutable_readback("tf.nn.relu", [v], {}),
             "acc_nv2_types": types("tf.raw_ops.AccumulateNV2"),
             "relu_types": types("tf.nn.relu"),
+            "inplaceadd": flags("tf.raw_ops.InplaceAdd"),
+            "mutable_ia": adapter.is_mutable_api("tf.raw_ops.InplaceAdd"),
+            "flat_ia": list(mutable_flat_indexes("tf.raw_ops.InplaceAdd")),
+            "names_ia": list(flat_tensor_param_names("tf.raw_ops.InplaceAdd")),
+            "alias_names_snake": sorted(_inplace_builtin_input_names("tf.inplace_add")),
+            "declared_ok": list(declared_inplace_indexes(tc((0, 5)))),
+            "declared_oob": list(declared_inplace_indexes(tc((9,)))),
+            "declared_tl": list(declared_inplace_indexes(tc((0,), dist=(3, 0, 0)))),
         }
         print("RESULT:" + json.dumps(out))
         """
@@ -200,3 +238,19 @@ def test_tf_param_flags_filled_from_opdef():
     ]
     # 控制组：无列表输入的普通 API 不误标
     assert out["relu_types"] == [["features", "Tensor", False], ["name", "Number", False]]
+    # kernel 别名写注册表：InplaceAdd 的 x 在 OpDef 里 is_ref=False，注册表补 mutable
+    assert out["inplaceadd"] == [
+        ["x", True, False],
+        ["i", False, False],
+        ["v", False, False],
+        ["name", False, False],
+    ]
+    assert out["mutable_ia"] is True
+    assert out["flat_ia"] == [0]
+    assert out["names_ia"] == ["x", "i", "v"]
+    # snake_case 封装名经 CamelCase 归一化命中注册表
+    assert out["alias_names_snake"] == ["x"]
+    # CSV 声明的被写位：过滤越界；TensorList 在场防御性不启用
+    assert out["declared_ok"] == [0]
+    assert out["declared_oob"] == []
+    assert out["declared_tl"] == []

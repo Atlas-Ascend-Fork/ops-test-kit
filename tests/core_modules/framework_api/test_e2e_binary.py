@@ -34,31 +34,27 @@ class _CpuBackend:
         return False
 
 
-def _adapter(framework):
-    return SimpleNamespace(framework=framework)
-
-
 class TestEagerCompileMode:
     def test_binary_disables_jit_compile(self, monkeypatch):
-        from ttk.core_modules.framework_api.execute import _apply_e2e_compile_mode
+        from ttk.core_modules.framework_api.adapter import get_adapter
 
         calls = _fake_torch_npu(monkeypatch)
-        _apply_e2e_compile_mode(_NpuBackend(), _adapter("torch"), SimpleNamespace(e2e_binary=True))
+        get_adapter("torch").configure_eager_compile_mode(_NpuBackend(), SimpleNamespace(e2e_binary=True))
         assert calls == [False]
 
     def test_binary_false_enables_jit_compile(self, monkeypatch):
-        from ttk.core_modules.framework_api.execute import _apply_e2e_compile_mode
+        from ttk.core_modules.framework_api.adapter import get_adapter
 
         calls = _fake_torch_npu(monkeypatch)
-        _apply_e2e_compile_mode(_NpuBackend(), _adapter("torch"), SimpleNamespace(e2e_binary=False))
+        get_adapter("torch").configure_eager_compile_mode(_NpuBackend(), SimpleNamespace(e2e_binary=False))
         assert calls == [True]
 
-    def test_cpu_backend_and_tf_adapter_skip(self, monkeypatch):
-        from ttk.core_modules.framework_api.execute import _apply_e2e_compile_mode
+    def test_cpu_backend_and_non_torch_adapter_skip(self, monkeypatch):
+        from ttk.core_modules.framework_api.adapter import get_adapter
 
         calls = _fake_torch_npu(monkeypatch)
-        _apply_e2e_compile_mode(_CpuBackend(), _adapter("torch"), SimpleNamespace(e2e_binary=True))
-        _apply_e2e_compile_mode(_NpuBackend(), _adapter("tf"), SimpleNamespace(e2e_binary=True))
+        get_adapter("torch").configure_eager_compile_mode(_CpuBackend(), SimpleNamespace(e2e_binary=True))
+        get_adapter("tf").configure_eager_compile_mode(_NpuBackend(), SimpleNamespace(e2e_binary=True))
         assert calls == []
 
 

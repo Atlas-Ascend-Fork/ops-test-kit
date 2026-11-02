@@ -121,7 +121,12 @@ class EyeImpl:                        # third_party 实现类
 |------|---------|--------|
 | Kernel / GEIR | numpy.ndarray | 必须返回修改后的输入序列 |
 | ACLNN | torch.Tensor | 返回序列回写输入槽；返回 `None` = 原地写法 |
-| E2E | torch.Tensor（onnx 为 ndarray） | 忽略返回值，仅原地写法 |
+| E2E | torch.Tensor / tf.Tensor / onnx ndarray | 返回序列按槽位回写；返回 `None` = 原地写法 |
+
+> [!NOTE]
+> - 返回值须与输入张量槽同序：替换位给新张量，不变位给 `None`；单张量算子可直接返回张量。
+> - 返回张量 shape 与声明槽不一致时，在输入生成阶段显式报错，不会静默丢弃。
+> - TF 张量不可变，`x[:] = value` 无法生效，替换输入必须走返回值；torch/numpy 入参仍可用原地写法。
 
 只调数据范围时直接在 CSV 设 `input_data_ranges`，不用写本字段。
 

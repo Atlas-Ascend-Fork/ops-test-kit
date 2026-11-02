@@ -60,7 +60,7 @@ def npu_golden_runner(invoke_npu, invoke_cpu, dev_id, switches, testcase_name, w
     """msprof 采集窗执行 NPU golden；失败回落 CPU。返回 (outputs, perf, source)。
 
     warmup_count=None 时跟随 --warmup（`1 if switches.warmup else 0`，
-    与 DUT `_execute_eager` 同口径）；task_profiling=False 不开采集窗。
+    与 DUT eager 执行同口径）；task_profiling=False 不开采集窗。
 
     回落与 task_profiling 开关无关：NPU 执行/采集失败 → CPU 闭包兜底
     （perf 空、source="cpu"）；CPU 闭包失败原样上抛（Invoke.golden 收敛为

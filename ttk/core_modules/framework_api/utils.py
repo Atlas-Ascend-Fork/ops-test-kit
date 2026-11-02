@@ -18,6 +18,7 @@ FrameworkAdapter（bind_tensors / eager 钩子）与 backend 方法。
 
 import hashlib
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -26,8 +27,25 @@ from ttk.utilities.dtypes import is_4bit_dtype, unpack_4bits
 
 from ..common.invoke import accepts_var_keyword, sig_params
 
-# eager（execute.py）与图模式（torch/graph_runner.py）共用的 warmup 轮数
+# eager（adapter.run_eager）与图模式（torch/graph_runner.py）共用的 warmup 轮数
 WARMUP_COUNT = 1
+
+
+@dataclass
+class RunCtx:
+    """eager 与图执行器共用的执行上下文（worker 构建，run_eager/run_graph 消费）。
+
+    run_count/warmup_count 目前只有 eager 用（图执行器从 switches 自行推导），
+    其余字段两路共用。"""
+
+    backend: object
+    dev_id: int
+    switches: object
+    resolved: object
+    is_tensor_method: bool
+    deterministic_level: int
+    run_count: int
+    warmup_count: int
 
 
 def build_plugin_call(
@@ -144,6 +162,101 @@ def prepare_device_args(testcase, backend, dev_id, plan, raw_inputs, adapter=Non
     nested_tensors = nest_by_distribution(dev_tensors, dist) if dist else dev_tensors
     args, kwargs, _ = plan.build_args(nested_tensors)
     return args, kwargs
+
+
+def round_nps(
+    backend, r, args, inplace_input_indexes, *, api_name=None, kwargs=None, adapter=None, backward_mode=False
+):
+    """确定性 MD5 取回（backward 时 (r, grads) 打平展开）。"""
+    run_nps = []
+    if r is not None:
+        run_nps.extend(_result_to_numpy(backend, r, backward=backward_mode))
+    elif api_name is not None:
+        # 无返回值有状态算子(TF raw Resource*): 逐轮回读当轮变量(克隆)的更新值
+        if adapter is None:
+            from .adapter import adapter_for_api_name
+
+            adapter = adapter_for_api_name(api_name)
+        run_nps.extend(adapter.mutable_readback(api_name, args, kwargs))
+    if inplace_input_indexes:
+        for idx in sorted(inplace_input_indexes):
+            if idx < len(args) and args[idx] is not None:
+                run_nps.append(backend.to_numpy(args[idx], safe=True))
+    return run_nps
+
+
+def _result_to_numpy(backend, result, backward=False):
+    """结果展开成 numpy 列表；backward=True 时把 (forward, grads) 包装打平。
+
+    该元组启发式必须受 backward 门控：原生返回 (Tensor, list[Tensor]) 的
+    API 不带门控会被误拆（普通 result_to_numpy 对 list 项做 np.array 堆叠）。"""
+    if backward and (
+        isinstance(result, tuple)
+        and len(result) == 2
+        and isinstance(result[1], list)
+        and (result[1] and hasattr(result[1][0], "numpy") or result[1] == [])
+    ):
+        forward, grads = result
+        nps = backend.result_to_numpy(forward) if forward is not None else []
+        for g in grads:
+            nps.extend(
+                backend.result_to_numpy(g)
+                if not isinstance(g, list)
+                else [x for g2 in g for x in backend.result_to_numpy(g2)]
+            )
+        return nps
+    return backend.result_to_numpy(result)
+
+
+def output_nps(
+    backend, result, args, kwargs, inplace_input_indexes, *, api_name=None, adapter=None, backward_mode=False
+):
+    """轮末输出取回：有返回值取返回值，否则回读被写参数位；声明被写位追加。
+
+    TF 两阶段在正确性轮（Phase 1）末调用本函数定格结果——Phase 2 计时段
+    不复位，别名 buffer 会继续累积，事后取读已被污染。"""
+    if result is not None:
+        result_nps = _result_to_numpy(backend, result, backward=backward_mode)
+    else:
+        result_nps = adapter.mutable_readback(api_name, args, kwargs) or None
+    if inplace_input_indexes:
+        if result_nps is None:
+            result_nps = []
+        for idx in sorted(inplace_input_indexes):
+            if idx < len(args) and args[idx] is not None:
+                result_nps.append(backend.to_numpy(args[idx], safe=True))
+    return result_nps
+
+
+def _eager_mutable_keys(adapter, api_name, args, kwargs, is_inplace):
+    """可变槽轮换键（int = args 下标，str = kwargs 参数名），mutable_slots 派生。
+
+    torch 解析降级（命名原地但模型无被写位）时回退槽 0。"""
+    positions, names = adapter.mutable_slots(api_name)
+    keys = {i for i in positions if i < len(args) and args[i] is not None}
+    keys |= {name for name in names if kwargs.get(name) is not None}
+    if not keys and is_inplace and args and args[0] is not None:
+        keys = {0}
+    return keys
+
+
+def _declared_inplace_keys(adapter, api_name, args, kwargs, inplace_input_indexes):
+    """CSV 声明的被写位 → 轮换键。
+
+    下标落在 args 且非 None 用下标；否则按张量序名映射（TF raw_ops 全走
+    kwargs，经 adapter.tensor_param_names 取参数名）。无该钩子（torch/onnx
+    默认）时声明只走 args 位。"""
+    keys = set()
+    names_hook = getattr(adapter, "tensor_param_names", None)
+    param_names = names_hook(api_name) or () if names_hook else ()
+    for i in inplace_input_indexes:
+        if 0 <= i < len(args):
+            if args[i] is not None:
+                keys.add(i)
+            continue
+        if 0 <= i < len(param_names) and kwargs.get(param_names[i]) is not None:
+            keys.add(param_names[i])
+    return keys
 
 
 def _unpack_4bit_guard(src, dst_dtype, label):

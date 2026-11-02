@@ -130,6 +130,9 @@ class _NoOpAdapter:
     def is_inplace(self, _resolved, _is_tensor_method):
         return False
 
+    def run_eager(self, *args, **kwargs):
+        return [], None, None
+
     def run_graph(self, *args, **kwargs):
         return [], None, None, None
 
@@ -170,7 +173,7 @@ def test_e2e_prepare_stops_before_api_resolution_and_device_execution(monkeypatc
     from ttk.core_modules.framework_api.torch import TorchAdapter
 
     monkeypatch.setattr(TorchAdapter, "load_api", resolve_api)
-    monkeypatch.setattr(e2e_profiling, "_execute_eager", execute)
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", execute)
     monkeypatch.setattr(e2e_profiling, "_profiling_end_print", lambda *_args, **_kwargs: None)
     result = FrameworkApiReturnStructure()
 
@@ -291,7 +294,7 @@ def test_e2e_full_flow_empty_dir_generates_and_dumps(monkeypatch, tmp_path):
         MagicMock(side_effect=AssertionError("full-flow dump must not regenerate golden")),
     )
     monkeypatch.setattr(e2e_profiling, "adapter_for_testcase", lambda *_: _no_op_adapter())
-    monkeypatch.setattr(e2e_profiling, "_execute_eager", lambda *_: (golden, None, None))
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", lambda *_, **__: (golden, None, None))
     monkeypatch.setattr(e2e_profiling, "DeviceLock", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(e2e_profiling, "_profiling_print", lambda *_: None)
     monkeypatch.setattr(e2e_profiling, "dump_inputs", lambda *_, **__: None)
@@ -342,7 +345,7 @@ def test_e2e_replay_skips_input_and_golden_generation(monkeypatch, tmp_path):
         MagicMock(side_effect=AssertionError("golden generation must be skipped")),
     )
     monkeypatch.setattr(e2e_profiling, "adapter_for_testcase", lambda *_: _no_op_adapter())
-    monkeypatch.setattr(e2e_profiling, "_execute_eager", lambda *_: (golden, None, None))
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", lambda *_, **__: (golden, None, None))
     monkeypatch.setattr(e2e_profiling, "DeviceLock", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(e2e_profiling, "_profiling_print", lambda *_: None)
     monkeypatch.setattr(e2e_profiling, "dump_inputs", lambda *_, **__: None)
@@ -403,7 +406,7 @@ def test_e2e_replay_custom_compare_receives_restored_inputs(monkeypatch, tmp_pat
 
     monkeypatch.setattr(_e2e_compare, "SpecResolver", _SpecResolverStub(spec_attr))
     monkeypatch.setattr(e2e_profiling, "adapter_for_testcase", lambda *_: _no_op_adapter())
-    monkeypatch.setattr(e2e_profiling, "_execute_eager", lambda *_: ([golden[0].copy()], None, None))
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", lambda *_, **__: ([golden[0].copy()], None, None))
     monkeypatch.setattr(e2e_profiling, "DeviceLock", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(e2e_profiling, "_profiling_print", lambda *_: None)
     monkeypatch.setattr(e2e_profiling, "dump_inputs", lambda *_, **__: None)
