@@ -55,9 +55,11 @@ def generate_inputs(testcase, switches, backend, plan, stored_inputs=None, cpu_p
     if stored_inputs is not None:
         testcase.np_storages = list(stored_inputs)
         raw_inputs = build_views_from_storages(testcase)
-    else:
-        raw_inputs = default_generate_inputs(testcase, switches)
-        apply_attribute_tensors(testcase, raw_inputs)
+        set_runtime_tensors(testcase, raw_inputs, backend, cpu_placement=cpu_placement)
+        return raw_inputs
+
+    raw_inputs = default_generate_inputs(testcase, switches)
+    apply_attribute_tensors(testcase, raw_inputs)
 
     plugin_path = switches.plugin_path
     input_func = get_plugin_function(testcase.api_name, "input", "e2e", plugin_path)
