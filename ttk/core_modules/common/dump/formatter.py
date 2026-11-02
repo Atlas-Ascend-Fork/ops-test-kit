@@ -17,7 +17,7 @@
   Tensor  : bin=转 numpy tofile / npy=转 numpy 存 / pt=torch.save / print 同 ndarray
 
 load 读回 store 布局文件（manual_data 消费）：npy 自定义 dtype 以等宽 void
-落盘、读侧 view 还原（与写侧 _as_npy_savable 同契约）；pt 的 torch 不支持
+落盘，float8_e5m2 兼容既有 uint8 载体，读侧 view 还原；pt 的 torch 不支持
 dtype 走 ttk_raw_bytes/ttk_shape 原始字节载荷。读取失败抛 DumpLoadError。
 
 新增格式 = 新增 formatter 实现 + @register_format 一行。
@@ -170,7 +170,7 @@ class NpyFormatter(DumpFormatter):
         numpy.save(path, _as_npy_savable(result))
 
     def load(self, path, dtype, shape=None) -> numpy.ndarray:
-        """读回 .npy；自定义 dtype 按等宽 void 存储约定 view 还原。"""
+        """读回 .npy；自定义 dtype 的等宽 void 或 e5m2 的 uint8 载体按存储约定还原。"""
         array = numpy.load(str(path), allow_pickle=False)
         if shape is not None and tuple(array.shape) != tuple(shape):
             raise DumpLoadError(f"{path} stored shape {tuple(array.shape)} != expected {tuple(shape)}")
@@ -180,7 +180,9 @@ class NpyFormatter(DumpFormatter):
             return array
         if expected_dtype.name not in _CUSTOM_NUMPY_DTYPES:
             raise DumpLoadError(f"{path} stored dtype {array.dtype.name!r} != filename dtype {expected_dtype.name!r}")
-        if array.dtype.kind != "V":
+        if array.dtype.kind != "V" and not (
+            expected_dtype.name == "float8_e5m2" and array.dtype == numpy.dtype(numpy.uint8)
+        ):
             raise DumpLoadError(f"{path} stored dtype {array.dtype.name!r} != filename dtype {expected_dtype.name!r}")
         if array.dtype.itemsize != expected_dtype.itemsize:
             raise DumpLoadError(

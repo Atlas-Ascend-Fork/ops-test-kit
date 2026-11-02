@@ -67,6 +67,10 @@ class TestFormatterSemantics:
         back = numpy.load(tmp_path / "pin_fp8_0.npy")
         assert back.dtype == numpy.uint8
         numpy.testing.assert_array_equal(back.view(ml_dtypes.float8_e5m2), arr)
+        restored = get_formatter("npy").load(tmp_path / "pin_fp8_0.npy", arr.dtype, arr.shape)
+        assert restored.dtype == arr.dtype
+        assert restored.shape == arr.shape
+        assert restored.tobytes() == arr.tobytes()
 
     def test_bytes_npy_e5m2_stored_as_uint8(self, tmp_path):
         ml_dtypes = pytest.importorskip("ml_dtypes")
@@ -75,6 +79,10 @@ class TestFormatterSemantics:
         back = numpy.load(tmp_path / "pin_fp8b_0.npy")
         assert back.dtype == numpy.uint8
         assert back.tobytes() == raw
+        restored = get_formatter("npy").load(tmp_path / "pin_fp8b_0.npy", ml_dtypes.float8_e5m2, (4,))
+        assert restored.dtype == numpy.dtype(ml_dtypes.float8_e5m2)
+        assert restored.shape == (4,)
+        assert restored.tobytes() == raw
 
     def test_ndarray_print_writes_no_file(self, tmp_path, capsys):
         arr = numpy.ones((2, 2), dtype=numpy.float16)
