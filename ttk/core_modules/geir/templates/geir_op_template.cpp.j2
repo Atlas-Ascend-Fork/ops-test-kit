@@ -413,6 +413,8 @@ int main(int argc, char* argv[]) {
     }
     // 常驻模式失败帧: [8B -1][8B msg_len][msg]——父进程读到 -1 即本例失败, 循环继续
     auto write_fail_frame = [&](const string& msg) {
+        // The parent may start the next case as soon as it reads this frame.
+        prof_teardown();
         int64_t neg = -1;
         fwrite(&neg, 8, 1, data_out);
         int64_t msg_len = (int64_t)msg.size();
@@ -433,7 +435,14 @@ int main(int argc, char* argv[]) {
     string ttk_prof_buf;
     string ttk_prefix_buf = input_prefix ? string(input_prefix) : string();
 
+    struct ProfScope {
+        decltype(prof_teardown)& teardown;
+        ~ProfScope() { teardown(); }
+    };
     while (true) {
+    // Backstop for continue/return/EOF paths, including failures before RunGraph.
+    // Explicit teardown before frames is still needed to avoid a parent race.
+    ProfScope prof_scope{prof_teardown};
     if (ttk_serve_mode) {
         char ttk_line[4096];
         if (fgets(ttk_line, sizeof(ttk_line), stdin) == nullptr) break;   // EOF -> 正常收工
