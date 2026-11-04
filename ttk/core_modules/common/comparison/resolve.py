@@ -34,12 +34,12 @@ DEFAULT_THRESHOLD = 2**-13
 # max_abs_error_floor 为绝对误差兜底值（表 2.2 的 "1e-X" 部分）；"or 32*ULP" 部分由
 # mix_tolerance 按最大误差点值域动态计算（对齐 cann/opbase mixed_tolerance_standard），不在表内固化。
 MIX_TOLERANCE = {
-    "float16": {"rtol": 2**-9, "atol": 2**-9, "max_abs_error_floor": 1e-1},
-    "bfloat16": {"rtol": 2**-6, "atol": 2**-6, "max_abs_error_floor": 1e-0},
-    "float32": {"rtol": 2**-10, "atol": 2**-16, "max_abs_error_floor": 1e-2},
-    "hifloat32": {"rtol": 2**-9, "atol": 2**-10, "max_abs_error_floor": 1e-1},
-    "float8_e4m3fn": {"rtol": 2**-2, "atol": 2**-4, "max_abs_error_floor": 1e-0},
-    "float8_e5m2": {"rtol": 2**-1, "atol": 2**-3, "max_abs_error_floor": 1e-1},
+    "float16": {"rtol": 2**-10, "atol": 2**-10, "max_abs_error_floor": 1e-1},
+    "bfloat16": {"rtol": 2**-7, "atol": 2**-7, "max_abs_error_floor": 1e-1},
+    "float32": {"rtol": 2**-13, "atol": 2**-13, "max_abs_error_floor": 1e-2},
+    "hifloat32": {"rtol": 2**-10, "atol": 2**-10, "max_abs_error_floor": 1e-1},
+    "float8_e4m3fn": {"rtol": 2**-3, "atol": 2**-3, "max_abs_error_floor": 1e-0},
+    "float8_e5m2": {"rtol": 2**-2, "atol": 2**-2, "max_abs_error_floor": 1e-0},
 }
 MIX_REQUIRED_MATCHED_RATIO = 0.99
 DEFAULT_MIX_TOLERANCE = MIX_TOLERANCE["float32"]  # 表外浮点 dtype（float64 等）回落 float32 档

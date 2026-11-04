@@ -15,11 +15,11 @@ import pytest
 from ttk.core_modules.common.comparison.mix_tolerance import MixToleranceComparison
 
 # float32 表值（resolve_tolerance 解析的最终值）——显式 limit 场景（完全替代，不叠加 ULP）
-FP32 = {"rtol": 2**-10, "atol": 2**-16, "required_matched_ratio": 0.99, "max_abs_error_limit": 1e-2}
+FP32 = {"rtol": 2**-13, "atol": 2**-13, "required_matched_ratio": 0.99, "max_abs_error_limit": 1e-2}
 # 未配置 limit 场景（None 哨兵 + floor → mix 内走 max(floor, 32*ULP(g_low)) 动态式）
 FP32_DYN = {
-    "rtol": 2**-10,
-    "atol": 2**-16,
+    "rtol": 2**-13,
+    "atol": 2**-13,
     "required_matched_ratio": 0.99,
     "max_abs_error_limit": None,
     "max_abs_error_floor": 1e-2,
@@ -57,10 +57,10 @@ def test_atol_covers_small_golden_no_divzero():
 
 def test_rtol_covers_large_golden():
     """大值场景走相对容差：golden=100、err=5e-3（> atol，< 硬上限）在 rtol 预算内通过；rtol=0 则失败。"""
-    r = _impl([100.005], [100.0])  # 预算 = atol + rtol*100 ≈ 0.098
+    r = _impl([100.005], [100.0])  # 预算 = atol + rtol*100 ≈ 0.012
     assert r.is_pass is True
     r0 = _impl([100.005], [100.0], options=dict(FP32, rtol=0.0))
-    assert r0.is_pass is False  # atol=2^-16 兜不住 5e-3
+    assert r0.is_pass is False  # atol=2^-13 兜不住 5e-3
 
 
 # —— 整体通过条件：matched_ratio >= required 且 max_abs_error <= 硬上限 ——
@@ -68,7 +68,7 @@ def test_ratio_boundary_99_percent():
     """100 元素 1 个超元素容差（err=5e-3 < 硬上限）→ ratio=0.99 恰好达标（>=）；2 个 → 0.98 FAIL。"""
     g = np.ones(100)
     a1 = g.copy()
-    a1[0] = 1.0 + 5e-3  # 超元素预算（≈9.9e-4）但低于硬上限 1e-2
+    a1[0] = 1.0 + 5e-3  # 超元素预算（≈2.4e-4）但低于硬上限 1e-2
     r1 = _impl(a1, g)
     assert r1.metrics["matched_ratio"] == 0.99
     assert r1.is_pass is True
@@ -117,7 +117,7 @@ def test_hard_limit_not_exceeded_ratio_unchanged():
     """err <= 硬上限时并入条件恒真 → matched_ratio 与判定不变（判定等价性）。"""
     g = np.ones(100)
     a = g.copy()
-    a[0] = 1.0 + 5e-3  # 超元素预算（≈9.9e-4）、低于硬上限 1e-2
+    a[0] = 1.0 + 5e-3  # 超元素预算（≈2.4e-4）、低于硬上限 1e-2
     r = _impl(a, g)
     assert r.metrics["matched_ratio"] == 0.99
     assert r.is_pass is True
@@ -183,7 +183,7 @@ def test_metrics_are_plain_literals():
 
 
 def test_spec_override_params_take_effect():
-    """resolve 解析后的 override 参数生效：rtol=0.5 时 err=4e-3（> 默认预算 ≈9.9e-4，< 硬上限）可通过。"""
+    """resolve 解析后的 override 参数生效：rtol=0.5 时 err=4e-3（> 默认预算 ≈2.4e-4，< 硬上限）可通过。"""
     r = _impl([1.004], [1.0], options=dict(FP32, rtol=0.5))
     assert r.is_pass is True
     assert r.metrics["rtol"] == 0.5
@@ -193,8 +193,8 @@ def test_spec_override_params_take_effect():
 def test_fp8_output_vs_high_precision_golden():
     """fp8 输出走混合容差：ml_dtypes fp8 promote 到 float32 后与高精度 golden 比对。"""
     ml_dtypes = pytest.importorskip("ml_dtypes")
-    # float8_e5m2 表值：rtol=2^-1, atol=2^-3, max_abs_error_limit=max(1e-1, 32*2^-2)=8.0
-    opts = {"rtol": 2**-1, "atol": 2**-3, "required_matched_ratio": 0.99, "max_abs_error_limit": 8.0}
+    # float8_e5m2 表值：rtol=2^-2, atol=2^-2, max_abs_error_limit=max(1e-0, 32*2^-2)=8.0
+    opts = {"rtol": 2**-2, "atol": 2**-2, "required_matched_ratio": 0.99, "max_abs_error_limit": 8.0}
     a = np.array([1.0, 2.0, 4.0], ml_dtypes.float8_e5m2)
     g = np.array([1.0, 2.1, 4.0], np.float32)  # 单标杆：高精度 golden
     r = MixToleranceComparison(a, g, 0, "float8_e5m2", opts).compare_impl()
@@ -216,8 +216,8 @@ def test_dynamic_ulp_limit_small_value_domain_keeps_floor():
     a = np.asarray([0.001, 0.001], dtype=np.float16)
     g = np.asarray([0.001, 0.0015], dtype=np.float32)
     fp16_dyn = {
-        "rtol": 2**-9,
-        "atol": 2**-9,
+        "rtol": 2**-10,
+        "atol": 2**-10,
         "required_matched_ratio": 0.99,
         "max_abs_error_limit": None,
         "max_abs_error_floor": 1e-1,
@@ -233,7 +233,7 @@ def test_explicit_limit_fully_replaces_dynamic():
     g = np.asarray([60005.0, 60000.0], dtype=np.float32)
     # 显式 1e-2：若仍叠加动态 ULP(1024) 会错误放行 err=5
     r = _impl(
-        a, g, "float16", {"rtol": 2**-9, "atol": 2**-9, "required_matched_ratio": 0.99, "max_abs_error_limit": 1e-2}
+        a, g, "float16", {"rtol": 2**-10, "atol": 2**-10, "required_matched_ratio": 0.99, "max_abs_error_limit": 1e-2}
     )
     assert r.metrics["pass"] is False
 
@@ -252,8 +252,8 @@ def test_dynamic_ulp_same_dtype_enable_mode():
     a = np.asarray([65472.0, 65472.0], dtype=np.float16)
     g = np.asarray([65504.0, 65472.0], dtype=np.float16)  # err=32（fp16 大 binade 1ULP）
     fp16_dyn = {
-        "rtol": 2**-9,
-        "atol": 2**-9,
+        "rtol": 2**-10,
+        "atol": 2**-10,
         "required_matched_ratio": 0.99,
         "max_abs_error_limit": None,
         "max_abs_error_floor": 1e-1,
@@ -269,8 +269,8 @@ def test_dynamic_ulp_max_finite_anchor_binade_width():
     a = np.asarray([65472.0, 65504.0], dtype=np.float16)
     g = np.asarray([65504.0, 65504.0], dtype=np.float16)
     fp16_dyn = {
-        "rtol": 2**-9,
-        "atol": 2**-9,
+        "rtol": 2**-10,
+        "atol": 2**-10,
         "required_matched_ratio": 0.99,
         "max_abs_error_limit": None,
         "max_abs_error_floor": 1e-1,
@@ -284,8 +284,8 @@ def test_all_inf_same_sign_passes():
     a = np.asarray([np.inf, np.inf], dtype=np.float16)
     g = np.asarray([np.inf, np.inf], dtype=np.float32)
     fp16_dyn = {
-        "rtol": 2**-9,
-        "atol": 2**-9,
+        "rtol": 2**-10,
+        "atol": 2**-10,
         "required_matched_ratio": 0.99,
         "max_abs_error_limit": None,
         "max_abs_error_floor": 1e-1,

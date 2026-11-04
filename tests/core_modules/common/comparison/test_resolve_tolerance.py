@@ -50,7 +50,7 @@ def test_cli_mixed_alias_matches_mix_tolerance():
     rs = resolve_tolerance(None, None, None, ["float32"], "mixed")
     assert _tokens(rs) == ["mixed"]
     p = _params(rs)
-    assert p["rtol"] == 2**-10  # mix_tolerance float32 表值
+    assert p["rtol"] == 2**-13  # mix_tolerance float32 表值
     assert p["required_matched_ratio"] == 0.99
 
 
@@ -85,8 +85,8 @@ def test_mix_tolerance_table_defaults():
     """dtype 命中混合容差表：rtol/atol/required_matched_ratio/max_abs_error_limit 表值。"""
     rs = resolve_tolerance(None, None, None, ["float16"], None)
     p = _params(rs)
-    assert p["rtol"] == 2**-9
-    assert p["atol"] == 2**-9
+    assert p["rtol"] == 2**-10
+    assert p["atol"] == 2**-10
     assert p["required_matched_ratio"] == 0.99
     assert p["max_abs_error_limit"] is None  # 未配置 → None 哨兵（mix 内走动态 ULP）
     assert p["max_abs_error_floor"] == 1e-1
@@ -96,8 +96,8 @@ def test_mix_tolerance_unknown_dtype_falls_back_float32():
     """表外浮点 dtype（float64）回落 float32 档。"""
     rs = resolve_tolerance(None, None, None, ["float64"], None)
     p = _params(rs)
-    assert p["rtol"] == 2**-10
-    assert p["atol"] == 2**-16
+    assert p["rtol"] == 2**-13
+    assert p["atol"] == 2**-13
 
 
 def test_mix_tolerance_spec_override():
@@ -106,7 +106,7 @@ def test_mix_tolerance_spec_override():
     p = _params(resolve_tolerance(spec, None, None, ["float32"], None))
     assert p["rtol"] == 0.5
     assert p["required_matched_ratio"] == 0.9
-    assert p["atol"] == 2**-16  # 未覆盖的仍取表值
+    assert p["atol"] == 2**-13  # 未覆盖的仍取表值
 
 
 # —— threshold 与 mix_tolerance 的冲突护栏（不静默丢弃）——
@@ -146,8 +146,8 @@ def test_mix_tolerance_fp8_table_defaults():
     """float8 命中混合容差阈值表（float8_e4m3fn / float8_e5m2 均在表内）。"""
     rs = resolve_tolerance(None, None, None, ["float8_e4m3fn"], None)
     p = _params(rs)
-    assert p["rtol"] == 2**-2
-    assert p["atol"] == 2**-4
+    assert p["rtol"] == 2**-3
+    assert p["atol"] == 2**-3
     assert p["max_abs_error_limit"] is None
     assert p["max_abs_error_floor"] == 1e-0
 
