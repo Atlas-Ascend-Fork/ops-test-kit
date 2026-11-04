@@ -49,6 +49,9 @@ def _parse_params_from_signature(sig: str) -> Optional[List[ParamInfo]]:
         if part_s in ("*", "\\*"):
             keyword_only = True
             continue
+        if part_s.startswith("**"):
+            # VAR_KEYWORD（**kwargs）不占参数位：误留会被名推断兜底成必选 Tensor
+            continue
         default = None
         is_optional = False
         is_var_positional = False
@@ -291,6 +294,66 @@ def _resolve_alias_from_docstring(api_name: str) -> Optional[str]:
     if m:
         return m.group(1)
     return None
+
+
+_METHOD_DIRECTIVE_RE = re.compile(r"^\s*\.\.\s+method::\s*([\w.]+)\s*\((.*)\)\s*(->.*)?$")
+
+
+def _scan_method_directives(doc: str, method_name: str, args_types: dict) -> List[List[ParamInfo]]:
+    """扫描 doc 内同名 ``.. method::`` 指令行 → 重载参数表。
+
+    非张量参数仅在可选（有默认值）时标 kw-only 按名传——指令行无 ``*``
+    边界，可选参数按位置传会踩边界；必填非张量参数（如 to 的 dtype）
+    保持位置位，缺属性时落到 None 占位由运行期报错，不静默丢弃。"""
+    overloads = []
+    for line in doc.split("\n"):
+        dm = _METHOD_DIRECTIVE_RE.match(line)
+        if not dm or dm.group(1).rsplit(".", 1)[-1] != method_name:
+            continue
+        params = _parse_params_from_signature(dm.group(2))
+        if not params:
+            continue
+        for p in params:
+            if not p.is_tensor_like and (p.is_optional or p.default is not None):
+                p.is_keyword_only = True
+            if p.name in args_types:
+                raw_type, is_opt = args_types[p.name]
+                normalized = _normalize_args_type(raw_type)
+                if normalized:
+                    p.type = normalized
+                if is_opt:
+                    p.is_optional = True
+        overloads.append(params)
+    return overloads
+
+
+def _extract_method_overloads_from_docstring(obj):
+    """docstring 内 ``.. method:: name(params) -> Ret`` 指令行 → 多重载参数表。
+
+    C++ 多重载方法绑定到 Python 时首行是 ``name(*args, **kwargs)`` 转发占位，
+    真实重载签名只写在指令行（torch.Tensor.to 的 dtype/device/other 三重载）。
+    仅纯 *args stub 首行走此路，其余 docstring 仍按 Format-1/2/3 解析。
+    与 TypeError/pyi 同口径不带 return_count（仅 out 参数消费）。
+
+    Returns:
+        (overload_params_list, source) 或 None（非 stub / 无指令行）。
+    """
+    doc = getattr(obj, "__doc__", None)
+    if not doc:
+        return None
+    first_line = doc.strip().split("\n")[0].strip()
+    m = re.match(r"([\w.]+)\((.+?)\)\s*(?:->.*)?$", first_line)
+    if not m:
+        return None
+    stub_params = _parse_params_from_signature(m.group(2))
+    if not stub_params or not all(p.is_var_positional and p.name == "args" for p in stub_params):
+        return None
+
+    args_types = _parse_docstring_args_section(doc)
+    overloads = _scan_method_directives(doc, m.group(1).rsplit(".", 1)[-1], args_types)
+    if not overloads:
+        return None
+    return overloads, "docstring(method-directives)"
 
 
 def _extract_params_from_docstring(obj, api_name: str) -> Optional[Tuple[List[ParamInfo], str, int]]:

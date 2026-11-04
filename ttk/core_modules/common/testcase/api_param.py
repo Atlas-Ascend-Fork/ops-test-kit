@@ -21,7 +21,7 @@ import ast
 import re
 from abc import ABC, abstractmethod
 
-from ttk.utilities.dtypes import str_to_torch_dtype
+from ttk.utilities.dtypes import ACL_ID_TO_DTYPE, str_to_torch_dtype
 
 
 class ResolveApiParamBase(ABC):
@@ -268,7 +268,15 @@ def _coerce_value(raw, target_type):
             return raw[1:-1]
         return str(raw)
     if target_type in ("ScalarType", "Dtype", "torch.dtype"):
-        obj = str_to_torch_dtype(raw)
+        # bool 是 int 子类且 ACL id 1 恰为 float16，须先于整型分支拒绝
+        if isinstance(raw, bool):
+            raise ValueError(f"Cannot coerce {raw!r} to {target_type}: not a torch/torch_npu dtype.")
+        key = raw
+        if isinstance(raw, int):
+            # 整型按 ACL dtype 枚举 id 解释（aclnn 系 CSV 惯例）；key 覆盖，
+            # raw 保留原始取值供报错回显
+            key = ACL_ID_TO_DTYPE.get(raw)
+        obj = str_to_torch_dtype(key) if key is not None else None
         if obj is not None:
             return obj
         raise ValueError(f"Cannot coerce {raw!r} to {target_type}: not a torch/torch_npu dtype.")

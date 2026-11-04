@@ -564,6 +564,14 @@ class TestParseSignatureVarPositional:
         op = next(p for p in params if p.name == name)
         assert op.is_var_positional is is_var_pos
 
+    def test_var_keyword_skipped(self):
+        """'**kwargs' 不占参数位；误留会被名推断兜底成必选 Tensor。"""
+        params = _parse_params_from_signature("*args, **kwargs")
+        assert [p.name for p in params] == ["args"]
+        assert params[0].is_var_positional
+        params = _parse_params_from_signature("input, **kwargs")
+        assert [p.name for p in params] == ["input"]
+
 
 # == meshgrid 全链路 ========================================================
 
@@ -784,3 +792,46 @@ class TestInplaceStripping:
         info = extract_api_params("torch.nn.functional.relu")
         assert info is not None
         assert "inplace" in [p.name for p in info.params], "torch.nn. 排除域内 inplace 应保留"
+
+
+# == .. method:: 指令重载（torch.Tensor.to）==================================
+
+
+class TestMethodDirectiveOverloads:
+    """首行 *args 转发 stub + `.. method::` 指令行的多重载解析。
+
+    torch.Tensor.to 的 docstring 首行是 `to(*args, **kwargs) -> Tensor` 占位，
+    真实 C++ 重载声明在指令行。曾把 **kwargs 解析成必选张量参数（required_min=3），
+    1 输入张量 + dtype 属性的用例全数 TENSOR_COUNT_MISMATCH，此测试钉死之。
+    """
+
+    def test_tensor_to_overloads_and_dtype_attr_chain(self):
+        """指令行三重载解析 → dtype 属性选重载 → 装配出 to(dtype, ...) 混合调用。"""
+        try:
+            import torch
+        except ImportError:
+            pytest.skip("torch not available")
+        from ttk.core_modules.common.testcase.api_param import match_overload as _match
+        from ttk.core_modules.framework_api.api_param import ParamPlan
+
+        info = get_api_params("torch.Tensor.to")
+        assert info.source == "docstring(method-directives)"
+        assert len(info.overloads) == 3
+        dtype_ov = info.overloads[0].params
+        assert dtype_ov[0].name == "self"
+        assert dtype_ov[0].is_tensor
+        assert dtype_ov[1].name == "dtype"
+        assert dtype_ov[1].type == "Dtype"
+        # 指令行无 '*' 边界：仅可选非张量参数标 kw-only，必填 dtype 保持位置位
+        assert not dtype_ov[1].is_keyword_only
+        assert all(p.is_keyword_only for p in dtype_ov if not p.is_tensor_like and p.is_optional)
+
+        params, oidx = _match("torch.Tensor.to", 1, {"dtype": 7}, api_info=info)
+        assert oidx == 0
+        plan = ParamPlan("torch.Tensor.to", params, oidx, (1,), {"dtype": 7})
+        t = torch.zeros(2, 3, dtype=torch.float16)
+        args, kwargs, extra = plan.build_args([t, None])
+        assert extra == {}
+        assert args == [t, torch.uint16]
+        assert "memory_format" in kwargs
+        assert args[0].to(*args[1:], **kwargs).dtype == torch.uint16

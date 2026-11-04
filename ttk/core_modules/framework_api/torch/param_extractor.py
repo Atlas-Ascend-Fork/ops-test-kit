@@ -35,6 +35,7 @@ from .extract_cpp import (
 )
 from .extract_declaration import _extract_params_from_op_declaration
 from .extract_docstring import (
+    _extract_method_overloads_from_docstring,
     _extract_params_from_docstring,
     _parse_docstring_args_section,  # noqa: F401  # re-export（测试直引）
     _parse_params_from_signature,
@@ -551,6 +552,7 @@ def _extract_params_from_generic(api_name: str) -> Optional[APIParamInfo]:
 
     首个命中即返回：
       ① T 多重载(>1)    → T 直出——重载集唯一来源（A 补类型）
+      ①.5 D stub 指令行 → 首行纯 *args 转发占位时改取 doc 内 ``.. method::`` 指令行重载
       ② D ∧ T 单签名    → merge(D,T)：参数更长者作基座、另一侧补类型（A 再补）
       ③ D              → D（kw 键不齐/缺 *args 时升级 inspect 换源重解；A 补类型）
       ④ T 单签名        → T（A 补类型）
@@ -570,6 +572,11 @@ def _extract_params_from_generic(api_name: str) -> Optional[APIParamInfo]:
 
     if te and len(te[2]) > 1:  # ①
         params, source, overloads = te
+        return _finalize(api_name, overloads[0], source, ann, overloads=overloads)
+
+    result = _extract_method_overloads_from_docstring(obj)
+    if result:  # ①.5
+        overloads, source = result
         return _finalize(api_name, overloads[0], source, ann, overloads=overloads)
 
     if doc and te:  # ②

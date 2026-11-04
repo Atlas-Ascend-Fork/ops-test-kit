@@ -315,6 +315,20 @@ class TestCoerceValue:
         with pytest.raises(ValueError, match="unsupported type"):
             _coerce_value(42, "UnknownType")
 
+    def test_dtype_targets(self):
+        """Dtype 目标：str 路径不变；整型按 ACL 枚举解释，表外/bool 拒绝。"""
+        try:
+            import torch
+        except ImportError:
+            pytest.skip("torch not available")
+        assert _coerce_value("float16", "Dtype") == torch.float16
+        assert _coerce_value(7, "Dtype") == torch.uint16
+        # 报错须回显原始取值（表外整型/bool），不能丢成 None
+        with pytest.raises(ValueError, match="Cannot coerce 999"):
+            _coerce_value(999, "Dtype")
+        with pytest.raises(ValueError, match="Cannot coerce True"):
+            _coerce_value(True, "Dtype")
+
 
 class TestBuildPositionalArgs:
     def test_simple_two_tensors(self):
