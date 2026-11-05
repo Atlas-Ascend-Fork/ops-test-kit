@@ -75,8 +75,8 @@ class ApiTestcaseBase(TestcaseBase):
         "const_input_values",
         # backward 协议标志（api_name 物化时剥离 .backward 后缀置位）
         "backward_mode",
-        # manual XPU 三方输出本地装载（--dump xpu 回放契约；aclnn/e2e 共享，
-        # 装载/校验语义见 common/xpu.py load_manual_third_parties）
+        # manual XPU 三方输出本地装载（--dump xpu 回放契约；aclnn 使用，
+        # e2e 列已移除，装载/校验语义见 common/xpu.py load_third_parties）
         "manual_xpu_binaries",
         # === 私有：六列声明原始存储（property 双模——物化前 raw 透传）=== #
         "_tensor_view_shapes",
@@ -821,9 +821,9 @@ class ApiTestcaseBase(TestcaseBase):
         )
 
     def _check_manual_xpu_binaries(self):
-        """aclnn/e2e 的 manual_xpu_binaries 校验：路径存在 + 数量不超 flat 输出槽数。
+        """aclnn 的 manual_xpu_binaries 校验：路径存在 + 数量不超 flat 输出槽数。
 
-        与 kernel 的差异：aclnn/e2e 真跑设备（golden 有设备真值源），不要求与
+        与 kernel 的差异：aclnn 真跑设备（golden 有设备真值源），不要求与
         manual_input/golden 成套——manual_xpu 仅替代三方采集的远端产出。
         输出槽取子类 ``flat_output_view_shapes``（kernel 通路名 ``flat_output_shapes``）。
         """

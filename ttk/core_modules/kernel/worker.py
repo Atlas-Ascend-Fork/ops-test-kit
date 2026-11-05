@@ -28,8 +28,8 @@ from ..common.comparison.batch_consistency import assemble_batch_summary
 from ..common.dump import (
     DataDumper,
     dump_manual_dataset,
-    load_replay_goldens,
-    manual_data_dump_store,
+    load_manual_goldens,
+    manual_data_dump_case,
     resolve_manual_case,
     snapshot_manual_values,
 )
@@ -99,7 +99,7 @@ def early_end(context, print_content):
     return return_structure
 
 
-def _dump_only_end(context: TestcaseKernel):
+def _dump_only_end(context: TestcaseKernel, xpu_results=None):
     """dump-only（--no-prof）数据落盘完成后的提前结束（MANUAL_DATA_PREPARED）。"""
     compare_result = ComparisonResult(None).set(
         "MANUAL_DATA_PREPARED",
@@ -108,7 +108,7 @@ def _dump_only_end(context: TestcaseKernel):
         "PASS",
     )
     return_structure = KernelReturnStructure()
-    return_structure.construct(context, compare_result, "PASS")
+    return_structure.construct(context, compare_result, "PASS", xpu_results)
     _profiling_end_print(context, compare_result, "PASS")
     return return_structure
 
@@ -154,20 +154,21 @@ def _extract_third_party(xpu_results, priority):
 
 
 def _do_xpu_profiling(context, xpu_mode, deadline_s=None, inputs=None):
-    """Run XPU dispatch，return priority provider name（specs[0].provider）。
-    resolve_providers 失败 → xpu_results={} + return None（→ _extract_third_party None → GOLDEN_FAILURE）。
+    """Run XPU dispatch，返回 (priority, xpu_results)。resolve_providers 失败 →
+    xpu_results={} + priority=None（→ _extract_third_party None → GOLDEN_FAILURE）。
 
     Kernel 适配层：从 context + OpInfoKeeper 提取参数，委托 client.dispatch_xpu。
     """
+    op_info = None
     try:
         op_info = OpInfoKeeper().info_of(context.op_name)
         input_names = [ipt["name"] for ipt in op_info["inputs"]] if op_info else []
     except Exception:
         input_names = []
 
-    op_type = OpInfoKeeper().op_type_of(context.op_name)
+    op_type = OpInfoKeeper().op_type_of(context.op_name) if op_info else None
     sw = get_global_storage()
-    need_data = bool(xpu_mode & DATA)
+    need_xpu_data = bool(xpu_mode & DATA)
     xpu_results, priority = dispatch_xpu(
         op_name=context.op_name,
         inputs=inputs if inputs is not None else _xpu_inputs(context),
@@ -178,12 +179,11 @@ def _do_xpu_profiling(context, xpu_mode, deadline_s=None, inputs=None):
         input_dtypes=getattr(context, "input_dtypes", None),
         testcase_name=getattr(context, "testcase_name", context.op_name),
         switches=sw,
-        need_data=need_data,
+        need_xpu_data=need_xpu_data,
         param_order=_kernel_param_order(op_info),
         deadline_s=deadline_s,
     )
-    context.xpu_results = xpu_results
-    return priority
+    return priority, xpu_results
 
 
 def _kernel_param_order(op_info) -> list:
@@ -205,11 +205,11 @@ def _setup_profiling_env(context: TestcaseKernel):
     return switches, process_ctx
 
 
-def _create_dump_store(context: TestcaseKernel):
+def _create_dump_case(context: TestcaseKernel):
     """dump 方向 store（--no-prof 落盘 / 全空目录首跑落盘）；异常 → PREPARE_FAILURE。"""
     switches = get_global_storage()
     try:
-        return manual_data_dump_store(context, switches), None
+        return manual_data_dump_case(context, switches), None
     except Exception as exc:
         logging.exception("Manual Kernel data dump store failure")
         return None, early_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
@@ -234,16 +234,16 @@ def _open_dump_only_store(context: TestcaseKernel, switches):
     """no-prof 写方向开仓；full-flow 返回 None（load/首跑落盘在加载侧决出）。"""
     if not switches.no_prof:
         return None, None
-    return _create_dump_store(context)
+    return _create_dump_case(context)
 
 
-def _resolve_manual_stores(context: TestcaseKernel, switches, process_ctx, dump_store):
+def _resolve_manual_stores(context: TestcaseKernel, switches, process_ctx, dump_case):
     """load 方向：加载已存用例；目录全空首跑 → 返回落盘 store（生成后写入）。
 
-    返回 (manual_case, dump_store, early_result)；early_result 非 None = 提前结束。
+    返回 (manual_case, dump_case, early_result)；early_result 非 None = 提前结束。
     """
     if switches.no_prof or not switches.manual_data_dirs:
-        return None, dump_store, None
+        return None, dump_case, None
     try:
         manual_case = resolve_manual_case(
             context,
@@ -254,35 +254,29 @@ def _resolve_manual_stores(context: TestcaseKernel, switches, process_ctx, dump_
         )
     except Exception as exc:
         logging.exception("Manual Kernel data loading failure")
-        return None, dump_store, early_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
+        return None, dump_case, early_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
     if manual_case is not None or not switches.dump_config.dump_input:
-        return manual_case, dump_store, None
+        return manual_case, dump_case, None
     # 目录全空的首跑：正常生成并落盘（后续运行即可加载）
-    dump_store, early_result = _create_dump_store(context)
-    return manual_case, dump_store, early_result
+    dump_case, early_result = _create_dump_case(context)
+    return manual_case, dump_case, early_result
 
 
-def _manual_data_dump(context: TestcaseKernel, switches, dump_store, prepared_inputs):
-    """dump 方向收尾：落盘，no-prof 时提前结束。返回值非 None = 提前返回。"""
-    if dump_store is None:
+def _manual_data_dump(context: TestcaseKernel, switches, dump_case, prepared_inputs):
+    """数据集落盘（--no-prof / 空目录首跑）。返回值非 None = 提前返回。
+
+    golden-XPU 占位串被 dump_manual_dataset 过滤，仅落 input；NPU golden
+    已在 _prepare_golden 内生成，首跑落盘后 replay 复用。
+    """
+    if dump_case is None:
         return None
-    if not switches.no_prof and switches.golden_mode == "XPU":
-        # XPU：golden 由三方产出（设备后回填），无可落盘真值。
-        # NPU 不跳过：golden 已在 _prepare_golden 内生成，首跑落盘后 replay 复用。
-        logging.warning(
-            "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
-            context.testcase_name,
-        )
-        return None
-    early_result = _write_manual_dump(context, dump_store, prepared_inputs)
+    early_result = _write_manual_dump(context, dump_case, prepared_inputs)
     if early_result is not None:
         return early_result
-    if switches.no_prof:
-        return _dump_only_end(context)
     return None
 
 
-def _generate_input(context: TestcaseKernel, switches, process_ctx, manual_case, dump_store):
+def _generate_input(context: TestcaseKernel, switches, process_ctx, manual_case, dump_case):
     logging.debug(f"Expecting {context.input_bytes + context.output_bytes} bytes memory usage")
     process_ctx.notify_status("OnGenInput")
     try:
@@ -296,7 +290,7 @@ def _generate_input(context: TestcaseKernel, switches, process_ctx, manual_case,
             return None, early_end(context, f"MANUAL_DATA_READ_FAILURE: {exc}")
         return None, early_end(context, "INPUT_GEN_FAILURE")
     prepared_inputs = None
-    if dump_store is not None and manual_case is None:
+    if dump_case is not None and manual_case is None:
         # 生成态数据将写入 store：先快照（设备执行可能原地改动 backing storage）
         try:
             prepared_inputs = snapshot_manual_values(tuple(deep_flatten(context.input_arrays or ())), "input")
@@ -361,7 +355,7 @@ def _prepare_golden(
             process_ctx.notify_status("OnLoadManualGolden")
             # 槽位声明经 testcase 协议（manual_data_golden_shapes/dtypes）——
             # 含 shape-unknown 元数据槽，读侧 CSV 可推导
-            stored_goldens = load_replay_goldens(
+            stored_goldens = load_manual_goldens(
                 manual_case,
                 shapes=context.manual_data_golden_shapes,
                 dtypes=context.manual_data_golden_dtypes,
@@ -421,12 +415,12 @@ def _prepare_golden(
     return None
 
 
-def _write_manual_dump(context: TestcaseKernel, dump_store, prepared_inputs):
+def _write_manual_dump(context: TestcaseKernel, dump_case, prepared_inputs):
     switches = get_global_storage()
     process_ctx = process_context()
     try:
         process_ctx.notify_status("OnWriteManualData")
-        case_dir = dump_manual_dataset(dump_store, context, "kernel", prepared_inputs, context.golden_arrays, switches)
+        case_dir = dump_manual_dataset(dump_case, context, "kernel", prepared_inputs, context.golden_arrays, switches)
     except Exception as exc:
         logging.exception("Manual Kernel data dump failure")
         return early_end(context, f"MANUAL_DATA_PREPARE_FAILURE: {exc}")
@@ -443,8 +437,9 @@ def _dispatch_xpu(context: TestcaseKernel, need_3party, manual_case=None):
     """
     from ..common.xpu import (
         MANUAL_XPU_PROVIDER,
+        XPU_DATA,
         XpuDispatch,
-        load_manual_third_parties,
+        load_third_parties,
         manual_xpu_results,
         overlap_deadline_s,
         snapshot_xpu_inputs,
@@ -456,16 +451,14 @@ def _dispatch_xpu(context: TestcaseKernel, need_3party, manual_case=None):
     switches = get_global_storage()
     process_ctx = process_context()
     golden_is_xpu = switches.golden_mode == "XPU"
-    need_data = need_3party or golden_is_xpu
+    mode = xpu_mode(switches, need_3party)  # golden-XPU / --dump xpu 已并入 DATA
+    if mode & XPU_DATA:
+        manual = load_third_parties(context, manual_case)
+        if manual is not None:
+            # 双来源短路：CSV manual_xpu_binaries 显式路径 / manual-data case 目录槽位
+            process_ctx.notify_status("OnLoadManualXpu")
+            return XpuDispatch.ready((manual, manual_xpu_results(), MANUAL_XPU_PROVIDER))
 
-    manual = load_manual_third_parties(context, manual_case) if need_data else None
-    if manual is not None:
-        # 双来源短路：CSV manual_xpu_binaries 显式路径 / manual-data case 目录槽位
-        process_ctx.notify_status("OnLoadManualXpu")
-        context.xpu_results = manual_xpu_results()
-        return XpuDispatch.ready((manual, context.xpu_results, MANUAL_XPU_PROVIDER))
-
-    mode = xpu_mode(switches, need_data)
     if mode == 0:
         return XpuDispatch.ready((None, None, None))
     if golden_is_xpu or not xpu_overlap_enabled():
@@ -489,8 +482,8 @@ def _dispatch_xpu(context: TestcaseKernel, need_3party, manual_case=None):
 def _collect_xpu_remote(context: TestcaseKernel, mode, deadline_s=None, inputs=None, need_3party=False):
     """kernel 远端采集（同步形态 = 现状语义；重叠形态由 _dispatch_xpu 以
     deadline_s/快照 inputs 调起）。返回 (third_parties, xpu_results, provider)。"""
-    xpu_priority = _do_xpu_profiling(context, mode, deadline_s=deadline_s, inputs=inputs)
-    third_parties_nested = _extract_third_party(getattr(context, "xpu_results", None), xpu_priority)
+    xpu_priority, xpu_results = _do_xpu_profiling(context, mode, deadline_s=deadline_s, inputs=inputs)
+    third_parties_nested = _extract_third_party(xpu_results, xpu_priority)
     if need_3party and third_parties_nested is None:
         logging.warning(
             "[%s] cross_check configured but no third_party output (no XPU / endpoint down); "
@@ -498,7 +491,7 @@ def _collect_xpu_remote(context: TestcaseKernel, mode, deadline_s=None, inputs=N
             context.op_name,
         )
     third_parties = list(deep_flatten(third_parties_nested)) if third_parties_nested is not None else None
-    return third_parties, getattr(context, "xpu_results", None), (xpu_priority or "xpu")
+    return third_parties, xpu_results, (xpu_priority or "xpu")
 
 
 def _gen_workspaces(context: TestcaseKernel):
@@ -515,7 +508,7 @@ def _gen_workspaces(context: TestcaseKernel):
     )
 
 
-def _assemble_xpu_golden(context: TestcaseKernel, third_parties, golden_is_xpu: bool):
+def _assemble_xpu_golden(context: TestcaseKernel, third_parties, golden_is_xpu: bool, xpu_results=None):
     """golden-XPU 装配：三方输出即 golden；无输出 → 整例 FAIL（GOLDEN_FAILURE）。
 
     非 golden-XPU（flag False）直接放行；须在 _device_profiling 之前调用
@@ -530,7 +523,7 @@ def _assemble_xpu_golden(context: TestcaseKernel, third_parties, golden_is_xpu: 
         )
         compare_result = ComparisonResult(None).set("GOLDEN_FAILURE", "GOLDEN_FAILURE", "GOLDEN_FAILURE", "FAIL")
         return_structure = KernelReturnStructure()
-        return_structure.construct(context, compare_result, "GOLDEN_FAILURE")
+        return_structure.construct(context, compare_result, "GOLDEN_FAILURE", xpu_results)
         _profiling_end_print(context, compare_result, "GOLDEN_FAILURE")
         return return_structure
     context.golden_arrays = list(third_parties)
@@ -538,13 +531,16 @@ def _assemble_xpu_golden(context: TestcaseKernel, third_parties, golden_is_xpu: 
     # （manual 回放无 perf 位 → None → "----"，性能指标只能来自在线执行）
     from ..common.golden import xpu_golden_perf
 
-    context.golden_perf = xpu_golden_perf(getattr(context, "xpu_results", None))
+    context.golden_perf = xpu_golden_perf(xpu_results)
     context.golden_source = "xpu"
     return None
 
 
 def _device_profiling(context: TestcaseKernel, dev_id, device_grant_events, device_granted_indices):
     switches = get_global_storage()
+    if switches.no_prof:
+        # 跳过 device 执行（workspace 生成一并跳过）
+        return
     process_ctx = process_context()
     # 设备段自含准备：workspace 按编译结果生成（aclnn 对应 execute_on_device 内 GetWorkspaceSize）
     _gen_workspaces(context)
@@ -577,8 +573,11 @@ def _device_profiling(context: TestcaseKernel, dev_id, device_grant_events, devi
             context.bin_prof_result = execute_on_device(context, "binary")
 
 
-def _compare_and_finalize(context: TestcaseKernel, standards, third_parties, pre_compare, custom_compare):
+def _compare_and_finalize(context: TestcaseKernel, tol_state, third_parties, xpu_results):
     switches = get_global_storage()
+    if switches.no_prof:
+        # 跳过 device 执行：无设备输出可比对，dump-only 收尾
+        return _dump_only_end(context, xpu_results)
     process_ctx = process_context()
     process_ctx.notify_status("PostProfiling")
     passed = handle_profiling_result(context)
@@ -609,17 +608,17 @@ def _compare_and_finalize(context: TestcaseKernel, standards, third_parties, pre
         bin_outputs,
         goldens,
         output_dtypes,
-        standards=standards,
+        standards=tol_state.standards,
         third_parties=third_parties,
         testcase=context,
-        pre_compare=pre_compare,
-        custom_compare=custom_compare,
+        pre_compare=tol_state.pre_compare,
+        custom_compare=tol_state.custom_compare,
     )
     if compare_result.passed != "PASS" and switches.dump_config.dump_on_fail:
         _dump_on_fail(context)
     process_ctx.notify_status("OnReturning")
     return_structure = KernelReturnStructure()
-    return_structure.construct(context, compare_result, passed)
+    return_structure.construct(context, compare_result, passed, xpu_results)
     if resolve_deterministic_level(switches, context) == 3:
         # dl=3 batch 一致性：比对后切 output 0 逐样本 MD5 → batch_summary
         # （output_bytes 的 shape-tensor 附加段在尾部，output 0 即首个真实
@@ -659,15 +658,15 @@ def _run_profile(
     gate_host_memory(switches.no_memory_check, process_ctx)
 
     # dump 方向：--no-prof 落盘（bridge 仅在写方向激活时设置 manual_data_dirs）
-    dump_store, early_result = _open_dump_only_store(context, switches)
+    dump_case, early_result = _open_dump_only_store(context, switches)
     if early_result is not None:
         return early_result
 
-    manual_case, dump_store, early_result = _resolve_manual_stores(context, switches, process_ctx, dump_store)
+    manual_case, dump_case, early_result = _resolve_manual_stores(context, switches, process_ctx, dump_case)
     if early_result is not None:
         return early_result
 
-    prepared_inputs, early_result = _generate_input(context, switches, process_ctx, manual_case, dump_store)
+    prepared_inputs, early_result = _generate_input(context, switches, process_ctx, manual_case, dump_case)
     if early_result is not None:
         return early_result
 
@@ -679,7 +678,7 @@ def _run_profile(
     if early_result is not None:
         return early_result
 
-    early_result = _manual_data_dump(context, switches, dump_store, prepared_inputs)
+    early_result = _manual_data_dump(context, switches, dump_case, prepared_inputs)
     if early_result is not None:
         return early_result
 
@@ -690,23 +689,23 @@ def _run_profile(
         early_result = _xpu_promote_golden(context, xpu)
         if early_result is not None:
             return early_result
+    # no-prof：_device_profiling 内早退、_compare_and_finalize 内 dump-only
+    # 收尾——中间 _collect_xpu 正常收割远端三方并落 xpu 槽位
     _device_profiling(context, dev_id, device_grant_events, device_granted_indices)
-    third_parties, _xpu_results = _collect_xpu(context, switches, xpu)
-    return _compare_and_finalize(
-        context, tol_state.standards, third_parties, tol_state.pre_compare, tol_state.custom_compare
-    )
+    third_parties, xpu_results = _collect_xpu(context, switches, xpu, dump_case)
+    return _compare_and_finalize(context, tol_state, third_parties, xpu_results)
 
 
 def _xpu_promote_golden(context: TestcaseKernel, xpu):
     """golden-XPU 装配（设备前收割）：三方即 golden，缺失则整例 FAIL 提前返回。"""
-    third_parties, _results, _provider = xpu.collect()
-    early_result = _assemble_xpu_golden(context, third_parties, golden_is_xpu=True)
+    third_parties, xpu_results, _provider = xpu.collect()
+    early_result = _assemble_xpu_golden(context, third_parties, golden_is_xpu=True, xpu_results=xpu_results)
     if early_result is not None:
         xpu.discard()
     return early_result
 
 
-def _collect_xpu(context: TestcaseKernel, switches, xpu):
+def _collect_xpu(context: TestcaseKernel, switches, xpu, dump_case=None):
     """NPU 执行完毕的三方收割（ready 即取/幂等；重叠形态 join）+ case 目录槽位落盘。"""
     process_ctx = process_context()
     if xpu.pending:
@@ -714,7 +713,7 @@ def _collect_xpu(context: TestcaseKernel, switches, xpu):
     third_parties, xpu_results, provider = xpu.collect()
     from ..common.xpu import dump_xpu_slot_files
 
-    dump_xpu_slot_files(context, switches, third_parties, provider)
+    dump_xpu_slot_files(context, switches, third_parties, provider, dump_case=dump_case)
     return third_parties, xpu_results
 
 

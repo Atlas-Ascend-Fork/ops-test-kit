@@ -285,3 +285,25 @@ def test_profile_process_gate_open_and_shut(monkeypatch):
     with pytest.raises(AttributeError, match="dyn_compile_result"):
         prof.run(context, {}, {}, 0)
     assert len(xpu_calls) == 0, "gate shut must NOT call _do_xpu_profiling"
+
+
+def test_xpu_mode_folds_golden_xpu_and_dump_xpu_into_data():
+    """xpu_mode DATA 位 = need_xpu_data ∪ golden-mode XPU ∪ --dump xpu（switches 级
+    需求统一内置，worker 只传 per-case need_3party）。"""
+    from ttk.remote import DATA, PERF, xpu_mode
+
+    sw = SWITCHES()
+    sw.dump_config = DumpConfig()
+    assert xpu_mode(sw, need_xpu_data=False) == 0
+    assert xpu_mode(sw, need_xpu_data=True) == DATA
+
+    sw.golden_mode = "XPU"
+    assert xpu_mode(sw, need_xpu_data=False) == DATA
+
+    sw.golden_mode = "Enable"
+    sw.dump_config.dump_xpu = True
+    assert xpu_mode(sw, need_xpu_data=False) == DATA
+
+    sw.dump_config.dump_xpu = False
+    sw.xpu_perf = True
+    assert xpu_mode(sw, need_xpu_data=False) == PERF

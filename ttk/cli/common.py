@@ -162,9 +162,8 @@ def _add_run_args(parser):
         "--no-prof",
         dest="no_prof",
         action="store_true",
-        help="Generate input/golden and dump manual data without running the "
-        "main API; with --dump in,golden writes a restorable dataset "
-        "(manual-data dump direction)",
+        help="Skip on-device execution (no profiling); remote XPU third-party collection still runs. "
+        "With --dump in,golden writes a restorable dataset",
     )
     group.add_argument("--plugin", metavar="PATH", help="External plugin path for customized golden/inputs")
     group.add_argument(

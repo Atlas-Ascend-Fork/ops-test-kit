@@ -178,6 +178,33 @@ def test_golden_failure_placeholder_does_not_block_execution(monkeypatch):
     assert compared["golden"] == ["GOLDEN_FAILURE"]
 
 
+def test_no_prof_skips_device_but_collects_xpu(monkeypatch):
+    """--no-prof 放宽语义：本地设备不执行，远端三方采集照常，MANUAL_DATA_PREPARED 收尾。"""
+    switches = _switches()
+    switches.no_prof = True
+    inputs = [np.ones(2, np.float32), np.zeros(2, np.float32)]
+    result = [np.array([3.0, 4.0], np.float32)]
+    _apply_common_stubs(monkeypatch, switches, inputs, result)
+    case = _e2e_case("no_prof_xpu")
+
+    monkeypatch.setattr(e2e_worker, "manual_data_dump_case", lambda _tc, _sw: None)
+    monkeypatch.setattr(e2e_worker, "dump_manual_dataset", lambda *_a, **_k: None)
+    dispatched, collected = [], []
+    monkeypatch.setattr(e2e_worker, "_dispatch_xpu", lambda ctx: dispatched.append(1))
+    monkeypatch.setattr(e2e_worker, "_collect_xpu", lambda ctx: collected.append(1))
+    executed = MagicMock(return_value=(list(result), None, None))
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", executed)
+
+    return_struct = FrameworkApiReturnStructure()
+    e2e_worker._run_profile(case, _backend(), {}, {}, 0, switches, return_struct)
+
+    assert executed.call_count == 0  # 跳过 device 执行
+    assert dispatched == [1]
+    assert collected == [1]  # 远端三方采集照常
+    assert return_struct.precision_status == "PASS"
+    assert str(return_struct.eager_precision) == "MANUAL_DATA_PREPARED"
+
+
 class _ManualCaseStub:
     """replay 桩：inputs 还原 + load_goldens 计数与装载形态。"""
 
@@ -313,15 +340,17 @@ def test_static_load_failure_fails_case(monkeypatch):
 # ══════════════════════════════════════════════════════════════════════════
 # manual_xpu_binaries：_dispatch_xpu/_collect_xpu 短路 + e2e inplace 对位
 # ══════════════════════════════════════════════════════════════════════════
-def test_manual_xpu_header_registered():
-    assert "manual_xpu_binaries" in TestcaseE2e.complete_headers
+def test_manual_xpu_header_not_registered_for_e2e():
+    """e2e 不支持 CSV manual_xpu_binaries：三方只从 case 目录槽位装载
+    （与 e2e 无 manual_golden_binaries 同口径）。"""
+    assert "manual_xpu_binaries" not in TestcaseE2e.complete_headers
 
 
 def test_inplace_output_slots_align_with_loader(tmp_path):
     """e2e inplace 对位：output_tensor_indexes 自动回填别名输入槽 (0,)，manual 装载
     与 golden 静态回放同口径（flat_output_view_shapes/flat_output_dtypes）——
     path[0] ↔ 输入槽 0 的 view shape/dtype，与远端三方输出（inplace 返回值）同位。"""
-    from ttk.core_modules.common.xpu import load_manual_third_parties
+    from ttk.core_modules.common.xpu import load_third_parties
 
     case = TestcaseE2e()
     case.api_name = "torch.Tensor.relu_"
@@ -339,7 +368,7 @@ def test_inplace_output_slots_align_with_loader(tmp_path):
     expected.tofile(path)
     case.manual_xpu_binaries = (str(path),)
 
-    arrays = load_manual_third_parties(case)
+    arrays = load_third_parties(case)
 
     assert len(arrays) == 1  # 单输出槽（inplace 返回自身），manual 路径与之一一对位
     np.testing.assert_array_equal(arrays[0], expected)
@@ -348,7 +377,7 @@ def test_inplace_output_slots_align_with_loader(tmp_path):
 def test_inplace_non_contiguous_view_loads_logical_values(tmp_path):
     """inplace + 非连续 view：装载按逻辑 view shape 对位（XPU 归档写的是返回数组的
     逻辑值，result_nps 亦为逻辑值）——不取存储 shape，防错位。"""
-    from ttk.core_modules.common.xpu import load_manual_third_parties
+    from ttk.core_modules.common.xpu import load_third_parties
 
     case = TestcaseE2e()
     case.api_name = "torch.Tensor.relu_"
@@ -362,7 +391,7 @@ def test_inplace_non_contiguous_view_loads_logical_values(tmp_path):
     expected.tofile(path)
     case.manual_xpu_binaries = (str(path),)
 
-    arrays = load_manual_third_parties(case)
+    arrays = load_third_parties(case)
 
     np.testing.assert_array_equal(arrays[0], expected)
     assert arrays[0].shape == (3, 4)  # 逻辑 view shape，非存储展平
@@ -394,9 +423,23 @@ def _mx_switches(golden_mode=None, **overrides):
     return SimpleNamespace(**values)
 
 
-def _mx_slot_case(paths):
-    # manual-data case 目录槽位形态（load_manual_third_parties 的第二来源）
-    return SimpleNamespace(has_third_parties=True, third_party_paths=lambda: list(paths))
+def _mx_slot_case(paths, saved_shapes=(), filename_dtypes=()):
+    # manual-data case 目录槽位形态（load_third_parties 的第二来源）；
+    # 真实 ManualDataCase 自带文件名 shape/dtype 段解析，桩按需注入
+    from ttk.core_modules.common.dump.manual_data import ManualDataStore
+
+    def load_xpu(testcase, device_outputs=None):
+        return ManualDataStore.load_xpu(
+            testcase, list(paths), list(saved_shapes), list(filename_dtypes), device_outputs=device_outputs
+        )
+
+    return SimpleNamespace(
+        has_third_parties=True,
+        third_party_paths=lambda: list(paths),
+        third_party_saved_shapes=lambda: list(saved_shapes),
+        third_party_dtypes=lambda: list(filename_dtypes),
+        load_xpu=load_xpu,
+    )
 
 
 def _mx_collect(case, switches, golden_nps=None, ref_nps=None, manual_case=None):
@@ -453,7 +496,8 @@ def test_golden_xpu_mode_short_circuits_remote(tmp_path, no_remote, via_slots):
     """golden-mode XPU + manual（CSV 路径 / case 目录槽位）：golden 位真值源来自本地装载，远端零调用。
 
     case-dir 形态同时覆盖 e2e 无声明输出槽的 references 取槽路径（shape/dtype
-    取设备输出，装载口径同 golden）。
+    取设备输出，装载口径同 golden）。新分流对齐 aclnn：manual 装载前置到
+    _dispatch_xpu（ready 句柄），升格由 _xpu_promote_golden 单点完成。
     """
     path = tmp_path / "gpu.bin"
     expected = np.arange(8, dtype=np.float32)
@@ -463,18 +507,25 @@ def test_golden_xpu_mode_short_circuits_remote(tmp_path, no_remote, via_slots):
     if via_slots:
         case.flat_output_view_shapes = ()
         case.flat_output_dtypes = ()
-    manual_case = _mx_slot_case((str(path),)) if via_slots else None
-    third, xpu_results, golden_nps, early, recorder, _rs = _mx_collect(
-        case,
-        _mx_switches(golden_mode="XPU"),
-        golden_nps=[],
-        ref_nps=[np.zeros(8, dtype=np.float32)] if via_slots else None,
-        manual_case=manual_case,
-    )
+    manual_case = _mx_slot_case((str(path),), saved_shapes=((8,),), filename_dtypes=("float32",)) if via_slots else None
+    switches = _mx_switches(golden_mode="XPU")
+    recorder = []
+    process_ctx = SimpleNamespace(notify_status=lambda stage, *_: recorder.append(stage))
+    return_struct = SimpleNamespace(xpu_metrics=None, set_golden_perf=lambda *a, **k: None)
+    ctx = e2e_worker._ProfileContext(case, None, switches, 0, {}, {}, return_struct, deterministic_level=0)
+    ctx.process_ctx = process_ctx
+    ctx.manual_case = manual_case
+    ctx.raw_inputs = ()
+    ctx.npu_results = SimpleNamespace(device_outputs=[np.zeros(8, dtype=np.float32)] if via_slots else None)
+    ctx.golden_outputs = []
 
-    np.testing.assert_array_equal(third[0], expected)
-    assert xpu_results == {"manual_binary": {"status": "PASS", "api": "manual_xpu_binaries"}}
-    np.testing.assert_array_equal(golden_nps[0], expected)  # golden 位回填 = 三方本地装载
+    e2e_worker._dispatch_xpu(ctx)
+    assert ctx.xpu_dispatch is None  # manual 声明 probe 短路，零远端调用、不设备前读文件
+    early = e2e_worker._collect_xpu(ctx)
+
+    np.testing.assert_array_equal(ctx.xpu_outputs[0], expected)
+    assert ctx.xpu_results == {"manual_binary": {"status": "PASS", "api": "manual_xpu_binaries"}}
+    np.testing.assert_array_equal(ctx.golden_outputs[0], expected)  # golden 位回填 = 三方本地装载
     assert early is False
     assert recorder == ["OnLoadManualXpu"]
 
@@ -487,7 +538,8 @@ def test_golden_xpu_mode_short_circuits_remote(tmp_path, no_remote, via_slots):
     ],
 )
 def test_manual_source_short_circuits_remote(tmp_path, no_remote, golden_nps, switches_over, label):
-    """manual 声明 + DATA 需求（cross_check 判据 / --dump xpu）：本地装载，远端零调用。"""
+    """manual 声明 + DATA 需求（cross_check 判据 / --dump xpu）：dispatch probe
+    短路远端，collect 设备后装载（device_outputs 供 CSV 裸路径解析），零远端调用。"""
     path = tmp_path / "gpu.bin"
     expected = np.arange(8, dtype=np.float32)
     expected.tofile(path)
@@ -504,18 +556,27 @@ def test_manual_source_short_circuits_remote(tmp_path, no_remote, golden_nps, sw
 
 
 @pytest.mark.parametrize(
-    ("golden_nps", "ref_nps", "standards", "switches_over", "manual_case_src", "expected_need_data"),
+    ("golden_nps", "ref_nps", "standards", "switches_over", "manual_case_src", "expected_need_xpu_data"),
     [
         pytest.param([np.ones(8)], None, ["cross_check"], {}, None, True, id="real-golden-cross-check"),
         pytest.param(["UNSUPPORTED"], [np.ones(8)], ["cross_check"], {}, None, True, id="placeholder-refnps-fallback"),
         pytest.param(["UNSUPPORTED"], [np.ones(8)], [], {"xpu_perf": True}, None, False, id="placeholder-xpu-perf"),
         pytest.param([np.ones(8)], None, [], {}, None, None, id="real-golden-no-trigger"),
         pytest.param(["SUPPRESSED"], None, [], {}, None, None, id="placeholder-no-dtype-source"),
-        pytest.param([], None, [], {"golden_mode": "XPU"}, "slots", True, id="golden-xpu-empty-manual-remote"),
+        pytest.param(
+            ["SUPPRESSED"],
+            None,
+            [],
+            {"dump_config": SimpleNamespace(dump_xpu=True)},
+            None,
+            False,
+            id="dump-xpu-remote-data",
+        ),
+        pytest.param([], None, [], {"golden_mode": "XPU"}, "slots", False, id="golden-xpu-empty-manual-remote"),
     ],
 )
 def test_undeclared_goes_remote(
-    tmp_path, monkeypatch, golden_nps, ref_nps, standards, switches_over, manual_case_src, expected_need_data
+    tmp_path, monkeypatch, golden_nps, ref_nps, standards, switches_over, manual_case_src, expected_need_xpu_data
 ):
     """manual 未声明时的采集分流：cross_check 带 DATA；占位 golden 经设备输出兜底
     解析判据；--xpu-perf 与 golden 状态解耦；无触发零采集；golden-XPU 目录无
@@ -525,7 +586,7 @@ def test_undeclared_goes_remote(
     called = []
 
     def _remote(**kwargs):
-        called.append(kwargs["need_data"])
+        called.append(kwargs["need_xpu_data"])
         return "remote", sentinel_third, {"remote": {"status": "PASS"}}
 
     monkeypatch.setattr("ttk.core_modules.common.xpu.collect_third_party", _remote)
@@ -536,6 +597,7 @@ def test_undeclared_goes_remote(
         lambda *a, **k: [SimpleNamespace(token=t) for t in standards],  # noqa: S106  # token 为精度标准名，非凭据
     )
     monkeypatch.setattr(e2e_worker, "dump_goldens", lambda *a, **k: None)
+    monkeypatch.setattr("ttk.core_modules.common.xpu.dump_xpu_slot_files", lambda *a, **k: None)
     # 免完整 TestcaseE2e 解析链：远端分支的输入提取器打桩
     monkeypatch.setattr(e2e_worker, "e2e_xpu_inputs", lambda tc, raw: [])
     monkeypatch.setattr(e2e_worker, "e2e_xpu_input_names", lambda tc: [])
@@ -546,12 +608,12 @@ def test_undeclared_goes_remote(
         case, _mx_switches(**switches_over), golden_nps=golden_nps, ref_nps=ref_nps, manual_case=manual_case
     )
 
-    if expected_need_data is None:
+    if expected_need_xpu_data is None:
         assert called == []
         assert third is None
         assert recorder == []
     else:
         assert third is sentinel_third
         assert early is False
-        assert called == [expected_need_data]
+        assert called == [expected_need_xpu_data]
         assert recorder == ["OnXpuProfiling"]

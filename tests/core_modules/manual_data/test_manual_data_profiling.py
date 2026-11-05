@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
 from ttk.core_modules.aclnn import compare as aclnn_comparison
 from ttk.core_modules.aclnn import worker as aclnn_profiling
@@ -24,10 +25,8 @@ from ttk.core_modules.aclnn.result import (
     ApiProfilingResult,
 )
 from ttk.core_modules.aclnn.testcase import TestcaseAclnn
-from ttk.core_modules.common.dump import (
-    DumpConfig,
-    ManualDataStore,
-)
+from ttk.core_modules.common.dump import DumpConfig
+from ttk.core_modules.common.dump.manual_data import ManualDataStore
 from ttk.core_modules.framework_api import worker as e2e_profiling
 from ttk.core_modules.framework_api.result import FrameworkApiReturnStructure
 from ttk.core_modules.framework_api.testcase import TestcaseE2e
@@ -320,6 +319,74 @@ def test_e2e_full_flow_empty_dir_generates_and_dumps(monkeypatch, tmp_path):
     )
 
 
+def test_e2e_full_flow_golden_xpu_first_run_dumps_inputs_and_xpu_slots(monkeypatch, tmp_path):
+    """e2e 全流程 + golden-XPU + 空目录首跑：input-only 数据集 + xpu 槽位同目录落盘。
+
+    golden 由三方产出（无 CPU 真值），GOLDEN_FAILURE 占位串过滤后仅落 input；
+    --dump xpu 触发的三方槽位追加进已写出的 case 目录（不再跳过落盘导致
+    dump_xpu 找不到 case 目录）。
+    """
+    case = _e2e_case("e2e_xpu_first_run")
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+    switches = _switches(empty_root)
+    switches.golden_mode = "XPU"
+    switches.dump_config.dump_xpu = True
+    inputs = [np.array([1.0, 2.0], np.float32), np.zeros(2, np.float32)]
+    third = [np.array([3.0, 4.0], np.float32)]
+
+    def generate(testcase, _switches, _backend, _plan, stored_inputs=None, **_kw):
+        assert stored_inputs is None
+        testcase.np_storages = list(inputs)
+        return list(inputs)
+
+    monkeypatch.setattr(e2e_profiling, "process_context", _process_context)
+    monkeypatch.setattr(e2e_profiling, "get_global_storage", lambda: switches)
+    monkeypatch.setattr(e2e_profiling, "generate_inputs", generate)
+    monkeypatch.setattr(
+        e2e_profiling,
+        "generate_golden_data",
+        MagicMock(side_effect=AssertionError("golden-XPU must not generate golden on this side")),
+    )
+    monkeypatch.setattr(e2e_profiling, "adapter_for_testcase", lambda *_: _no_op_adapter())
+    monkeypatch.setattr(_NoOpAdapter, "run_eager", lambda *_, **__: (list(third), None, None))
+    monkeypatch.setattr(e2e_profiling, "DeviceLock", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(e2e_profiling, "_profiling_print", lambda *_: None)
+    monkeypatch.setattr(e2e_profiling, "dump_inputs", lambda *_, **__: None)
+    monkeypatch.setattr(e2e_profiling, "dump_goldens", lambda *_, **__: None)
+    monkeypatch.setattr(e2e_profiling, "dump_outputs", lambda *_, **__: None)
+    monkeypatch.setattr(e2e_profiling, "evaluate_eager_precision", lambda *_a, **_k: None)
+    monkeypatch.setattr(e2e_profiling, "_profiling_end_print", lambda *_args, **_kwargs: None)
+    # 三方采集：远端门面打桩（golden-XPU 同步收割），输入提取器免完整解析链
+    monkeypatch.setattr(
+        "ttk.core_modules.common.xpu.collect_third_party",
+        lambda **_kw: ("torch", list(third), {"torch": {"status": "PASS"}}),
+    )
+    monkeypatch.setattr(e2e_profiling, "e2e_xpu_inputs", lambda _tc, ri: list(ri))
+    monkeypatch.setattr(e2e_profiling, "e2e_xpu_input_names", lambda _tc: [])
+    monkeypatch.setattr(e2e_profiling, "e2e_xpu_input_dtypes", lambda _tc: None)
+    backend = SimpleNamespace(
+        device_type=lambda: "npu",
+        has_device=lambda: False,
+        is_npu=lambda: False,
+        set_device=lambda *_: None,
+        inputs_from_numpy=lambda tc, ri: ri,
+    )
+
+    e2e_profiling._run_profile(case, backend, {}, {}, 0, switches, FrameworkApiReturnStructure())
+
+    case_dir = ManualDataStore(empty_root).case_dir(case.testcase_name)
+    assert (case_dir / "input_0_float32.bin").is_file()  # input 槽位照常
+    assert not list(case_dir.glob("golden_*"))  # 无 CPU golden 真值，不落 golden 位
+    assert list(case_dir.glob("xpu_torch_0_float32*.bin")), "三方槽位应追加进数据集（dump_xpu 命中 dump_case）"
+    # 回放侧：case 目录 xpu 槽位装载为三方输出（跨机比对真值源）
+    loaded = ManualDataStore(empty_root).load_case(case, "e2e", require_goldens=False)
+    assert loaded.has_third_parties
+    from ttk.core_modules.common.xpu import load_third_parties
+
+    np.testing.assert_array_equal(load_third_parties(case, loaded)[0], third[0])
+
+
 def test_e2e_replay_skips_input_and_golden_generation(monkeypatch, tmp_path):
     """e2e replay 模式跳过输入与 golden 生成，直接用落盘数据执行。"""
     case = _e2e_case("e2e_replay")
@@ -437,6 +504,7 @@ def test_aclnn_prepare_stops_before_device_execution(monkeypatch, tmp_path):
     """aclnn prepare 模式在设备执行前停止，仅落盘输入/标量数据。"""
     case = _aclnn_case("aclnn_prepare")
     switches = _switches(tmp_path, no_prof=True)
+    switches.no_memory_check = True  # 本用例免宿主内存闸门（低内存窗口轮询 300s 属环境噪声）
     inputs = [np.array([1.0, 2.0], np.float32), np.zeros(2, np.float32)]
     scalar = np.array(0.5, np.float32)
     golden = [np.array([3.0, 4.0], np.float32)]
@@ -482,6 +550,55 @@ def test_aclnn_prepare_stops_before_device_execution(monkeypatch, tmp_path):
         np.array([1.0, 2.0], np.float32),
     )
     assert loaded.scalars[0] == np.array(0.5, np.float32)
+
+
+def test_aclnn_prepare_collects_xpu_perf_metrics(monkeypatch, tmp_path):
+    """aclnn --no-prof + --xpu-perf：远端三方采集照常，指标随返回行回传。"""
+    case = _aclnn_case("aclnn_no_prof_xpu_perf")
+    switches = _switches(tmp_path, no_prof=True)
+    switches.no_memory_check = True  # 本用例免宿主内存闸门（低内存窗口轮询 300s 属环境噪声）
+    switches.xpu_perf = True
+    execute = MagicMock(side_effect=AssertionError("ACLNN must not execute"))
+
+    class Inputs:
+        def __init__(self, context):
+            self.context = context
+
+        def gen(self):
+            self.context.np_storages = [np.ones(2, np.float32), np.zeros(2, np.float32)]
+            self.context.tensors = self.context.np_storages
+            self.context.scalars = (np.array(0.5, np.float32),)
+
+    class Golden:
+        def __init__(self, context):
+            self.context = context
+
+        def gen(self):
+            self.context.golden_tensors = [np.array([3.0, 4.0], np.float32)]
+
+    xpu_results = {"torch": {"status": "PASS", "api": "aclnnAdd", "perf": {"device_us": 12.5, "peak_memory_mb": 1.0}}}
+
+    def _dispatch(_context, _switches, _process_ctx, _need_3party, _manual_case=None):
+        from ttk.core_modules.common.xpu import XpuDispatch
+
+        return XpuDispatch.ready((None, xpu_results, "torch"))
+
+    monkeypatch.setattr(aclnn_profiling, "get_global_storage", lambda: switches)
+    monkeypatch.setattr(aclnn_profiling, "process_context", _process_context)
+    monkeypatch.setattr(aclnn_profiling, "OpApiInfoKeeper", lambda: SimpleNamespace(has_api=lambda *_: True))
+    monkeypatch.setattr(aclnn_profiling, "InputGenerator", Inputs)
+    monkeypatch.setattr(aclnn_profiling, "GoldenGenerator", Golden)
+    monkeypatch.setattr(aclnn_profiling, "execute_on_device", execute)
+    monkeypatch.setattr(aclnn_profiling, "_profiling_end_print", lambda *_: None)
+    monkeypatch.setattr(aclnn_profiling, "_dispatch_xpu", _dispatch)
+
+    result = aclnn_profiling.run(case, {}, {}, 0)
+
+    assert result.precision_status == "PASS"
+    assert result.precision == "MANUAL_DATA_PREPARED"
+    assert not execute.called
+    assert result.xpu_metrics["torch"]["device_us"] == 12.5
+    assert result.xpu_metrics["torch"]["status"] == "PASS"
 
 
 def test_aclnn_dynamic_input_only_prepare_records_none_for_replay(monkeypatch, tmp_path):
@@ -743,3 +860,96 @@ def test_loaded_golden_still_uses_current_csv_close_tolerance(monkeypatch):
 
     assert result.precision_status == "PASS"
     assert result.eager_precision == "50.0%"
+
+
+def test_e2e_no_prof_signature_stub_resolves_param_plan(monkeypatch, tmp_path):
+    """未装包制备：--sig 注解 stub 提供 param plan（无 torch 时跳过——装载需 parse_schema）。
+
+    自定义 torch.ops 命名空间（无真实包可 import）下 A/B：无签名 →
+    PARAM_PLAN_FAILURE；带签名 → 输入照常生成并落 MANUAL_DATA_PREPARED。
+    """
+    pytest.importorskip("torch")
+    stub = tmp_path / "sig_stub.py"
+    stub.write_text(
+        "from typing import Optional\n"
+        "import torch\n"
+        "\n"
+        "\n"
+        "def myadd(x: torch.Tensor, y: torch.Tensor, *, alpha: float = 1.0) -> torch.Tensor:\n"
+        "    ...\n"
+    )
+    inputs = [np.ones(2, np.float32), np.zeros(2, np.float32)]
+    golden = [np.array([3.0, 4.0], np.float32)]
+    switches = _switches(tmp_path, no_prof=True)
+    switches.signature_sources = (str(stub),)
+
+    def generate(testcase, _switches, _backend, _plan, stored_inputs=None, **_kw):
+        assert _plan is not None  # param plan 经签名源真实解析
+        assert _plan.api_name == "torch.ops.ttktest.myadd"
+        testcase.np_storages = list(inputs)
+        return list(inputs)
+
+    monkeypatch.setattr(e2e_profiling, "process_context", _process_context)
+    monkeypatch.setattr(e2e_profiling, "get_global_storage", lambda: switches)
+    monkeypatch.setattr(e2e_profiling, "generate_inputs", generate)
+    monkeypatch.setattr(e2e_profiling, "generate_golden_data", lambda *_, **__: list(golden))
+    from ttk.core_modules.framework_api.info_keeper import FrameworkApiInfoKeeper
+
+    FrameworkApiInfoKeeper()._cache.clear()  # Singleton 实例缓存：隔离 A/B 两次解析
+    from ttk.core_modules.framework_api import compare as _e2e_compare
+
+    monkeypatch.setattr(_e2e_compare, "SpecResolver", _SpecResolverStub(lambda *_: None))
+    monkeypatch.setattr(e2e_profiling, "adapter_for_testcase", lambda *_: _no_op_adapter())
+    monkeypatch.setattr(e2e_profiling, "_profiling_end_print", lambda *_args, **_kwargs: None)
+    backend = SimpleNamespace(
+        device_type=lambda: "cpu",
+        has_device=lambda: False,
+        is_npu=lambda: False,
+        set_device=lambda *_: None,
+        inputs_from_numpy=lambda tc, ri: ri,
+    )
+
+    from ttk.core_modules.framework_api.torch import param_extractor
+
+    def _run(with_signature):
+        # 模块级惰性装载状态 + Singleton 缓存：A/B 两次运行互相隔离
+        param_extractor._SIGNATURE_OVERRIDES_READY = False
+        param_extractor._SIGNATURE_TAIL_INDEX.clear()
+        FrameworkApiInfoKeeper()._cache.clear()
+        local_switches = _switches(tmp_path, no_prof=True)
+        local_switches.no_memory_check = True  # 本用例免宿主内存闸门（环境噪声）
+        if with_signature:
+            local_switches.signature_sources = (str(stub),)
+        monkeypatch.setattr(e2e_profiling, "get_global_storage", lambda: local_switches)
+        monkeypatch.setattr("ttk.switches.get_global_storage", lambda: local_switches)
+        case = _e2e_case("e2e_sig_stub")
+        case.api_name = "torch.ops.ttktest.myadd"
+        case.attributes = {"alpha": 2.0}
+        case.output_tensor_indexes = ()
+        case._pure_output_indexes = []
+        case._param_plan_cache = None  # 关闭桩缓存，走真实解析链
+        result = FrameworkApiReturnStructure()
+        e2e_profiling._run_profile(case, backend, {}, {}, 0, local_switches, result)
+        return result
+
+    overrides = dict(param_extractor._MANUAL_OVERRIDES)
+    tail = {k: list(v) for k, v in param_extractor._SIGNATURE_TAIL_INDEX.items()}
+    ready = param_extractor._SIGNATURE_OVERRIDES_READY
+    try:
+        control = _run(with_signature=False)
+        assert control.precision_status == "FAIL"
+        assert control.eager_precision == "PARAM_PLAN_FAILURE"
+
+        treated = _run(with_signature=True)
+        assert treated.precision_status == "PASS"
+        assert treated.eager_precision == "MANUAL_DATA_PREPARED"
+        store = ManualDataStore(tmp_path)
+        assert (store.case_dir("e2e_sig_stub") / "input_0_float32.bin").is_file()
+    finally:
+        # 模块级登记状态泄漏会让后续签名用例（test_signature_overrides）误命中
+        param_extractor._MANUAL_OVERRIDES.clear()
+        param_extractor._MANUAL_OVERRIDES.update(overrides)
+        param_extractor._SIGNATURE_TAIL_INDEX.clear()
+        param_extractor._SIGNATURE_TAIL_INDEX.update(tail)
+        param_extractor._SIGNATURE_OVERRIDES_READY = ready
+        FrameworkApiInfoKeeper()._cache.clear()

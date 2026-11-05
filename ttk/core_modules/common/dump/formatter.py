@@ -27,14 +27,22 @@ __all__ = ["DumpFormatter", "DumpLoadError", "register_format", "get_formatter"]
 
 # Standard Packages
 import logging
+import math
 import os
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 import numpy
 
-from ....utilities import is_4bit_dtype, load_array, pack_4bits, unpack_4bits
-from ....utilities.dtypes import numpy_to_torch_tensor, torch_to_numpy_tensor
+from ....utilities import is_4bit_dtype, pack_4bits, resolve_numpy_dtypes, unpack_4bits
+from ....utilities.dtypes import (
+    NUMPY_DTYPE_SOURCES,
+    dtype_to_name,
+    numpy_to_torch_tensor,
+    resolve_numpy_dtype,
+    torch_to_numpy_tensor,
+)
+from ....utilities.shape import shape_numel
 
 _FORMAT_REGISTRY: Dict[str, "DumpFormatter"] = {}
 
@@ -143,10 +151,11 @@ class BinFormatter(DumpFormatter):
                 f.write(data)
 
     def load(self, path, dtype, shape=None) -> numpy.ndarray:
-        """4bit（含 shape 时由 load_array 解包）与常规 dtype 的原始字节读取。"""
-        if shape is not None:
-            return load_array(str(path), dtype, shape)
-        return numpy.fromfile(str(path), dtype=dtype)
+        """bin 原始字节读取；4bit/特殊 dtype 与物理形态由 _postprocess 还原。"""
+        if shape is None:
+            return numpy.fromfile(str(path), dtype=_resolve_load_dtype(dtype or "uint8"))
+        array = numpy.fromfile(str(path), dtype=_resolve_load_dtype(dtype or "uint8"))
+        return _postprocess(array, dtype or "uint8", shape)
 
 
 @register_format("npy")
@@ -156,7 +165,12 @@ class NpyFormatter(DumpFormatter):
     def dump(self, data, file_path: str, file_name: str, dtype: Optional[str] = None) -> None:
         if isinstance(data, numpy.ndarray) or _is_torch_tensor(data):
             array = data if isinstance(data, numpy.ndarray) else torch_to_numpy_tensor(data)
-            numpy.save(self._abspath(file_path, file_name), _as_npy_savable(array))
+            # e5m2 的 descr 为非法 '<f1'（写出即不可读回），先降 uint8 载体；
+            # 其余自定义 dtype 的 descr 不可直存，view 等宽 V 落盘
+            array = _as_npy_savable(array)
+            if array.dtype.name in _CUSTOM_NUMPY_DTYPES:
+                array = array.view(numpy.dtype(f"V{array.dtype.itemsize}"))
+            numpy.save(self._abspath(file_path, file_name), array)
         elif not isinstance(data, str) and data is not None:
             self._dump_bytes(data, dtype, file_path, file_name)
 
@@ -199,9 +213,16 @@ class PtFormatter(DumpFormatter):
         if isinstance(data, numpy.ndarray) or _is_torch_tensor(data):
             import torch
 
-            torch.save(
-                data if _is_torch_tensor(data) else numpy_to_torch_tensor(data), self._abspath(file_path, file_name)
-            )
+            if _is_torch_tensor(data):
+                payload = data
+            else:
+                try:
+                    payload = numpy_to_torch_tensor(data)
+                except Exception:
+                    # torch 不承载的自定义 dtype：原始字节载荷（ttk_raw_bytes/ttk_shape）
+                    raw = numpy.frombuffer(data.tobytes(order="C"), dtype=numpy.uint8).copy()
+                    payload = {"ttk_raw_bytes": torch.from_numpy(raw), "ttk_shape": tuple(data.shape)}
+            torch.save(payload, self._abspath(file_path, file_name))
         elif not isinstance(data, str) and data is not None:
             self._dump_bytes(data, dtype, file_path, file_name)
 
@@ -285,3 +306,121 @@ def _pt_raw_bytes_to_array(payload, dtype, shape, path) -> numpy.ndarray:
         return numpy.frombuffer(raw, dtype=dtype).copy().reshape(stored_shape)
     except ValueError as exc:
         raise DumpLoadError(f"{path} raw bytes cannot be reshaped to stored shape {stored_shape}") from exc
+
+
+def storage_layout(logical_dtype, logical_shape) -> Tuple[str, Tuple[int, ...]]:
+    """逻辑 dtype+shape → 落盘的物理存储 (dtype, shape)。"""
+    dtype_name = dtype_to_name(logical_dtype)
+    shape = tuple(int(dimension) for dimension in logical_shape)
+    if dtype_name == "complex32":
+        return "float16", shape + (2,)
+    if dtype_name in ("uint1", "int1"):
+        element_count = math.prod(shape) if shape else 1
+        return "uint8", ((element_count + 7) // 8,)
+    try:
+        resolved = resolve_numpy_dtypes((dtype_name,))[0]
+        return numpy.dtype(resolved).name, _saved_array_shape(shape)
+    except Exception as exc:
+        raise DumpLoadError(f"cannot resolve dtype {dtype_name!r}") from exc
+
+
+class ManualDataError(RuntimeError):
+    """Manual data is missing, corrupt, or incompatible with the CSV case."""
+
+
+def _saved_array_shape(shape) -> Tuple[int, ...]:
+    result = tuple(int(dimension) for dimension in shape)
+    return result if result else (1,)
+
+
+_NONE_DTYPE = "none"
+
+
+_RAW_UINT8_COMPATIBLE_DTYPES = {
+    "int4",
+    "float8_e5m2",
+    "float8_e4m3fn",
+    "float8_e8m0",
+    "float4_e2m1",
+    "float4_e1m2",
+    "hifloat8",
+    "hifloat4",
+}
+
+
+def _resolve_file_dtype(dtype_name: str):
+    try:
+        return resolve_numpy_dtypes((dtype_name,))[0]
+    except Exception as exc:
+        raise ManualDataError(f"cannot resolve dtype {dtype_name!r} from manual-data filename") from exc
+
+
+def _expected_bin_size(dtype_name: str, shape: Tuple[int, ...]) -> int:
+    count = math.prod(shape)
+    if is_4bit_dtype(dtype_name):
+        return (count + 1) // 2
+    try:
+        return count * numpy.dtype(_resolve_file_dtype(dtype_name)).itemsize
+    except Exception as exc:
+        if isinstance(exc, ManualDataError):
+            raise
+        raise ManualDataError(f"cannot determine byte size for dtype {dtype_name!r}") from exc
+
+
+def _resolve_load_dtype(dtype):
+    """Map special dtypes to a numpy-loadable dtype for raw file reading."""
+    if dtype in ("uint1", "int1"):
+        return "uint8"
+    if dtype == "complex32":
+        return "float16"
+    if is_4bit_dtype(dtype):
+        return "uint8"
+    if isinstance(dtype, str) and dtype in NUMPY_DTYPE_SOURCES:
+        return resolve_numpy_dtype(dtype)
+    return dtype
+
+
+def _postprocess_4bit(array, ori_dtype, shape):
+    """Unpack or view 4-bit data after loading."""
+    if array.dtype.name in ("int8", "uint8"):
+        size = shape_numel(shape)
+        if array.size == size:
+            array = array.view(ori_dtype)
+        else:
+            array = unpack_4bits(array, ori_dtype)
+            array = array[:size]
+    else:
+        array = array.view(ori_dtype)
+    return array
+
+
+def _postprocess_special(array, ori_dtype):
+    """View-cast special dtypes loaded from .npy (stored as uint8/int8)."""
+    for sd in ("bfloat16", "float8_e4m3fn", "float8_e5m2", "float8_e8m0", "hifloat8"):
+        if sd in str(ori_dtype) and array.dtype.name != sd:
+            array = array.view(ori_dtype)
+            break
+    return array
+
+
+def _reshape_storage(array, ori_dtype, shape):
+    """Reshape to the dtype's physical storage shape: int1 packs 8 elements per
+    byte on the last dim; complex32 stores fp16 real/imag as a trailing [2]."""
+    if ori_dtype == "int1":
+        shape = list(shape[:-1]) + [shape[-1] // 8]
+    elif ori_dtype == "complex32":
+        shape = list(shape) + [2]
+    try:
+        return array.reshape(shape)
+    except ValueError:
+        # in manual output scenario:
+        # output shape may be wrong (needs infer-shaping by golden)
+        return array
+
+
+def _postprocess(array, ori_dtype, shape):
+    """读后处理：4bit 解包 → 特殊 dtype view 还原 → 物理存储形态 reshape。"""
+    if is_4bit_dtype(ori_dtype):
+        array = _postprocess_4bit(array, ori_dtype, shape)
+    array = _postprocess_special(array, ori_dtype)
+    return _reshape_storage(array, ori_dtype, shape)

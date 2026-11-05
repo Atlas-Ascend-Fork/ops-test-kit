@@ -268,7 +268,7 @@ ACL_ID_TO_DTYPE = {
 # Custom numpy dtypes (not provided by numpy itself) -> provider package:
 # (module_name, attr_name, min_version); min_version None means no version check.
 # hifloat4 uses FP4 E1M2 as its logical storage dtype.
-_NUMPY_DTYPE_SOURCES: Dict[str, tuple] = {
+NUMPY_DTYPE_SOURCES: Dict[str, tuple] = {
     "bfloat16": ("ml_dtypes", "bfloat16", None),
     "int4": ("ml_dtypes", "int4", None),
     "float8_e5m2": ("ml_dtypes", "float8_e5m2", None),
@@ -478,7 +478,7 @@ def resolve_numpy_dtype(dtype_name: str):
     missing or too old; bfloat16 falls back to tensorflow when ml_dtypes is
     absent.
     """
-    spec = _NUMPY_DTYPE_SOURCES.get(dtype_name)
+    spec = NUMPY_DTYPE_SOURCES.get(dtype_name)
     if spec is None:
         raise RuntimeError(f"Unsupported custom numpy dtype [{dtype_name}]")
     module_name, attr_name, min_version = spec
@@ -539,7 +539,7 @@ def resolve_numpy_dtypes(container):
             return name
         if name in TF_QUANTIZED_DTYPE_NUMPY_STORAGE:
             return TF_QUANTIZED_DTYPE_NUMPY_STORAGE[name]
-        if name in _NUMPY_DTYPE_SOURCES:
+        if name in NUMPY_DTYPE_SOURCES:
             return resolve_numpy_dtype(name)
         return name
 

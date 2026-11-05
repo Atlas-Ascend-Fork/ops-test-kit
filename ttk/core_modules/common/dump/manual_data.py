@@ -10,46 +10,56 @@
 """Restorable input and CPU-golden data shared by E2E, ACLNN, and Kernel."""
 
 import filecmp
-import hashlib
 import logging
-import math
 import os
 import pathlib
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy
 
-from ....utilities import is_4bit_dtype, resolve_numpy_dtypes
+from ....utilities import resolve_numpy_dtypes
 from ....utilities.data import constant_array
-from ....utilities.dtypes import dtype_to_name, numpy_to_torch_tensor, torch_to_numpy_tensor
-from .formatter import _CUSTOM_NUMPY_DTYPES, DumpLoadError, get_formatter
+from ....utilities.dtypes import torch_to_numpy_tensor
+from .formatter import (
+    _NONE_DTYPE,
+    _RAW_UINT8_COMPATIBLE_DTYPES,
+    ManualDataError,
+    _expected_bin_size,
+    _resolve_file_dtype,
+    _saved_array_shape,
+    get_formatter,
+    storage_layout,
+)
+from .loader import DataLoader, DataLoadError
+from .naming import case_directory_name, decode_shape, encode_shape
 
 SUPPORTED_MANUAL_DATA_FORMATS = ("bin", "npy", "pt")
-_SAFE_CASE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
 _DATA_FILE_NAME = re.compile(
     r"^(input|scalar|golden)_(0|[1-9][0-9]*)_([A-Za-z0-9][A-Za-z0-9_.-]*?)"
     r"(?:_+shape_(scalar|[0-9]+(?:x[0-9]+)*))?\.(bin|pt|npy)$"
 )
 # XPU 三方输出槽位（--dump xpu 落盘协议）：xpu_{provider}_{idx}_{dtype}[_shape_{dims}].{ext}
-# ——provider 占 segment 位（DataDumper.dump_xpu 同款命名），回放按 idx 对位、
-# 多 provider 同 idx 取字典序首个（回放取单一真值源）；bin 带 shape 段自描述，
-# 无声明/device_outputs shape 时按段还原。
+# provider 占 segment 位（与 DataDumper.dump_xpu 命名一致），回放按 idx 对齐；
+# 多个 provider 同一 idx 时取字典序第一个。bin 靠文件名 shape 段自描述，
+# 没有声明或 device_outputs shape 时按该段还原。
+
+
 _XPU_FILE_NAME = re.compile(
     r"^xpu_([A-Za-z0-9][A-Za-z0-9_.-]*?)_(0|[1-9][0-9]*)_([A-Za-z0-9][A-Za-z0-9_.-]*?)"
     r"(?:_+shape_(scalar|[0-9]+(?:x[0-9]+)*))?\.(bin|pt|npy)$"
 )
-_NONE_DTYPE = "none"
-_UNKNOWN_SHAPE = object()
-# 调试 dump（{root}/dump/{case}/）产物读回放行协议：
-# - output[_{segment}]_{idx}_{dtype} / tiling_data[_{segment}]：执行期派生产物，
-#   读回侧会重新执行/编译产出——扫描时忽略，但把目录标记为"含调试产物"；
-# - input_{segment}_{idx}_{dtype}：按段分流——dyn（kernel 执行前）/const、dynamic
-#   （geir 数据集与模式无关）去段映射 input 槽；eager/graph_*（e2e dump-on-fail
-#   执行后补漏，in-place API 可能已改写）与未知段一律拒绝。
+# 调试 dump（{root}/dump/{case}/）产物的读回放规则：
+# - output[_{segment}]_{idx}_{dtype} / tiling_data[_{segment}]：执行时派生产物，
+#   回放会重新执行/编译产出，扫描时忽略，只把目录标记为"含调试产物"；
+# - input_{segment}_{idx}_{dtype}：按段分流。dyn（kernel 执行前）/const、dynamic
+#   （geir 数据集）映射到 input 槽；eager/graph_*（e2e dump-on-fail 执行后补写，
+#   in-place API 可能已改写）和未知段直接拒绝。
 _DEBUG_OUTPUT_FILE_NAME = re.compile(
     r"^output(?:_[A-Za-z0-9][A-Za-z0-9_.-]*?)?_(0|[1-9][0-9]*)_([A-Za-z0-9][A-Za-z0-9_.-]*?)"
     r"\.(bin|pt|npy)$"
@@ -60,21 +70,6 @@ _DEBUG_INPUT_FILE_NAME = re.compile(
 )
 _DEBUG_INPUT_ACCEPTED_SEGMENTS = ("dyn", "const", "dynamic")
 _DEBUG_INPUT_REJECTED_SEGMENTS = ("eager", "graph_cst", "graph_dyn", "graph_aclgraph")
-
-_RAW_UINT8_COMPATIBLE_DTYPES = {
-    "int4",
-    "float8_e5m2",
-    "float8_e4m3fn",
-    "float8_e8m0",
-    "float4_e2m1",
-    "float4_e1m2",
-    "hifloat8",
-    "hifloat4",
-}
-
-
-class ManualDataError(RuntimeError):
-    """Manual data is missing, corrupt, or incompatible with the CSV case."""
 
 
 @dataclass(frozen=True)
@@ -90,54 +85,85 @@ class _ManualDataFile:
 
 @dataclass
 class ManualDataCase:
+    """manual-data 数据集对外句柄：读视图 + 写委托（IO 由内部 store 完成）。
+
+    worker 只通过本类使用数据集；ManualDataStore 是内部持久层。
+    """
+
     inputs: List[Any]
     scalars: List[Any]
-    case_dir: pathlib.Path
+    case_dir: Optional[pathlib.Path]  # dump 方向句柄（store.dump_case）不落盘、无目录
     file_format: str
-    _golden_files: Tuple[_ManualDataFile, ...]
-    _xpu_files: Tuple[_ManualDataFile, ...] = ()  # 按 (index, provider) 排序
+    golden_files: Tuple[_ManualDataFile, ...]
+    xpu_files: Tuple[_ManualDataFile, ...] = ()  # 按 (index, provider) 排序
+    store: Optional["ManualDataStore"] = field(default=None, repr=False, compare=False)
+    testcase_name: str = field(default="", repr=False, compare=False)
+
+    def dump(self, testcase, case_type: str, inputs, goldens, switches, scalars=()) -> pathlib.Path:
+        """数据集落盘（判定条件与 dump_manual_dataset 一致），委托内部 store。"""
+        if self.store is None:
+            raise ManualDataError("ManualDataCase has no backing store for write")
+        return self.store.dump(testcase, case_type, inputs, goldens, switches, scalars)
+
+    def dump_xpu(self, third_parties: dict, switches) -> None:
+        """三方输出槽位写入数据集，委托内部 store。"""
+        if self.store is None:
+            raise ManualDataError("ManualDataCase has no backing store for write")
+        self.store.dump_xpu(self.testcase_name, third_parties, file_format=switches.dump_config.file_format)
 
     @property
     def has_goldens(self) -> bool:
-        return bool(self._golden_files)
+        return bool(self.golden_files)
 
     @property
     def has_third_parties(self) -> bool:
         """case 目录含 xpu_{provider}_{idx}_{dtype} 槽位文件（--dump xpu 回放）。"""
-        return bool(self._xpu_files)
+        return bool(self.xpu_files)
 
     def third_party_paths(self) -> tuple:
-        """三方输出文件路径，按槽位 idx 对位（0..max 连续，缺位补 None）。
+        """三方输出文件路径，按槽位 idx 对齐（0..max 连续，缺位补 None）。
 
-        多 provider 同 idx 取字典序首个（_xpu_files 已按 (index, provider)
-        排序）——回放取单一真值源。"""
-        if not self._xpu_files:
+        多个 provider 同一 idx 时取字典序第一个（xpu_files 已按
+        (index, provider) 排序）。"""
+        if not self.xpu_files:
             return ()
         by_index: Dict[int, str] = {}
-        for entry in self._xpu_files:
+        for entry in self.xpu_files:
             by_index.setdefault(entry.index, str(entry.path))
         count = max(by_index) + 1
         return tuple(by_index.get(index) for index in range(count))
 
     def third_party_saved_shapes(self) -> tuple:
-        """三方输出文件名 shape 段（无段槽 None），与 :meth:`third_party_paths` 同序对位。"""
-        if not self._xpu_files:
+        """三方输出文件名 shape 段（无段槽为 None），顺序与 :meth:`third_party_paths` 一致。"""
+        if not self.xpu_files:
             return ()
         by_index: Dict[int, Tuple[int, ...]] = {}
-        for entry in self._xpu_files:
+        for entry in self.xpu_files:
             by_index.setdefault(entry.index, entry.saved_shape)
         count = max(by_index) + 1
         return tuple(by_index.get(index) for index in range(count))
 
     def third_party_dtypes(self) -> tuple:
-        """三方输出文件名 dtype（none 槽为 None），与 :meth:`third_party_paths` 同序对位。"""
-        if not self._xpu_files:
+        """三方输出文件名 dtype（none 槽为 None），顺序与 :meth:`third_party_paths` 一致。"""
+        if not self.xpu_files:
             return ()
         by_index: Dict[int, Optional[str]] = {}
-        for entry in self._xpu_files:
+        for entry in self.xpu_files:
             by_index.setdefault(entry.index, None if entry.dtype == _NONE_DTYPE else entry.dtype)
         count = max(by_index) + 1
         return tuple(by_index.get(index) for index in range(count))
+
+    def load_xpu(self, testcase, device_outputs=None) -> Optional[list]:
+        """装载三方输出槽位：按 third_party_* 视图委托内部 store。"""
+        if self.store is None:
+            raise ManualDataError("ManualDataCase has no backing store for xpu loading")
+        return self.store.load_xpu(
+            testcase,
+            self.third_party_paths(),
+            self.third_party_saved_shapes(),
+            self.third_party_dtypes(),
+            device_outputs=device_outputs,
+        )
 
     def load_goldens(self, device_outputs=None, shapes=None, dtypes=None) -> List[Any]:
         """Load saved goldens after device output shapes are available.
@@ -154,39 +180,23 @@ class ManualDataCase:
         those are restored from their own file metadata and left for a custom
         compare hook to interpret.
         """
-        expected_shapes, storage_shapes = self._resolve_golden_shapes(device_outputs, shapes, dtypes)
-        return [
-            self._load_golden_entry(entry, expected_shape, storage_shape)
-            for entry, expected_shape, storage_shape in zip(self._golden_files, expected_shapes, storage_shapes)
-        ]
+        if self.store is None:
+            raise ManualDataError("ManualDataCase has no backing store for golden loading")
+        storage_shapes = self._resolve_golden_shapes(device_outputs, shapes, dtypes)
+        return self.store.load_goldens(self.golden_files, storage_shapes)
 
-    def _resolve_golden_shapes(self, device_outputs, shapes, dtypes) -> Tuple[List[Any], List[Any]]:
-        """输出槽 shape 真相三源归一：设备输出 / 声明槽 / 未知哨兵。
-
-        返回 (expected_shapes, storage_shapes) 对齐 self._golden_files；
-        expected_shape=None 表示可选输出抑制，_UNKNOWN_SHAPE 表示无位置映射。
-        """
+    def _resolve_golden_shapes(self, device_outputs, shapes, dtypes) -> List[Any]:
+        """解析 golden 存储 shape：来自设备输出或声明槽；None 表示抑制或未映射。"""
         if device_outputs is not None and shapes is not None:
             raise ManualDataError("device outputs and explicit shapes are mutually exclusive")
 
-        expected_shapes = []
         storage_shapes = []
         if device_outputs is not None:
             for index, value in enumerate(device_outputs):
-                if value is None:
-                    expected_shapes.append(None)
+                if value is None or isinstance(value, str):
                     storage_shapes.append(None)
-                elif isinstance(value, str):
-                    expected_shapes.append(_UNKNOWN_SHAPE)
-                    storage_shapes.append(_UNKNOWN_SHAPE)
                 else:
-                    label = f"output[{index}]"
-                    logical_shape = _value_shape(value, label)
-                    storage = _as_numpy(value, label)
-                    storage_shape = tuple(storage.shape)
-                    expected_shape = logical_shape if not logical_shape and storage.size == 1 else storage_shape
-                    expected_shapes.append(expected_shape)
-                    storage_shapes.append(storage_shape)
+                    storage_shapes.append(tuple(_as_numpy(value, f"output[{index}]").shape))
         elif shapes is not None:
             shape_values = list(shapes)
             dtype_values = list(dtypes or ())
@@ -196,61 +206,24 @@ class ManualDataCase:
                 )
             for index, shape in enumerate(shape_values):
                 if shape is None:
-                    expected_shapes.append(None)
                     storage_shapes.append(None)
                     continue
-                logical_shape = tuple(int(dimension) for dimension in shape)
                 if dtypes is None:
-                    storage_shape = _saved_array_shape(shape)
+                    storage_shapes.append(_saved_array_shape(shape))
                 else:
-                    storage_shape = physical_array_spec(dtype_values[index], shape)[1]
-                expected_shape = logical_shape if not logical_shape and math.prod(storage_shape) == 1 else storage_shape
-                expected_shapes.append(expected_shape)
-                storage_shapes.append(storage_shape)
+                    storage_shapes.append(storage_layout(dtype_values[index], shape)[1])
         else:
-            expected_shapes = [_UNKNOWN_SHAPE] * len(self._golden_files)
-            storage_shapes = [_UNKNOWN_SHAPE] * len(self._golden_files)
+            storage_shapes = [None] * len(self.golden_files)
 
-        golden_count = len(self._golden_files)
-        output_count = len(expected_shapes)
+        golden_count = len(self.golden_files)
+        output_count = len(storage_shapes)
         if golden_count < output_count:
             raise ManualDataError(f"golden slot count {golden_count} < device output count {output_count}")
         if golden_count > output_count:
             # Different APIs of one operator may expose different output subsets,
             # so no positional shape mapping is valid when their counts differ.
-            expected_shapes = [_UNKNOWN_SHAPE] * golden_count
-            storage_shapes = [_UNKNOWN_SHAPE] * golden_count
-        return expected_shapes, storage_shapes
-
-    def _load_golden_entry(self, entry, expected_shape, storage_shape):
-        """单槽 golden 装载：None 标记 → 按 saved shape 段还原 → 装载。
-
-        saved shape（文件名自描述，与 payload 同源写出）是唯一权威，不与
-        reader 侧预期（声明/设备输出）做相等性复核；数据损坏由 _load_array
-        的字节数预检与 dtype 复核兜底。reader 侧 shape 仅作无 saved 段文件
-        （legacy/npy/pt）的 fallback。读侧声明 None（未声明/动态输出槽）不
-        压制真实 golden 文件——「可选输出抑制」只由 none 标记文件表达。
-        """
-        # A None golden suppresses comparison for an optional output. The
-        # device API may still materialize that output during replay.
-        if entry.dtype == _NONE_DTYPE:
-            return _load_none(entry, "golden")
-        logging.info("Reading manual golden file: %s ...", entry.path)
-        if entry.saved_shape is not None:
-            # logical scalar（"scalar" 段）的物理落地是 (1,) 连续数组
-            resolved_storage_shape = entry.saved_shape or (1,)
-        else:
-            resolved_storage_shape = storage_shape if storage_shape is not _UNKNOWN_SHAPE else None
-        if resolved_storage_shape is None and entry.file_format == "bin" and entry.dtype != _NONE_DTYPE:
-            # 读侧无 shape 映射（额外 golden 槽 / golden 数与 output 数不一致）
-            # 且文件名不带 shape 段 → 读一维流，交 custom compare 解释
-            logging.warning(
-                "golden[%s] bin payload %s loaded as a flat stream "
-                "(no reader-side shape mapping); custom compare hook interprets",
-                entry.index,
-                entry.path.name,
-            )
-        return _load_array(entry, resolved_storage_shape)
+            storage_shapes = [None] * golden_count
+        return storage_shapes
 
 
 def resolve_manual_data_directories(switches, required: bool = True) -> Tuple[pathlib.Path, ...]:
@@ -268,146 +241,8 @@ def resolve_manual_data_directories(switches, required: bool = True) -> Tuple[pa
     return tuple(result)
 
 
-def manual_data_store(switches) -> "ManualDataStore":
-    return ManualDataStore(resolve_manual_data_directories(switches))
-
-
-def manual_data_dump_store(testcase, switches) -> Optional["ManualDataStore"]:
-    """Dump-direction store: one output directory, old same-name case invalidated first.
-
-    Returns None when no directory is configured. The caller decides when the
-    write direction applies (--no-prof runs, or a full-flow run whose load
-    directories turned out empty).
-    """
-    directories = resolve_manual_data_directories(switches, required=False)
-    if not directories:
-        return None
-    if len(directories) > 1:
-        raise ManualDataError("manual data output requires exactly one --manual-data-dirs path")
-    store = ManualDataStore(directories)
-    store.invalidate_case(testcase.testcase_name)
-    return store
-
-
 def _all_roots_empty(directories) -> bool:
     return all(not (root.exists() and any(root.iterdir())) for root in directories)
-
-
-def load_manual_data_case(
-    testcase,
-    case_type: str,
-    switches,
-    notify_before_load: Optional[Callable[[], None]] = None,
-    require_goldens: bool = True,
-) -> Optional[ManualDataCase]:
-    """Load a manual-data case from the CLI directory list.
-
-    None (normal generation) when --no-prof runs (write direction regenerates),
-    no directory is given, or every configured directory is empty. A case miss
-    in a non-empty directory raises instead of silently regenerating.
-    """
-    if getattr(switches, "no_prof", False):
-        return None
-    directories = resolve_manual_data_directories(switches, required=False)
-    if not directories or _all_roots_empty(directories):
-        return None
-    # 回放 = 复用已存 golden，仅禁止 Disable：golden 生成侧的 SUPPRESSED 分支
-    # 覆盖不到 manual 装载路径（装载先于 Disable 判断），放行会让回放真值参与
-    # 比对、违背 SKIP 语义。XPU（三方回填真值，装载输入即可）/ NPU（已存真值
-    # 优先于设备重算）/ Promote（Enable 的现算变体）均放行。
-    if getattr(switches, "golden_mode", "Enable") == "Disable":
-        raise ManualDataError("manual-data loading cannot be combined with --golden-mode Disable")
-    if getattr(switches, "validate_only", False):
-        raise ManualDataError("manual-data loading cannot be combined with --validate")
-    if case_type == "kernel" and getattr(switches, "compile_only", False):
-        raise ManualDataError("manual-data loading cannot be combined with Kernel --compile-only")
-    if case_type == "e2e" and getattr(switches, "force_cpu", False):
-        raise ManualDataError("manual-data loading is the device stage and cannot use --cpu")
-    store = ManualDataStore(directories)
-    if notify_before_load is not None:
-        notify_before_load()
-    return store.load_case(testcase, case_type, require_goldens=require_goldens)
-
-
-def load_replay_goldens(manual_case, device_outputs=None, shapes=None, dtypes=None) -> Optional[List[Any]]:
-    """manual-case replay golden 装载唯一入口（四通路共用）。
-
-    manual_case 缺失或无 golden 槽返回 None（调用方按各自优先级落
-    Disable / CSV 手工 bin / 现算）；否则委托 ManualDataCase.load_goldens
-    （device_outputs 与 shapes 互斥，语义同其实现）。异常向调用方上抛——
-    装载失败语义（FAIL 行 / defer 兜底）由通路编排层决定。
-    """
-    if manual_case is None or not manual_case.has_goldens:
-        return None
-    if device_outputs is None:
-        return manual_case.load_goldens(shapes=shapes, dtypes=dtypes)
-    return manual_case.load_goldens(device_outputs=device_outputs)
-
-
-def snapshot_manual_values(values: Sequence[Any], label: str) -> List[Any]:
-    """Copy values before golden callbacks can mutate their backing storage."""
-    snapshots = []
-    for index, value in enumerate(values or ()):
-        if value is None:
-            snapshots.append(None)
-        else:
-            snapshots.append(_as_numpy(value, f"{label}[{index}]").copy())
-    return snapshots
-
-
-def dump_manual_dataset(store, testcase, case_type: str, inputs, goldens, switches, scalars=()) -> pathlib.Path:
-    """可回放数据集落盘统一入口（四通路共用）。
-
-    写判定：``--dump golden`` 开启且 golden 无占位串（SUPPRESSED/GOLDEN_FAILURE
-    等）时写 golden 位；input 恒写（no-prof 方向的前置校验由通路侧负责）。
-    失败抛 ManualDataError 类异常——MANUAL_DATA_PREPARE_FAILURE 收尾语义由
-    通路编排层决定。返回落盘后的 case 目录。
-    """
-    golden_values = tuple(goldens or ())
-    write_goldens = bool(getattr(switches.dump_config, "dump_golden", False)) and not any(
-        isinstance(g, str) for g in golden_values
-    )
-    return store.write_case(
-        testcase,
-        case_type,
-        inputs,
-        golden_values if write_goldens else (),
-        scalars=scalars,
-        file_format=switches.dump_config.file_format,
-        write_goldens=write_goldens,
-    )
-
-
-def case_directory_name(testcase_name: str) -> str:
-    """Return the on-disk directory name for a manual-data testcase.
-
-    Public because the simulator backend's ``case_writer`` reuses the same
-    naming so manual-data replay and simulation share one per-case directory.
-    """
-    safe = _SAFE_CASE_NAME.sub("_", testcase_name).strip("._") or "case"
-    if safe == testcase_name and len(safe) <= 120:
-        return safe
-    digest = hashlib.sha256(testcase_name.encode("utf-8")).hexdigest()[:12]
-    return f"{safe[:96]}-{digest}"
-
-
-def _encode_shape(shape) -> str:
-    """Encode the storage shape into the bin Golden filename segment.
-
-    Inverse of :func:`_decode_shape`: an empty shape encodes as ``scalar``,
-    dimensions are joined with ``x`` (``(2, 3)`` -> ``2x3``).
-    """
-    shape = tuple(int(dimension) for dimension in shape)
-    return "scalar" if not shape else "x".join(str(dimension) for dimension in shape)
-
-
-def _decode_shape(encoded_shape: Optional[str]) -> Optional[Tuple[int, ...]]:
-    """bin Golden 文件名 shape 段解析（``scalar`` -> ``()``，``2x3`` -> ``(2, 3)``）。"""
-    if encoded_shape is None:
-        return None
-    if encoded_shape == "scalar":
-        return ()
-    return tuple(int(dimension) for dimension in encoded_shape.split("x"))
 
 
 def _as_numpy(value, label: str) -> numpy.ndarray:
@@ -441,27 +276,6 @@ def _value_shape(value, label: str) -> Tuple[int, ...]:
         raise ManualDataError(f"cannot determine {label} shape: {type(value)!r}") from exc
 
 
-def _saved_array_shape(shape) -> Tuple[int, ...]:
-    result = tuple(int(dimension) for dimension in shape)
-    return result if result else (1,)
-
-
-def physical_array_spec(logical_dtype, logical_shape) -> Tuple[str, Tuple[int, ...]]:
-    """Return the dtype/shape of the numpy backing array saved by TTK."""
-    dtype_name = dtype_to_name(logical_dtype)
-    shape = tuple(int(dimension) for dimension in logical_shape)
-    if dtype_name == "complex32":
-        return "float16", shape + (2,)
-    if dtype_name in ("uint1", "int1"):
-        element_count = math.prod(shape) if shape else 1
-        return "uint8", ((element_count + 7) // 8,)
-    try:
-        resolved = resolve_numpy_dtypes((dtype_name,))[0]
-        return numpy.dtype(resolved).name, _saved_array_shape(shape)
-    except Exception as exc:
-        raise ManualDataError(f"cannot resolve manual-data dtype {dtype_name!r}") from exc
-
-
 def _input_specs(testcase, case_type: str) -> List[Optional[Tuple[str, Tuple[int, ...]]]]:
     # kernel/geir 共用 flat_input_* 槽协议（GeirTestcase 继承 TestcaseKernel）
     if case_type in ("kernel", "geir"):
@@ -481,9 +295,9 @@ def _input_specs(testcase, case_type: str) -> List[Optional[Tuple[str, Tuple[int
             # from a CPU input file.  A replay store may carry a None marker.
             result.append(None)
         elif case_type in ("kernel", "geir"):
-            result.append(physical_array_spec(dtypes[index], shape))
+            result.append(storage_layout(dtypes[index], shape))
         else:
-            result.append(physical_array_spec(dtypes[index], testcase.flat_storage_shape(index)))
+            result.append(storage_layout(dtypes[index], testcase.flat_storage_shape(index)))
     return result
 
 
@@ -521,14 +335,14 @@ def _scalar_specs(testcase, case_type: str) -> List[Optional[Tuple[str, Tuple[in
         if dtype is None:
             result.append(None)
         else:
-            result.append(physical_array_spec(dtype, ()))
+            result.append(storage_layout(dtype, ()))
     return result
 
 
 def _expected_golden_count(testcase, case_type: str) -> Optional[int]:
+    # golden 槽数由 testcase 声明（kernel/geir 的 shape-unknown 元数据槽等
+    # 读写侧差异在通路侧处理）；没声明时回退到 flat 输出列数
     if case_type in ("aclnn", "kernel", "geir"):
-        # 通路协议：两阶段 golden 槽数由 testcase 声明（kernel/geir 的 shape-unknown
-        # 元数据槽等读写侧差异封装在通路侧）；未声明协议则回退 flat 输出列数
         declared = getattr(testcase, "manual_data_golden_dtypes", None)
         if declared is not None:
             return len(declared)
@@ -536,23 +350,16 @@ def _expected_golden_count(testcase, case_type: str) -> Optional[int]:
     return None
 
 
-def _resolve_file_dtype(dtype_name: str):
-    try:
-        return resolve_numpy_dtypes((dtype_name,))[0]
-    except Exception as exc:
-        raise ManualDataError(f"cannot resolve dtype {dtype_name!r} from manual-data filename") from exc
+def _expected_write_golden_count(testcase, case_type: str) -> Optional[int]:
+    """写侧 golden 槽数核对基准。
 
-
-def _expected_bin_size(dtype_name: str, shape: Tuple[int, ...]) -> int:
-    count = math.prod(shape)
-    if is_4bit_dtype(dtype_name):
-        return (count + 1) // 2
-    try:
-        return count * numpy.dtype(_resolve_file_dtype(dtype_name)).itemsize
-    except Exception as exc:
-        if isinstance(exc, ManualDataError):
-            raise
-        raise ManualDataError(f"cannot determine byte size for dtype {dtype_name!r}") from exc
+    aclnn/kernel/geir 与回放侧同源；e2e 输出为执行派生，回放侧不校验
+    （额外 operator-specific golden 合法），仅写侧按 flat 输出声明核——
+    声明为空（纯副作用算子，golden 为被写参数回读）不核。
+    """
+    if case_type == "e2e":
+        return len(getattr(testcase, "flat_output_dtypes", ()) or ()) or None
+    return _expected_golden_count(testcase, case_type)
 
 
 def _same_bytes(left: pathlib.Path, right: pathlib.Path) -> bool:
@@ -563,43 +370,77 @@ def _same_bytes(left: pathlib.Path, right: pathlib.Path) -> bool:
     return filecmp.cmp(str(left), str(right), shallow=False)
 
 
-def _load_array(entry: _ManualDataFile, shape: Optional[Tuple[int, ...]]) -> numpy.ndarray:
-    if entry.dtype == _NONE_DTYPE:
-        raise ManualDataError(f"{entry.role}[{entry.index}] is None, not an array")
-    dtype = _resolve_file_dtype(entry.dtype)
-    try:
-        if entry.file_format == "bin" and shape is not None:
-            # bin 无 shape 元数据：按文件名协议（dtype 名 + 期望 shape）预检字节数
-            expected_size = _expected_bin_size(entry.dtype, shape)
-            if entry.path.stat().st_size != expected_size:
-                raise ManualDataError(f"{entry.path} byte size {entry.path.stat().st_size} != expected {expected_size}")
-        array = get_formatter(entry.file_format).load(entry.path, dtype, shape)
-    except DumpLoadError as exc:
-        raise ManualDataError(str(exc)) from None
-    except ManualDataError:
-        raise
-    except Exception as exc:
-        raise ManualDataError(f"cannot load {entry.path}: {exc}") from exc
-
-    if not array.flags.c_contiguous:
-        array = numpy.ascontiguousarray(array)
-    expected_dtype = numpy.dtype(dtype).name
-    if array.dtype.name != expected_dtype:
-        raise ManualDataError(f"{entry.path} dtype {array.dtype.name!r} != filename dtype {expected_dtype!r}")
-    if shape is not None and tuple(array.shape) != tuple(shape):
-        raise ManualDataError(f"{entry.path} shape {tuple(array.shape)} != expected {tuple(shape)}")
-    return array
-
-
-def _load_none(entry: _ManualDataFile, role: str):
-    if entry.dtype != _NONE_DTYPE:
-        raise ManualDataError(f"{role}[{entry.index}] should be None but file dtype is {entry.dtype!r}")
-    if entry.path.stat().st_size != 0:
-        raise ManualDataError(f"None marker must be empty: {entry.path}")
-
-
 class ManualDataStore:
     """Write one complete per-case dataset and replay it by testcase name."""
+
+    @classmethod
+    def dump_case(cls, testcase, switches) -> Optional[ManualDataCase]:
+        """Dump 方向数据集句柄：单输出目录，旧同名 case 先失效；未配目录返回 None。"""
+        directories = resolve_manual_data_directories(switches, required=False)
+        if not directories:
+            return None
+        if len(directories) > 1:
+            raise ManualDataError("manual data output requires exactly one --manual-data-dirs path")
+        store = cls(directories)
+        store.invalidate_case(testcase.testcase_name)
+        return ManualDataCase([], [], None, "", (), store=store, testcase_name=testcase.testcase_name)
+
+    @classmethod
+    def load(
+        cls,
+        testcase,
+        case_type: str,
+        switches,
+        notify_before_load: Optional[Callable[[], None]] = None,
+        require_goldens: bool = True,
+    ) -> Optional[ManualDataCase]:
+        """CLI 目录装载：no-prof / 未配目录 / 全空目录返回 None（正常生成）。"""
+        if getattr(switches, "no_prof", False):
+            return None
+        directories = resolve_manual_data_directories(switches, required=False)
+        if not directories or _all_roots_empty(directories):
+            return None
+        # 回放就是复用已存 golden，所以只禁止 Disable：Disable 的 SUPPRESSED 分支
+        # 在 manual 装载之后才判断，放行会让本应跳过的生成结果参与比对。
+        # XPU / NPU / Promote 放行。
+        if getattr(switches, "golden_mode", "Enable") == "Disable":
+            raise ManualDataError("manual-data loading cannot be combined with --golden-mode Disable")
+        if getattr(switches, "validate_only", False):
+            raise ManualDataError("manual-data loading cannot be combined with --validate")
+        if case_type == "kernel" and getattr(switches, "compile_only", False):
+            raise ManualDataError("manual-data loading cannot be combined with Kernel --compile-only")
+        if case_type == "e2e" and getattr(switches, "force_cpu", False):
+            raise ManualDataError("manual-data loading is the device stage and cannot use --cpu")
+        store = cls(directories)
+        if notify_before_load is not None:
+            notify_before_load()
+        return store.load_case(testcase, case_type, require_goldens=require_goldens)
+
+    def dump(self, testcase, case_type: str, inputs, goldens, switches, scalars=()) -> pathlib.Path:
+        """数据集落盘：判定 --dump golden 且无占位串后委托 write_case。
+
+        golden 槽数写侧核对（回放侧仅 aclnn/kernel/geir 兜底、e2e 须宽松，
+        错位真值只能在制备侧拦——写侧漏检会让回放比对静默错）。
+        """
+        golden_values = tuple(goldens or ())
+        write_goldens = bool(getattr(switches.dump_config, "dump_golden", False)) and not any(
+            isinstance(g, str) for g in golden_values
+        )
+        # 空 golden 合法（golden-XPU 首跑回落 input-only：真值设备后回填），
+        # 仅非空时核数——错位真值落盘会让回放比对静默错
+        if write_goldens and golden_values:
+            expected_goldens = _expected_write_golden_count(testcase, case_type)
+            if expected_goldens is not None and len(golden_values) != expected_goldens:
+                raise ManualDataError(f"golden slot count {len(golden_values)} != CSV {expected_goldens}")
+        return self.write_case(
+            testcase,
+            case_type,
+            inputs,
+            golden_values if write_goldens else (),
+            scalars=scalars,
+            file_format=switches.dump_config.file_format,
+            write_goldens=write_goldens,
+        )
 
     def __init__(self, roots: Iterable[Any]):
         if isinstance(roots, (str, os.PathLike)):
@@ -627,29 +468,14 @@ class ManualDataStore:
         file_format: str = "bin",
         write_goldens: bool = True,
     ) -> pathlib.Path:
-        self._validate_case_type(case_type)
-        if file_format not in SUPPORTED_MANUAL_DATA_FORMATS:
-            raise ManualDataError(
-                f"manual data format {file_format!r} is not supported; "
-                f"choose {', '.join(SUPPORTED_MANUAL_DATA_FORMATS)}"
-            )
-        if len(self.roots) != 1:
-            raise ManualDataError("manual data preparation requires exactly one output directory")
-
         all_input_values = list(inputs or ())
         scalar_values = list(scalars or ())
         golden_values = list(goldens or ()) if write_goldens else []
         full_input_specs = _input_specs(testcase, case_type)
         scalar_specs = _scalar_specs(testcase, case_type)
-        self._validate_value_count("input", all_input_values, len(full_input_specs))
         saved_input_indexes = _saved_input_indexes(testcase, case_type, len(full_input_specs))
         input_values = [all_input_values[index] for index in saved_input_indexes]
         input_specs = [full_input_specs[index] for index in saved_input_indexes]
-        self._validate_value_count("scalar", scalar_values, len(scalar_specs))
-        if write_goldens:
-            expected_goldens = _expected_golden_count(testcase, case_type)
-            if expected_goldens is not None:
-                self._validate_value_count("golden", golden_values, expected_goldens)
 
         root = self.roots[0]
         root.mkdir(parents=True, exist_ok=True)
@@ -657,10 +483,10 @@ class ManualDataStore:
         self._remove_existing(target)
         temporary = pathlib.Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=str(root)))
         try:
-            self._write_values(temporary, input_values, "input", file_format, input_specs)
-            self._write_values(temporary, scalar_values, "scalar", file_format, scalar_specs)
+            self.dump_inputs(temporary, input_values, input_specs, file_format)
+            self.dump_inputs(temporary, scalar_values, scalar_specs, file_format, role="scalar")
             if write_goldens:
-                self._write_values(temporary, golden_values, "golden", file_format)
+                self.dump_goldens(temporary, golden_values, file_format)
             self._scan_case(temporary)
             os.replace(str(temporary), str(target))
         except Exception:
@@ -671,16 +497,6 @@ class ManualDataStore:
         return target
 
     @staticmethod
-    def _validate_case_type(case_type: str):
-        if case_type not in ("e2e", "aclnn", "kernel", "geir"):
-            raise ManualDataError(f"unsupported manual data case type: {case_type}")
-
-    @staticmethod
-    def _validate_value_count(role: str, values: Sequence[Any], expected: int):
-        if len(values) != expected:
-            raise ManualDataError(f"{role} slot count {len(values)} != CSV {expected}")
-
-    @staticmethod
     def _remove_existing(path: pathlib.Path):
         # A symlink must be unlinked before directory handling can follow it.
         if path.is_symlink() or path.is_file():
@@ -688,27 +504,35 @@ class ManualDataStore:
         elif path.is_dir():
             shutil.rmtree(str(path))
 
-    def _write_values(
+    def dump_inputs(
         self,
         case_dir: pathlib.Path,
-        values: Sequence[Any],
-        role: str,
+        inputs: Sequence[Any],
+        specs: Sequence[Optional[Tuple[str, Tuple[int, ...]]]],
         file_format: str,
-        specs: Optional[Sequence[Optional[Tuple[str, Tuple[int, ...]]]]] = None,
-    ):
-        for index, value in enumerate(values):
-            expected = specs[index] if specs is not None else None
-            self._write_single(case_dir, index, value, expected, role, file_format, specs is not None)
+        role: str = "input",
+    ) -> None:
+        """数据集 input/scalar 槽写入（含 CSV 声明校验与 None 标记）。"""
+        for index, value in enumerate(inputs):
+            expected = specs[index]
+            if value is None:
+                if expected is not None:
+                    raise ManualDataError(f"{role}[{index}] is None but CSV declares a tensor")
+                self._write_single(case_dir, index, None, None, role, file_format)
+                continue
+            if expected is None:
+                raise ManualDataError(f"{role}[{index}] has data but CSV declares None")
+            self._write_single(case_dir, index, value, expected, role, file_format)
 
-    def _write_single(self, case_dir, index, value, expected, role, file_format, has_specs):
+    def dump_goldens(self, case_dir: pathlib.Path, goldens: Sequence[Any], file_format: str) -> None:
+        """数据集 golden 槽写入（含 shape 段与 None 标记）。"""
+        for index, value in enumerate(goldens):
+            self._write_single(case_dir, index, value, None, "golden", file_format)
+
+    def _write_single(self, case_dir, index, value, expected, role, file_format):
         if value is None:
-            if has_specs and expected is not None:
-                raise ManualDataError(f"{role}[{index}] is None but CSV declares a tensor")
-            path = case_dir / f"{role}_{index}_{_NONE_DTYPE}.{file_format}"
-            path.touch()
+            (case_dir / f"{role}_{index}_{_NONE_DTYPE}.{file_format}").touch()
             return
-        if has_specs and expected is None:
-            raise ManualDataError(f"{role}[{index}] has data but CSV declares None")
 
         label = f"{role}[{index}]"
         logical_shape = _value_shape(value, label)
@@ -724,56 +548,35 @@ class ManualDataStore:
                     f"{role}[{index}] shape {tuple(array.shape)} != CSV storage shape {expected_shape}"
                 )
 
-        dtype_name = array.dtype.name
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", dtype_name):
-            raise ManualDataError(f"dtype {dtype_name!r} cannot be encoded in a data filename")
+        dtype_name = _encode_dtype_name(array.dtype.name)
         stem = f"{role}_{index}_{dtype_name}"
         saved_shape = None
-        if role == "golden" and file_format == "bin":
-            # bin 无 shape 元数据：golden 文件名编码物理存储 shape（scalar 记
-            # "scalar"），回放按其自描述还原、与设备输出 shape 交叉核对
+        if role == "golden":
             saved_shape = logical_shape if not logical_shape and array.size == 1 else tuple(array.shape)
-            stem += f"_shape_{_encode_shape(saved_shape)}"
+            stem = _stem_with_bin_shape(stem, file_format, saved_shape)
         path = case_dir / f"{stem}.{file_format}"
-        self._write_array(path, array, stem, file_format)
-        restored = _load_array(
-            _ManualDataFile(role, index, dtype_name, file_format, path, saved_shape),
-            tuple(array.shape),
-        )
-        is_packed_4bit = file_format == "bin" and is_4bit_dtype(dtype_name)
-        if is_packed_4bit:
-            verified = numpy.array_equal(restored, array)
-        else:
-            verified = restored.tobytes(order="C") == array.tobytes(order="C")
-        if not verified:
-            raise ManualDataError(f"{path} did not pass write/read verification")
+        get_formatter(file_format).dump(array, str(path.parent), stem)
 
-    @staticmethod
-    def _write_array(path: pathlib.Path, array: numpy.ndarray, stem: str, file_format: str):
-        if file_format == "bin":
-            get_formatter(file_format).dump(array, str(path.parent), stem)
-            return
-        if file_format == "npy":
-            payload = array
-            if array.dtype.name in _CUSTOM_NUMPY_DTYPES:
-                payload = array.view(numpy.dtype(f"V{array.dtype.itemsize}"))
-            get_formatter(file_format).dump(payload, str(path.parent), stem)
-            return
+    def dump_xpu(self, testcase_name: str, third_parties: dict, file_format: str = "bin") -> None:
+        """三方输出槽位追加写入已有 case 目录（采集发生在 input/golden 之后）。
 
-        try:
-            import torch
+        命名与 --dump xpu 协议一致：xpu_{provider}_{idx}_{dtype}[_shape_{token}].{ext}，
+        bin 靠文件名 shape 段自描述；None/str 槽跳过但保留 idx；回放时
+        _scan_case 按文件名对齐读取。provider 名校验同 DataDumper.dump_xpu。
+        """
+        from .dumper import _validate_xpu_provider
 
-            try:
-                payload = numpy_to_torch_tensor(array)
-            except Exception:
-                raw = numpy.frombuffer(array.tobytes(order="C"), dtype=numpy.uint8).copy()
-                payload = {
-                    "ttk_raw_bytes": torch.from_numpy(raw),
-                    "ttk_shape": tuple(array.shape),
-                }
-            torch.save(payload, str(path))
-        except Exception as exc:
-            raise ManualDataError(f"cannot write pt file {path}: {exc}") from exc
+        case_dir = self._find_case(testcase_name)
+        for provider, outputs in (third_parties or {}).items():
+            _validate_xpu_provider(provider)
+            for idx, data in enumerate(outputs):
+                if data is None or isinstance(data, str):
+                    continue
+                label = f"xpu[{provider}][{idx}]"
+                array = _as_numpy(data, label)
+                dtype_name = _encode_dtype_name(array.dtype.name)
+                stem = _stem_with_bin_shape(f"xpu_{provider}_{idx}_{dtype_name}", file_format, tuple(array.shape))
+                get_formatter(file_format).dump(array, str(case_dir), stem)
 
     def _find_case(self, testcase_name: str) -> pathlib.Path:
         checked = []
@@ -814,14 +617,13 @@ class ManualDataStore:
                 if dtype_name != _NONE_DTYPE:
                     _resolve_file_dtype(dtype_name)
                 format_entries[key] = _ManualDataFile(
-                    "xpu", int(index_text), dtype_name, current_format, path, _decode_shape(shape_token), provider
+                    "xpu", int(index_text), dtype_name, current_format, path, decode_shape(shape_token), provider
                 )
                 continue
             if match is not None:
                 role, index_text, dtype_name, shape_token, current_format = match.groups()
-                # shape 段由写侧落盘（`_shape_`；存量数据为 `__shape_`）：解析后
-                # 供 load 侧自描述还原并与设备输出 shape 交叉核对；出现于其他位置
-                # 仍是协议违规
+                # shape 段由写侧写入文件名（`_shape_`，存量数据是 `__shape_`）：
+                # 解析后供 load 侧自描述还原；出现在其他位置仍是协议违规
                 if shape_token is not None and (
                     role != "golden" or current_format != "bin" or dtype_name == _NONE_DTYPE
                 ):
@@ -838,7 +640,7 @@ class ManualDataStore:
                     dtype_name,
                     current_format,
                     path,
-                    _decode_shape(shape_token),
+                    decode_shape(shape_token),
                 )
                 continue
             debug_input_match = _DEBUG_INPUT_FILE_NAME.fullmatch(path.name)
@@ -908,41 +710,7 @@ class ManualDataStore:
             raise ManualDataError(f"{role} slot count {len(files)} != CSV {expected_count}")
         return files
 
-    @staticmethod
-    def _load_expected_values(files, specs, role: str) -> List[Any]:
-        values = []
-        for entry, expected in zip(files, specs):
-            if expected is None:
-                values.append(_load_none(entry, role))
-                continue
-            expected_dtype, expected_shape = expected
-            if entry.dtype == _NONE_DTYPE:
-                raise ManualDataError(f"{role}[{entry.index}] is None but CSV declares a tensor")
-            logging.info("Reading manual %s file: %s ...", role, entry.path)
-            load_entry = entry
-            if entry.dtype != expected_dtype:
-                raw_bin_compatible = (
-                    entry.file_format == "bin"
-                    and "uint8" in (entry.dtype, expected_dtype)
-                    and ({entry.dtype, expected_dtype} - {"uint8"}) <= _RAW_UINT8_COMPATIBLE_DTYPES
-                )
-                if not raw_bin_compatible:
-                    raise ManualDataError(
-                        f"{role}[{entry.index}] filename dtype {entry.dtype!r} != CSV storage dtype {expected_dtype!r}"
-                    )
-                logging.info(
-                    "Reinterpreting raw bin %s[%s] from %s to %s",
-                    role,
-                    entry.index,
-                    entry.dtype,
-                    expected_dtype,
-                )
-                load_entry = replace(entry, dtype=expected_dtype)
-            values.append(_load_array(load_entry, expected_shape))
-        return values
-
     def load_case(self, testcase, case_type: str, require_goldens: bool = True) -> ManualDataCase:
-        self._validate_case_type(case_type)
         case_dir = self._find_case(testcase.testcase_name)
         entries, xpu_entries, file_format = self._scan_case(case_dir)
         full_input_specs = _input_specs(testcase, case_type)
@@ -965,10 +733,10 @@ class ManualDataStore:
 
         golden_count = _expected_golden_count(testcase, case_type)
         golden_files = self._ordered_files(entries, "golden", golden_count, required=require_goldens)
-        inputs = self._load_expected_values(input_files, input_specs, "input")
-        if compact_inputs and len(compact_input_specs) != len(full_input_specs):
+        inputs = self.load_inputs(input_files, input_specs, "input")
+        if compact_inputs:
             inputs = _restore_pure_outputs(testcase, inputs, full_input_specs, saved_input_indexes)
-        scalars = self._load_expected_values(scalar_files, scalar_specs, "scalar")
+        scalars = self.load_inputs(scalar_files, scalar_specs, "scalar")
         logging.info(
             "[%s] loaded manual data (%d input, %d scalar, %d golden, %d xpu) from %s",
             testcase.testcase_name,
@@ -978,4 +746,227 @@ class ManualDataStore:
             len(xpu_entries),
             case_dir,
         )
-        return ManualDataCase(inputs, scalars, case_dir, file_format, tuple(golden_files), xpu_entries)
+        return ManualDataCase(
+            inputs,
+            scalars,
+            case_dir,
+            file_format,
+            tuple(golden_files),
+            xpu_entries,
+            store=self,
+            testcase_name=testcase.testcase_name,
+        )
+
+    @staticmethod
+    def load_goldens(golden_files, storage_shapes):
+        """装载 golden 槽：saved shape 段优先，委托 DataLoader.load_goldens。"""
+        paths, dtypes, shapes = [], [], []
+        for entry, storage_shape in zip(golden_files, storage_shapes):
+            if entry.dtype == _NONE_DTYPE:
+                if entry.path.stat().st_size != 0:
+                    raise ManualDataError(f"None marker must be empty: {entry.path}")
+                paths.append(None)
+                dtypes.append(None)
+                shapes.append(None)
+                continue
+            resolved_storage_shape = (entry.saved_shape or (1,)) if entry.saved_shape is not None else storage_shape
+            if resolved_storage_shape is None and entry.file_format == "bin" and entry.dtype != _NONE_DTYPE:
+                logging.warning(
+                    "golden[%s] bin payload %s loaded as a flat stream "
+                    "(no reader-side shape mapping); custom compare hook interprets",
+                    entry.index,
+                    entry.path.name,
+                )
+            if entry.file_format == "bin" and resolved_storage_shape is not None:
+                expected_size = _expected_bin_size(entry.dtype, resolved_storage_shape)
+                if entry.path.stat().st_size != expected_size:
+                    raise ManualDataError(
+                        f"{entry.path} byte size {entry.path.stat().st_size} != expected {expected_size}"
+                    )
+            paths.append(entry.path)
+            dtypes.append(_resolve_file_dtype(entry.dtype))
+            shapes.append(resolved_storage_shape)
+        arrays = DataLoader.load_goldens(paths, dtypes, shapes)
+        for entry, array, resolved in zip(golden_files, arrays, shapes):
+            if array is None or entry.dtype == _NONE_DTYPE:
+                continue
+            _check_loaded(entry, array, entry.dtype, resolved)
+        return arrays
+
+    @staticmethod
+    def load_inputs(files, specs, role: str):
+        """装载 input/scalar 槽：校验 dtype 与 none 标记后委托 DataLoader.load_inputs。"""
+        paths, dtypes, shapes = [], [], []
+        for entry, expected in zip(files, specs):
+            if expected is None:
+                if entry.dtype != _NONE_DTYPE:
+                    raise ManualDataError(f"{role}[{entry.index}] should be None but file dtype is {entry.dtype!r}")
+                if entry.path.stat().st_size != 0:
+                    raise ManualDataError(f"None marker must be empty: {entry.path}")
+                paths.append(None)
+                dtypes.append(None)
+                shapes.append(None)
+                continue
+            expected_dtype, expected_shape = expected
+            if entry.dtype == _NONE_DTYPE:
+                raise ManualDataError(f"{role}[{entry.index}] is None but CSV declares a tensor")
+            load_dtype = entry.dtype
+            if entry.dtype != expected_dtype:
+                raw_bin_compatible = (
+                    entry.file_format == "bin"
+                    and "uint8" in (entry.dtype, expected_dtype)
+                    and ({entry.dtype, expected_dtype} - {"uint8"}) <= _RAW_UINT8_COMPATIBLE_DTYPES
+                )
+                if not raw_bin_compatible:
+                    raise ManualDataError(
+                        f"{role}[{entry.index}] filename dtype {entry.dtype!r} != CSV storage dtype {expected_dtype!r}"
+                    )
+                logging.info(
+                    "Reinterpreting raw bin %s[%s] from %s to %s", role, entry.index, entry.dtype, expected_dtype
+                )
+                load_dtype = expected_dtype
+            if entry.file_format == "bin" and expected_shape is not None:
+                expected_size = _expected_bin_size(load_dtype, expected_shape)
+                if entry.path.stat().st_size != expected_size:
+                    raise ManualDataError(
+                        f"{entry.path} byte size {entry.path.stat().st_size} != expected {expected_size}"
+                    )
+            paths.append(entry.path)
+            dtypes.append(_resolve_file_dtype(load_dtype))
+            shapes.append(expected_shape)
+        arrays = DataLoader.load_inputs(paths, dtypes, shapes)
+        for array, entry, expected in zip(arrays, files, specs):
+            if array is None or expected is None:
+                continue
+            expected_dtype, expected_shape = expected
+            _check_loaded(entry, array, expected_dtype, expected_shape)
+        return arrays
+
+    @staticmethod
+    def load_xpu(testcase, paths, saved_shapes, filename_dtypes, device_outputs=None) -> list:
+        """装载 xpu 槽位，委托 DataLoader.load_xpu。
+
+        shape/dtype 优先取声明槽（flat_output_*）；e2e 没有声明槽时用
+        device_outputs；都没有时用文件名 shape 段和 dtype。缺文件或 shape
+        未知的槽补 None。
+        """
+        shapes = getattr(testcase, "flat_output_shapes", None)
+        if shapes is None:
+            shapes = getattr(testcase, "flat_output_view_shapes", None)
+        if not shapes and device_outputs:
+            shapes = tuple(tuple(r.shape) if r is not None and hasattr(r, "shape") else None for r in device_outputs)
+        shapes = shapes or ()
+        dtypes = resolve_numpy_dtypes(getattr(testcase, "flat_output_dtypes", ()) or ())
+        if not dtypes and device_outputs:
+            dtypes = tuple(
+                getattr(r, "dtype", None) if r is not None and hasattr(r, "dtype") else None for r in device_outputs
+            )
+        name = getattr(testcase, "testcase_name", None) or getattr(testcase, "op_name", None)
+        files, load_dtypes, load_shapes, expected_storages = [], [], [], []
+        for idx in range(max(len(paths), len(shapes))):
+            fp = paths[idx] if idx < len(paths) else None
+            declared_shape = shapes[idx] if idx < len(shapes) else None
+            saved_shape = saved_shapes[idx] if idx < len(saved_shapes) else None
+            if fp is None or (declared_shape is None and saved_shape is None):
+                files.append(None)
+                load_dtypes.append(None)
+                load_shapes.append(None)
+                expected_storages.append(None)
+                continue
+            dtype = dtypes[idx] if idx < len(dtypes) else None
+            filename_dtype = filename_dtypes[idx] if idx < len(filename_dtypes) else None
+            if dtype is None and declared_shape is None:
+                dtype = filename_dtype
+            shape = declared_shape if declared_shape is not None else (saved_shape or (1,))
+            expected_storage = storage_layout(dtype, declared_shape)[1] if declared_shape is not None else shape
+            files.append(fp)
+            load_dtypes.append(dtype)
+            load_shapes.append(shape)
+            expected_storages.append(expected_storage)
+        arrays = DataLoader.load_xpu(files, load_dtypes, load_shapes)
+        for idx, (array, expected) in enumerate(zip(arrays, expected_storages)):
+            if array is None or expected is None:
+                continue
+            if tuple(array.shape) != expected:
+                raise DataLoadError(
+                    f"[{name}] manual XPU output[{idx}] shape {tuple(array.shape)} does not match "
+                    f"expected storage {expected}"
+                )
+        return arrays
+
+
+def snapshot_manual_values(values: Sequence[Any], label: str) -> List[Any]:
+    """Copy values before golden callbacks can mutate their backing storage."""
+    snapshots = []
+    for index, value in enumerate(values or ()):
+        if value is None:
+            snapshots.append(None)
+        else:
+            snapshots.append(_as_numpy(value, f"{label}[{index}]").copy())
+    return snapshots
+
+
+# ══ --dump xpu 三方输出装载/探测 ══
+
+# manual 装载在结果里的伪 provider 名，与远端结果 dict 形态一致，屏显/报告不用改
+MANUAL_XPU_PROVIDER = "manual_binary"
+
+
+def manual_xpu_results() -> dict:
+    """manual 装载的 xpu_results 伪条目（status=PASS，api 标记来源）。"""
+    return {MANUAL_XPU_PROVIDER: {"status": "PASS", "api": "manual_xpu_binaries"}}
+
+
+def has_manual_xpu_source(testcase, manual_case=None) -> bool:
+    """是否声明了 manual 三方输出源（不读文件）。
+
+    与 load_third_parties 的双来源一致：CSV ``flat_manual_xpu_binaries``
+    非空，或 manual-data case 里有 xpu 槽位文件。
+    """
+    if getattr(testcase, "flat_manual_xpu_binaries", None):
+        return True
+    return manual_case is not None and bool(getattr(manual_case, "has_third_parties", False))
+
+
+def _check_loaded(entry, array, expected_dtype_name, expected_shape):
+    """读后复核：dtype 与 shape 要和文件名一致。"""
+    expected_dtype = numpy.dtype(_resolve_file_dtype(expected_dtype_name)).name
+    if array.dtype.name != expected_dtype:
+        raise ManualDataError(f"{entry.path} dtype {array.dtype.name!r} != filename dtype {expected_dtype_name!r}")
+    if expected_shape is not None and tuple(array.shape) != tuple(expected_shape):
+        raise ManualDataError(f"{entry.path} shape {tuple(array.shape)} != expected {tuple(expected_shape)}")
+
+
+def _encode_dtype_name(dtype_name: str) -> str:
+    """校验 dtype 名可以放进文件名（回放按文件名解析）。"""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", dtype_name):
+        raise ManualDataError(f"dtype {dtype_name!r} cannot be encoded in a data filename")
+    return dtype_name
+
+
+def _stem_with_bin_shape(stem: str, file_format: str, shape) -> str:
+    """bin 不带元数据，把存储 shape 写进文件名。"""
+    if file_format == "bin":
+        stem += f"_shape_{encode_shape(shape)}"
+    return stem
+
+
+def load_csv_slots(files, dtypes, shapes) -> list:
+    """逐槽装载 CSV 手工文件：三个列表同序，缺文件的槽补 None；shape 为 None
+    的槽不按声明还原（bin 读回一维流，交调用方解释）。"""
+    return DataLoader.load_xpu(files, dtypes, shapes)
+
+
+def load_third_parties(testcase, manual_case=None, device_outputs=None) -> Optional[list]:
+    """装载 manual 三方输出（--dump xpu 的对侧），两个来源：
+
+    ① CSV ``manual_xpu_binaries`` 显式路径（kernel/aclnn/geir）；
+    ② manual-data case 目录槽位，走 ManualDataCase.load_xpu。
+    都没有时返回 None，调用方走远端采集。
+    """
+    paths = getattr(testcase, "flat_manual_xpu_binaries", None)
+    if paths:
+        return ManualDataStore.load_xpu(testcase, paths, (), (), device_outputs)
+    if manual_case is not None and getattr(manual_case, "has_third_parties", False):
+        return manual_case.load_xpu(testcase, device_outputs)
+    return None

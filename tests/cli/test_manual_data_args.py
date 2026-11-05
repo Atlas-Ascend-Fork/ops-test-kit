@@ -241,6 +241,30 @@ def test_e2e_replay_rejects_cpu_backend(tmp_path):
         configure_manual_data(switches, _args(manual_data_dirs=[str(tmp_path)]), "e2e")
 
 
+@pytest.mark.parametrize("golden_mode", ["Enable", "Promote", "XPU", "NPU"])
+def test_replay_accepts_non_disable_golden_modes(tmp_path, golden_mode):
+    """load 方向只拒绝 Disable（对齐 worker 侧 ManualDataStore.load）：
+    Promote/XPU/NPU 可组合——回放装载已存 golden 优先，无 stored 才现算/回填。"""
+    switches = SWITCHES()
+    switches.dump_config = DumpConfig()
+    switches.golden_mode = golden_mode
+
+    configure_manual_data(switches, _args(manual_data_dirs=[str(tmp_path)]), "aclnn")
+
+    assert switches.no_prof is False
+    assert switches.manual_data_dirs == (str(tmp_path.resolve()),)
+
+
+def test_replay_rejects_disable_golden_mode(tmp_path):
+    """Disable 的 SKIP 语义与回放真值参与比对冲突，load 方向拒绝。"""
+    switches = SWITCHES()
+    switches.dump_config = DumpConfig()
+    switches.golden_mode = "Disable"
+
+    with pytest.raises(ValueError, match="--golden-mode Disable"):
+        configure_manual_data(switches, _args(manual_data_dirs=[str(tmp_path)]), "aclnn")
+
+
 def test_geir_no_prof_accepts_xpu_golden_mode():
     """geir --no-prof + golden-mode XPU 对齐 kernel：合法组合，占位 golden 过滤后仅落 input。"""
     switches = _prepare_switches()

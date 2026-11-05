@@ -28,7 +28,3 @@ class XpuTorchBackend(TorchBackend):
         import torch
 
         getattr(torch, self.torch_lib).set_device(dev_id)
-
-    def third_party_provider(self, framework: str) -> str:
-        """本后端为三方采集方：产物按三方槽位（xpu_{framework}_*）落盘。"""
-        return framework or "torch"

@@ -18,9 +18,11 @@ TestSpec 是算子测试规范（Golden / 自定义输入 / 三方标杆 / 精�
 ```python
 __spec__ = {"abs": "AbsTestSpec"}
 
+
 class AbsTestSpec:
     def golden(x, **kwargs):
         import torch
+
         return [torch.abs(torch.from_numpy(x)).numpy()]
 
     tolerance = {"float32": {"standard": "binary_equal"}}
@@ -100,14 +102,18 @@ class GemmTestSpec:
 class AddImpl:
     def __init__(self, x):
         self.x = x
+
     def __call__(self, x, y):
         return [self.x + x + y]
 
-class EyeImpl:                        # third_party 实现类
-    def __init__(self, n, device):    # 无输入 tensor 时 device 由框架注入
+
+class EyeImpl:  # third_party 实现类
+    def __init__(self, n, device):  # 无输入 tensor 时 device 由框架注入
         self.n, self.device = n, device
+
     def __call__(self):
         import torch
+
         return [torch.eye(self.n, device=self.device)]
 ```
 
@@ -169,9 +175,11 @@ tolerance = {
 ```python
 import torch.nn as nn
 
+
 class SoftmaxGraph(nn.Module):
     def forward(self, x):
         return torch.softmax(x, dim=-1)
+
 
 class TorchSoftmaxTestSpec:
     torch_graph = SoftmaxGraph
@@ -193,7 +201,7 @@ NPU 执行前（数据拷入设备后）的设备侧钩子：位置参数为设�
 已是 PascalCase 的算子名或想要自定义类名时，用 `__spec__` 显式注册：
 
 ```python
-__spec__ = {"abs": "AbsTestSpec"}   # 值为类名字符串
+__spec__ = {"abs": "AbsTestSpec"}  # 值为类名字符串
 ```
 
 文件规则：spec 文件名不能以 `_` 开头（否则被跳过）；`__spec__` 建议写在文件顶部。

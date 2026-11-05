@@ -29,6 +29,7 @@ def _no_cgroup(monkeypatch):
     """默认关掉 cgroup 感知——现有用例只 mock 宿主快照，保持封闭。"""
     monkeypatch.setattr(mg, "cgroup_mem_limit", lambda: None)
     monkeypatch.setattr(mg, "cgroup_mem_current", lambda: None)
+    monkeypatch.setattr(mg, "cgroup_file_cache", lambda: 0)
 
 
 def _vm(total, available):

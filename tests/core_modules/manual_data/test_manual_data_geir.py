@@ -15,7 +15,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from ttk.core_modules.common.dump import DumpConfig, ManualDataStore
+from ttk.core_modules.common.dump import DumpConfig
+from ttk.core_modules.common.dump.manual_data import ManualDataStore
 from ttk.core_modules.geir import worker as geir_worker
 from ttk.core_modules.geir.execute import GraphExecResult
 from ttk.core_modules.geir.testcase import GeirTestcase
@@ -137,7 +138,8 @@ def test_geir_no_prof_dumps_and_skips_compile_execute(monkeypatch, tmp_path):
 
 
 def test_geir_no_prof_xpu_golden_writes_input_only(monkeypatch, tmp_path):
-    """golden-mode XPU + --no-prof 对齐 kernel：占位 golden 被过滤，仅落 input。"""
+    """golden-mode XPU + --no-prof：占位 golden 被过滤、仅落 input；三方采集照常
+    （远端回包升格 golden，但数据集写入已发生在采集前，不回补 golden 槽位）。"""
     case = _geir_case("geir_no_prof_xpu")
     switches = _switches(tmp_path, no_prof=True, manual_dirs=[tmp_path])
     switches.dump_config.dump_input = True
@@ -145,6 +147,14 @@ def test_geir_no_prof_xpu_golden_writes_input_only(monkeypatch, tmp_path):
     switches.golden_mode = "XPU"
     original_input = np.array([1.0, 2.0], np.float32)
     _patch_common(monkeypatch, switches, tmp_path)
+
+    from ttk.core_modules.common.xpu import XpuDispatch
+
+    monkeypatch.setattr(
+        geir_worker,
+        "_dispatch_xpu",
+        lambda *a, **k: XpuDispatch.ready(([original_input], {}, "xpu")),
+    )
 
     def generate_input(context, stored_inputs=None):
         context.input_arrays = (original_input, None)

@@ -127,9 +127,9 @@ def run_tf_eager_rounds(
     result = None
     md5_list = []
     deterministic = ctx.deterministic_level > 0
-    for _ in range(ctx.run_count):
+    for i in range(ctx.run_count):
         clear_device_state(ctx.switches)
-        mutable_loader(0)
+        mutable_loader(i)
         with ctx.backend.device_scope(ctx.dev_id):
             r = adapter.eager_call(resolved, args, kwargs, ctx.is_tensor_method)
         result = r

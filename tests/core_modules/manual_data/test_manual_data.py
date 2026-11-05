@@ -20,19 +20,19 @@ from ttk.core_modules.aclnn.input_generate import InputGenerator
 from ttk.core_modules.aclnn.testcase import TestcaseAclnn
 from ttk.core_modules.common.dump import (
     ManualDataError,
-    ManualDataStore,
     dump_manual_dataset,
-    load_manual_data_case,
-    load_replay_goldens,
-    manual_data_dump_store,
+    load_manual_goldens,
+    manual_data_dump_case,
+    resolve_manual_case,
 )
 from ttk.core_modules.common.dump.manual_data import (
     ManualDataCase,
-    _decode_shape,
-    _encode_shape,
+    ManualDataStore,
     _ManualDataFile,
+    decode_shape,
+    encode_shape,
 )
-from ttk.core_modules.common.xpu import dump_xpu_slot_files, load_manual_third_parties
+from ttk.core_modules.common.xpu import dump_xpu_slot_files, load_third_parties
 from ttk.core_modules.framework_api.input_generate import generate_inputs
 from ttk.core_modules.framework_api.testcase import TestcaseE2e
 from ttk.utilities import resolve_numpy_dtypes
@@ -876,9 +876,13 @@ def test_bin_golden_filename_shape_matches_device_output(tmp_path):
     np.testing.assert_array_equal(restored[0], golden)
 
 
-def test_bin_golden_same_numel_wrong_shape_legacy_suffix_loads_by_filename(tmp_path):
-    """存量数据（文件名带 __shape_ 段）同 numel 但设备输出 shape 不符：文件名 shape 即权威，按存档还原。"""
-    case = _e2e_case("same_numel_wrong_shape_legacy")
+@pytest.mark.parametrize("legacy", [False, True])
+def test_bin_golden_same_numel_wrong_shape_loads_by_filename(tmp_path, legacy):
+    """同 numel 但设备输出 shape 不符：文件名 shape 段即权威，按存档还原。
+
+    legacy=True 覆盖存量 __shape_ 双下划线后缀，False 覆盖新 _shape_ 协议。
+    """
+    case = _e2e_case("same_numel_wrong_shape_" + ("legacy" if legacy else "new"))
     store = ManualDataStore(tmp_path)
     case_dir = store.write_case(
         case,
@@ -886,25 +890,8 @@ def test_bin_golden_same_numel_wrong_shape_legacy_suffix_loads_by_filename(tmp_p
         [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
         [np.arange(6, dtype=np.float32).reshape(2, 3)],
     )
-    (case_dir / "golden_0_float32_shape_2x3.bin").rename(case_dir / "golden_0_float32__shape_2x3.bin")
-
-    loaded = store.load_case(case, "e2e")
-    restored = loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
-
-    assert restored[0].shape == (2, 3)
-    np.testing.assert_array_equal(restored[0], np.arange(6, dtype=np.float32).reshape(2, 3))
-
-
-def test_bin_golden_same_numel_wrong_shape_new_suffix_loads_by_filename(tmp_path):
-    """新协议（_shape_ 段）同 numel 但设备输出 shape 不符：文件名 shape 即权威，按存档还原。"""
-    case = _e2e_case("same_numel_wrong_shape_new")
-    store = ManualDataStore(tmp_path)
-    store.write_case(
-        case,
-        "e2e",
-        [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
-        [np.arange(6, dtype=np.float32).reshape(2, 3)],
-    )
+    if legacy:
+        (case_dir / "golden_0_float32_shape_2x3.bin").rename(case_dir / "golden_0_float32__shape_2x3.bin")
 
     loaded = store.load_case(case, "e2e")
     restored = loaded.load_goldens(device_outputs=[np.zeros((3, 2), np.float32)])
@@ -1010,8 +997,8 @@ def test_bin_golden_restores_scalar_and_zero_dimensions_by_filename_shape(tmp_pa
 )
 def test_shape_token_encode_decode_round_trip(shape, token):
     """shape 段编解码互逆：scalar/0 维/多维。"""
-    assert _encode_shape(shape) == token
-    assert _decode_shape(token) == shape
+    assert encode_shape(shape) == token
+    assert decode_shape(token) == shape
 
 
 def test_shape_token_decode_accepts_legacy_double_underscore_files(tmp_path):
@@ -1034,18 +1021,18 @@ def test_shape_token_decode_accepts_legacy_double_underscore_files(tmp_path):
 
 
 class TestCommonLoadDumpEntrances:
-    """公共入口 load_replay_goldens / dump_manual_dataset 的单元语义。"""
+    """公共入口 load_manual_goldens / dump_manual_dataset 的单元语义。"""
 
     @staticmethod
     def _switches(dump_golden=True):
         return SimpleNamespace(dump_config=SimpleNamespace(dump_golden=dump_golden, file_format="bin"))
 
-    def test_load_replay_goldens_none_without_case_or_goldens(self):
-        assert load_replay_goldens(None) is None
+    def test_load_manual_goldens_none_without_case_or_goldens(self):
+        assert load_manual_goldens(None) is None
         empty = ManualDataCase([], [], None, "bin", ())
-        assert load_replay_goldens(empty) is None
+        assert load_manual_goldens(empty) is None
 
-    def test_load_replay_goldens_passes_through_to_case(self, tmp_path):
+    def test_load_manual_goldens_passes_through_to_case(self, tmp_path):
         case = _e2e_case("replay_common")
         store = ManualDataStore(tmp_path)
         golden = np.arange(6, dtype=np.float32).reshape(2, 3)
@@ -1057,7 +1044,7 @@ class TestCommonLoadDumpEntrances:
         )
 
         loaded = store.load_case(case, "e2e")
-        goldens = load_replay_goldens(loaded, shapes=((2, 3),), dtypes=("float32",))
+        goldens = load_manual_goldens(loaded, shapes=((2, 3),), dtypes=("float32",))
 
         assert goldens is not None
         assert goldens[0].shape == (2, 3)
@@ -1066,8 +1053,9 @@ class TestCommonLoadDumpEntrances:
     def test_dump_manual_dataset_skips_placeholder_goldens(self, tmp_path):
         case = _e2e_case("placeholder_dump")
         store = ManualDataStore(tmp_path)
+        dump_view = ManualDataCase([], [], None, "", (), store=store, testcase_name=case.testcase_name)
         case_dir = dump_manual_dataset(
-            store,
+            dump_view,
             case,
             "e2e",
             [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
@@ -1080,8 +1068,9 @@ class TestCommonLoadDumpEntrances:
     def test_dump_manual_dataset_writes_golden_with_shape_segment(self, tmp_path):
         case = _e2e_case("common_dump")
         store = ManualDataStore(tmp_path)
+        dump_view = ManualDataCase([], [], None, "", (), store=store, testcase_name=case.testcase_name)
         case_dir = dump_manual_dataset(
-            store,
+            dump_view,
             case,
             "e2e",
             [np.zeros((3, 3), np.float32), np.zeros((2, 2), np.float32)],
@@ -1166,10 +1155,10 @@ def test_dump_and_load_helpers_share_store_policy(tmp_path):
     dump_case = _e2e_case("dump_helper")
     dump_switches = SimpleNamespace(no_prof=True, manual_data_dirs=(str(tmp_path),))
 
-    dump_store = manual_data_dump_store(dump_case, dump_switches)
+    dump_store = manual_data_dump_case(dump_case, dump_switches)
 
-    assert isinstance(dump_store, ManualDataStore)
-    assert not dump_store.case_dir(dump_case.testcase_name).exists()
+    assert isinstance(dump_store, ManualDataCase)
+    assert not dump_store.store.case_dir(dump_case.testcase_name).exists()
 
     load_case = _e2e_case("load_helper")
     inputs = [np.ones((3, 3), np.float32), np.zeros((2, 2), np.float32)]
@@ -1183,7 +1172,7 @@ def test_dump_and_load_helpers_share_store_policy(tmp_path):
     )
     loaded_status = []
 
-    manual_case = load_manual_data_case(
+    manual_case = resolve_manual_case(
         load_case, "e2e", load_switches, notify_before_load=lambda: loaded_status.append(True)
     )
 
@@ -1199,15 +1188,14 @@ def test_load_returns_none_for_no_prof_empty_and_missing_dirs(tmp_path):
     base = {"golden_mode": "Enable", "validate_only": False, "force_cpu": False}
 
     assert (
-        load_manual_data_case(case, "e2e", SimpleNamespace(no_prof=True, manual_data_dirs=(str(tmp_path),), **base))
+        resolve_manual_case(case, "e2e", SimpleNamespace(no_prof=True, manual_data_dirs=(str(tmp_path),), **base))
         is None
     )
-    assert load_manual_data_case(case, "e2e", SimpleNamespace(no_prof=False, manual_data_dirs=(), **base)) is None
+    assert resolve_manual_case(case, "e2e", SimpleNamespace(no_prof=False, manual_data_dirs=(), **base)) is None
     empty = tmp_path / "empty_root"
     empty.mkdir()
     assert (
-        load_manual_data_case(case, "e2e", SimpleNamespace(no_prof=False, manual_data_dirs=(str(empty),), **base))
-        is None
+        resolve_manual_case(case, "e2e", SimpleNamespace(no_prof=False, manual_data_dirs=(str(empty),), **base)) is None
     )
 
 
@@ -1226,7 +1214,7 @@ def test_load_raises_when_case_missing_in_nonempty_directory(tmp_path):
     )
 
     with pytest.raises(ManualDataError, match="was not found"):
-        load_manual_data_case(case, "e2e", switches)
+        resolve_manual_case(case, "e2e", switches)
 
 
 def test_e2e_restore_rebuilds_view_without_running_input_plugin():
@@ -1399,7 +1387,7 @@ class TestThirdPartyPaths:
     @staticmethod
     def _case(xpu_entries):
         return ManualDataCase(
-            inputs=[], scalars=[], case_dir=None, file_format="bin", _golden_files=(), _xpu_files=tuple(xpu_entries)
+            inputs=[], scalars=[], case_dir=None, file_format="bin", golden_files=(), xpu_files=tuple(xpu_entries)
         )
 
     @staticmethod
@@ -1428,7 +1416,7 @@ class TestThirdPartyPaths:
 
 
 class TestDumpLoadClosedLoop:
-    """DataDumper.dump_xpu 落盘 → _scan_case 识别 → load_manual_third_parties 装载。"""
+    """DataDumper.dump_xpu 落盘 → _scan_case 识别 → load_third_parties 装载。"""
 
     def test_full_roundtrip(self, tmp_path, monkeypatch):
         monkeypatch.setenv("NPU_DUMP_PATH", str(tmp_path))
@@ -1452,7 +1440,7 @@ class TestDumpLoadClosedLoop:
             flat_output_shapes=((8,),),
             flat_output_dtypes=("float32",),
         )
-        arrays = load_manual_third_parties(consumer, manual_case)
+        arrays = load_third_parties(consumer, manual_case)
 
         np.testing.assert_array_equal(arrays[0], arr)
 
@@ -1484,7 +1472,7 @@ class TestDumpLoadClosedLoop:
         consumer.flat_output_dtypes = None
         consumer.flat_output_shapes = None
         consumer.flat_output_view_shapes = None
-        arrays = load_manual_third_parties(consumer, manual_case)
+        arrays = load_third_parties(consumer, manual_case)
 
         assert arrays is not None
         assert arrays[0].shape == (2, 3)
@@ -1579,4 +1567,4 @@ class TestPathwayShortCircuitViaManualCase:
             flat_output_shapes=((8,),),
             flat_output_dtypes=("float32",),
         )
-        assert load_manual_third_parties(consumer, manual_case) is None  # 回退远端
+        assert load_third_parties(consumer, manual_case) is None  # 回退远端

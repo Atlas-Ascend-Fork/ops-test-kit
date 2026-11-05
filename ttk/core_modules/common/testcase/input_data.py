@@ -36,8 +36,9 @@ import random
 
 import numpy
 
+from ttk.core_modules.common.dump.loader import DataLoader
+
 from ....utilities import RandomData, constant_array, get, resolve_numpy_dtypes, shape_stride
-from ....utilities.file_utils import load_array
 from .batch import has_complete_batch_relation
 from .batch_replace import apply_slot_batch_replacement
 
@@ -110,7 +111,7 @@ def generate_np_storages(testcase, switches, zero_init_apis=(), overrides=None):
             if view_shape is None or -1 in view_shape:
                 raise RuntimeError(f"manual tensor file declared for dynamic/unknown-shape slot {idx}: {fp}")
             s_shape = testcase.flat_storage_shape(idx) or view_shape
-            storages.append(load_array(fp, get(dtypes, idx), s_shape))
+            storages.append(DataLoader.read_array(fp, get(dtypes, idx), s_shape))
             actual_data_ranges.append((None, None))
             continue
         if view_shape is None or -1 in view_shape:

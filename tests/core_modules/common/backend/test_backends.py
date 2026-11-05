@@ -49,10 +49,8 @@ def _torch_import_lines(path, top_level_only=False):
 
 
 def test_backend_abc_has_new_methods():
-    """Backend ABC 必须包含 device_name/device_type/has_device/is_npu/third_party_provider 方法。"""
-    assert all(
-        hasattr(Backend, m) for m in ["device_name", "device_type", "has_device", "is_npu", "third_party_provider"]
-    )
+    """Backend ABC 必须包含 device_name/device_type/has_device/is_npu 方法。"""
+    assert all(hasattr(Backend, m) for m in ["device_name", "device_type", "has_device", "is_npu"])
 
 
 def test_backend_base_is_framework_neutral():

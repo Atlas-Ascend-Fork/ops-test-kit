@@ -23,7 +23,7 @@ def add_device_args(parser):
         help="Deterministic level: 0=off (default), 1=deterministic "
         "compute (MD5 consistent across NPU runs), "
         "2=strong consistency, "
-        "3=deterministic execution; complete batch fields enable phase-two slice compare",
+        "3=batch consistency; complete batch fields enable slice compare",
     )
     group.add_argument(
         "--dev",

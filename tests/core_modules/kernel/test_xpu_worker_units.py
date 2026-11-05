@@ -41,28 +41,28 @@ def test_xpu_inputs_falls_back_to_input_arrays():
 
 
 def test_xpu_mode_bitwise_or():
-    """xpu_mode = xpu_perf(PERF) | need_data(DATA)；全 False 返回 0。"""
+    """xpu_mode = xpu_perf(PERF) | need_xpu_data(DATA)；全 False 返回 0。"""
     from ttk.core_modules.common.xpu import XPU_DATA as DATA
     from ttk.core_modules.common.xpu import XPU_PERF as PERF
     from ttk.core_modules.common.xpu import xpu_mode
 
     sw_off = SWITCHES()
     sw_off.xpu_perf = False
-    assert xpu_mode(sw_off, need_data=False) == 0
-    assert xpu_mode(sw_off, need_data=True) == DATA
+    assert xpu_mode(sw_off, need_xpu_data=False) == 0
+    assert xpu_mode(sw_off, need_xpu_data=True) == DATA
 
     sw_on = SWITCHES()
     sw_on.xpu_perf = True
-    assert xpu_mode(sw_on, need_data=False) == PERF
-    assert xpu_mode(sw_on, need_data=True) == (DATA | PERF)
+    assert xpu_mode(sw_on, need_xpu_data=False) == PERF
+    assert xpu_mode(sw_on, need_xpu_data=True) == (DATA | PERF)
 
     sw_dump = SWITCHES()
     sw_dump.dump_config = DumpConfig()
     sw_dump.dump_config.dump_xpu = True
-    assert xpu_mode(sw_dump, need_data=False) == DATA
+    assert xpu_mode(sw_dump, need_xpu_data=False) == DATA
 
     sw_both = SWITCHES()
     sw_both.xpu_perf = True
     sw_both.dump_config = DumpConfig()
     sw_both.dump_config.dump_xpu = True
-    assert xpu_mode(sw_both, need_data=False) == (DATA | PERF)
+    assert xpu_mode(sw_both, need_xpu_data=False) == (DATA | PERF)

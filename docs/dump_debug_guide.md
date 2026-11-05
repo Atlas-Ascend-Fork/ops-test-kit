@@ -111,7 +111,7 @@ dump/add_01/
 └── golden_0_float16.npy           # golden（一般无 segment）
 ```
 
-XPU 槽位文件同样落盘在 `dump/{case}/`（segment 位为 provider），供 `--manual-data-dirs` 回放。
+XPU 槽位文件同样落盘在 `dump/{case}/`（segment 位为 provider），供 `--manual-data-dirs` 回放；`--no-prof`（dump 方向）下 xpu 槽位直接进 manual-data 数据集目录，与 input/golden 同目录共存。
 
 ### 3. 从调试 dump 目录读回
 
@@ -170,8 +170,9 @@ python3 -m ttk kernel -i cases.csv -t add_01 --dump full --dump-format npy --see
 
 | 约束 | 说明 |
 |------|------|
-| `--manual-data-dirs`（不带 `--no-prof`） | load 方向；禁止 `--validate`，要求 `--golden-mode Enable`，E2E 禁止 `--backend cpu`，Kernel 禁止 `--compile-only` |
+| `--manual-data-dirs`（不带 `--no-prof`） | load 方向；禁止 `--validate` 与 `--golden-mode Disable`（Promote/XPU/NPU 可用：回放装载已存 golden 优先），E2E 禁止 `--backend cpu`，Kernel 禁止 `--compile-only` |
 | `--no-prof --dump in[,golden]` | dump 方向；要求 `--dump-format` 为 bin/npy/pt；Kernel 需精确 `--dump in,golden` |
+| `--no-prof --dump in[,golden],xpu` | 跳过 device 执行、远端三方采集照常：`xpu` 位触发远端采集，三方槽位与 input/golden 同落 manual-data 数据集（四通路） |
 | `--dump xpu` | 需远端 XPU 配置，未配置时自动跳过不报错 |
 
 所有通路（Kernel / ACLNN / GEIR / E2E）均支持 `--dump` 与 `--dump-on-fail`；`--dump xpu` 各通路可用（E2E 的 onnx 除外：无远端分发通道，告警后跳过）。

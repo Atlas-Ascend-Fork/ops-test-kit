@@ -125,8 +125,10 @@ def test_golden_generated_before_execution(monkeypatch):
     monkeypatch.setattr(
         aclnn_worker,
         "execute_on_device",
-        lambda *_: order.append("execute")
-        or ApiProfilingResult(True, output_bytes=[np.zeros(2, np.float32).tobytes()], output_view_shapes=[(2,)]),
+        lambda *_: (
+            order.append("execute")
+            or ApiProfilingResult(True, output_bytes=[np.zeros(2, np.float32).tobytes()], output_view_shapes=[(2,)])
+        ),
     )
 
     result = aclnn_worker.run(case, {}, {}, 0)

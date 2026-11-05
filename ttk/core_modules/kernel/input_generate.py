@@ -12,7 +12,6 @@ Input generation method for Universal testcases
 """
 
 # Standard Packages
-import logging
 
 import numpy
 
@@ -22,7 +21,6 @@ from ...utilities import (
     RandomData,
     deep_flatten,
     get,
-    load_array,
     nest_by_distribution,
     promote_scalar_shapes,
     resolve_numpy_dtypes,
@@ -44,14 +42,9 @@ def _use_manual_input(context: TestcaseKernel):
     flat_shapes = promote_scalar_shapes(context.flat_input_shapes)
     flat_dtypes = resolve_numpy_dtypes(context.flat_input_dtypes)
 
-    input_arrays = []
-    for idx, fp in enumerate(flat_binaries):
-        shape = get(flat_shapes, idx)
-        if shape is None or fp is None:
-            input_arrays.append(None)
-            continue
-        logging.info(f"Reading manual input file: {fp} ...")
-        input_arrays.append(load_array(fp, get(flat_dtypes, idx), shape))
+    from ttk.core_modules.common.dump.manual_data import load_csv_slots
+
+    input_arrays = load_csv_slots(flat_binaries, flat_dtypes, flat_shapes)
 
     # flat → nested (与 input_shapes 同构)
     nested_arrays = nest_by_distribution(input_arrays, context.input_distribution)

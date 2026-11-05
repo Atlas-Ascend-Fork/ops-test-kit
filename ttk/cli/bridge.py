@@ -135,6 +135,24 @@ def _apply_plugin_rerun_args(sw, args):
         sw.rerun_targets = [t.lower() for t in _split_csv(args.rerun)]
 
 
+def _apply_signature_args(sw, args):
+    """--sig/--signature 收集（e2e 专属参数）：py stub 路径校验 + 绝对路径化；
+    解析在 worker 侧 get_api_params 首查时惰性完成（_MANUAL_OVERRIDES 进程内状态）。
+    """
+    values = getattr(args, "signature", None) or ()
+    if not values:
+        return
+    sources = []
+    for value in values:
+        path = pathlib.Path(value.strip()).expanduser()
+        if not path.is_file():
+            raise ValueError(f"--sig signature source not found: {path}")
+        if path.suffix not in (".py", ".pyi"):
+            raise ValueError(f"--sig expects an annotated .py/.pyi signature stub: {path}")
+        sources.append(str(path.resolve()))
+    sw.signature_sources = tuple(sources)
+
+
 def _apply_output_log_args(sw, args):
     if hasattr(args, "proc_no_reuse") and args.proc_no_reuse:
         sw.proc_no_reuse = True
@@ -199,6 +217,7 @@ def args_to_switches(args):
     _apply_filter_args(sw, args)
     _apply_compare_dump_args(sw, args)
     _apply_plugin_rerun_args(sw, args)
+    _apply_signature_args(sw, args)
     _apply_output_log_args(sw, args)
     _apply_device_args(sw, args)
     _apply_run_args(sw, args)
@@ -431,8 +450,11 @@ def configure_manual_data(sw, args, command):
     if not sw.no_prof:
         if not directories:
             return
-        if sw.golden_mode != "Enable":
-            raise ValueError("--manual-data-dirs loading uses an existing golden; use --golden-mode Enable")
+        if sw.golden_mode == "Disable":
+            raise ValueError(
+                "--manual-data-dirs loading reuses the stored golden; "
+                "--golden-mode Disable (SKIP semantics) cannot be combined"
+            )
         if sw.validate_only:
             raise ValueError("--validate cannot be combined with --manual-data-dirs")
         if command == "kernel" and sw.compile_only:

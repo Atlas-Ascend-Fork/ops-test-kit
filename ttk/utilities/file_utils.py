@@ -13,7 +13,6 @@ File utils
 
 __all__ = [
     "file_md5",
-    "load_array",
     "read_file",
     "delete_files",
     "read_csv_cols",
@@ -23,23 +22,10 @@ __all__ = [
 
 import csv
 import hashlib
-import logging
 import os
 import shutil
 import tempfile
 import zipfile
-from typing import Union
-
-import numpy
-
-from .dtypes import (
-    _NUMPY_DTYPE_SOURCES,
-    is_4bit_dtype,
-    resolve_numpy_dtype,
-    torch_to_numpy_tensor,
-    unpack_4bits,
-)
-from .shape import shape_numel
 
 
 def file_md5(file_path: str):
@@ -49,99 +35,6 @@ def file_md5(file_path: str):
         for chunk in iter(lambda: f.read(block_size), b""):
             file_hash.update(chunk)
     return file_hash.hexdigest()
-
-
-def _resolve_load_dtype(dtype):
-    """Map special dtypes to a numpy-loadable dtype for raw file reading.
-
-    Custom dtype names (bfloat16/fp8/fp4/hifloat*) resolve to their provider
-    dtype objects — resolve_numpy_dtype also imports ml_dtypes/en_dtypes,
-    which registers the bare names with numpy (fromfile/view reject them
-    before that).
-    """
-    if dtype in ("uint1", "int1"):
-        return "uint8"
-    if dtype == "complex32":
-        return "float16"
-    if is_4bit_dtype(dtype):
-        return "uint8"
-    if isinstance(dtype, str) and dtype in _NUMPY_DTYPE_SOURCES:
-        return resolve_numpy_dtype(dtype)
-    return dtype
-
-
-def _postprocess_4bit(array, ori_dtype, shape):
-    """Unpack or view 4-bit data after loading."""
-    if array.dtype.name in ("int8", "uint8"):
-        size = shape_numel(shape)
-        if array.size == size:
-            array = array.view(ori_dtype)
-        else:
-            array = unpack_4bits(array, ori_dtype)
-            array = array[:size]
-    else:
-        array = array.view(ori_dtype)
-    return array
-
-
-def _postprocess_special(array, ori_dtype):
-    """View-cast special dtypes loaded from .npy (stored as uint8/int8)."""
-    for sd in ("bfloat16", "float8_e4m3fn", "float8_e5m2", "float8_e8m0", "hifloat8"):
-        if sd in str(ori_dtype) and array.dtype.name != sd:
-            array = array.view(ori_dtype)
-            break
-    return array
-
-
-def _reshape_storage(array, ori_dtype, shape):
-    """Reshape to the dtype's physical storage shape: int1 packs 8 elements per
-    byte on the last dim; complex32 stores fp16 real/imag as a trailing [2]."""
-    if ori_dtype == "int1":
-        shape = list(shape[:-1]) + [shape[-1] // 8]
-    elif ori_dtype == "complex32":
-        shape = list(shape) + [2]
-    try:
-        return array.reshape(shape)
-    except ValueError:
-        # in manual output scenario:
-        # output shape may be wrong (needs infer-shaping by golden)
-        return array
-
-
-def load_array(file_name: str, dtype: str, shape: Union[list, tuple]):
-    ori_dtype = dtype
-    dtype = _resolve_load_dtype(dtype)
-
-    if file_name.endswith(".pt"):
-        import inspect
-
-        import torch
-
-        # weights_only 优先（手动数据文件可能来自用户，防 pickle 载荷执行）；
-        # 旧版 Torch 无该参数时回退 pickle 并告警（仅可加载可信文件）。
-        try:
-            supports_weights_only = "weights_only" in inspect.signature(torch.load).parameters
-        except (TypeError, ValueError):
-            supports_weights_only = True
-        if supports_weights_only:
-            tensor = torch.load(file_name, map_location="cpu", weights_only=True)
-        else:
-            logging.warning(
-                "torch.load on this Torch version does not support weights_only=True; "
-                "falling back to pickle-based loading for %s. Only load trusted manual-data files.",
-                file_name,
-            )
-            tensor = torch.load(file_name, map_location="cpu")
-        array = torch_to_numpy_tensor(tensor)
-    elif file_name.endswith(".npy"):
-        array = numpy.load(file_name, allow_pickle=False)
-    else:
-        array = numpy.fromfile(file_name, dtype=dtype)
-
-    if is_4bit_dtype(ori_dtype):
-        array = _postprocess_4bit(array, ori_dtype, shape)
-    array = _postprocess_special(array, ori_dtype)
-    return _reshape_storage(array, ori_dtype, shape)
 
 
 def read_file(file_path: str, size_limit: int = 1024 * 1024 * 1024) -> bytes:

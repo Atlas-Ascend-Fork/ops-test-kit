@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""file_utils 公开面：load_array 装载契约。
+"""文件读契约（DataLoader.read_array / formatter.load）。
 
 - float8_e5m2 三后缀（bin/npy/pt）全通：npy 侧按 dump 存储约定（uint8 view
   落盘）读回后按 dtype view 还原
@@ -21,7 +21,8 @@ import numpy
 import pytest
 
 from ttk.core_modules.common.dump.formatter import get_formatter
-from ttk.utilities import extract_zip, load_array
+from ttk.core_modules.common.dump.loader import DataLoader
+from ttk.utilities import extract_zip
 from ttk.utilities.dtypes import resolve_numpy_dtype
 
 
@@ -42,7 +43,7 @@ def test_load_array_e5m2_npy_roundtrip(form, tmp_path):
     """dump 侧 uint8 存储约定 + 读侧 view 还原，dtype 两形态等价。"""
     arr = _e5m2([1, 2, 4, 8])
     get_formatter("npy").dump(arr, str(tmp_path), "x")
-    back = load_array(str(tmp_path / "x.npy"), _e5m2_dtype(form), [4])
+    back = DataLoader.read_array(str(tmp_path / "x.npy"), _e5m2_dtype(form), [4])
     assert back.dtype == resolve_numpy_dtype("float8_e5m2")
     numpy.testing.assert_array_equal(back.view(numpy.uint8), arr.view(numpy.uint8))
 
@@ -50,7 +51,7 @@ def test_load_array_e5m2_npy_roundtrip(form, tmp_path):
 def test_load_array_e5m2_bin(tmp_path):
     arr = _e5m2([1, 2, 4, 8])
     arr.view(numpy.uint8).tofile(tmp_path / "x.bin")
-    back = load_array(str(tmp_path / "x.bin"), "float8_e5m2", [4])
+    back = DataLoader.read_array(str(tmp_path / "x.bin"), "float8_e5m2", [4])
     assert back.dtype == resolve_numpy_dtype("float8_e5m2")
     numpy.testing.assert_array_equal(back.view(numpy.uint8), arr.view(numpy.uint8))
 
@@ -59,14 +60,14 @@ def test_load_array_e5m2_pt(tmp_path):
     torch = pytest.importorskip("torch")
     t = torch.tensor([1, 2, 4, 8], dtype=torch.float8_e5m2)
     torch.save(t, tmp_path / "x.pt")
-    back = load_array(str(tmp_path / "x.pt"), "float8_e5m2", [4])
+    back = DataLoader.read_array(str(tmp_path / "x.pt"), "float8_e5m2", [4])
     numpy.testing.assert_array_equal(back.view(numpy.uint8), t.view(torch.uint8).numpy())
 
 
 def test_load_array_bfloat16_fresh_interpreter(tmp_path):
     """干净解释器（无 ml_dtypes 预载）按 'bfloat16' 裸名装载 bin/npy。
 
-    load_array 须自行 resolve 自定义 dtype 名并触发依赖包注册，不依赖
+    DataLoader 须自行 resolve 自定义 dtype 名并触发依赖包注册，不依赖
     调用方先行 import。
     """
     import subprocess
@@ -80,9 +81,9 @@ def test_load_array_bfloat16_fresh_interpreter(tmp_path):
     root = Path(__file__).resolve().parents[2]
     code = (
         f"import sys; sys.path.insert(0, {str(root)!r})\n"
-        f"from ttk.utilities.file_utils import load_array\n"
+        "from ttk.core_modules.common.dump.loader import DataLoader\n"
         "for f in ('x.bin', 'x.npy'):\n"
-        f"    a = load_array({str(tmp_path)!r} + '/' + f, 'bfloat16', (2,))\n"
+        f"    a = DataLoader.read_array({str(tmp_path)!r} + '/' + f, 'bfloat16', (2,))\n"
         "    assert str(a.dtype) == 'bfloat16', a.dtype\n"
         "print('OK')\n"
     )
@@ -94,7 +95,7 @@ def test_load_array_bfloat16_fresh_interpreter(tmp_path):
 def test_load_array_storage_shape_int1(tmp_path):
     """int1：尾维 //8（8 元素/字节）。"""
     numpy.arange(8, dtype=numpy.uint8).tofile(tmp_path / "x.bin")
-    back = load_array(str(tmp_path / "x.bin"), "int1", [8, 8])
+    back = DataLoader.read_array(str(tmp_path / "x.bin"), "int1", [8, 8])
     assert back.shape == (8, 1)
     assert back.dtype == numpy.uint8
 
@@ -102,7 +103,7 @@ def test_load_array_storage_shape_int1(tmp_path):
 def test_load_array_storage_shape_complex32(tmp_path):
     """complex32：fp16 实虚尾维 [2]。"""
     numpy.arange(8, dtype=numpy.float16).tofile(tmp_path / "x.bin")
-    back = load_array(str(tmp_path / "x.bin"), "complex32", [4])
+    back = DataLoader.read_array(str(tmp_path / "x.bin"), "complex32", [4])
     assert back.shape == (4, 2)
     assert back.dtype == numpy.float16
 
@@ -110,7 +111,7 @@ def test_load_array_storage_shape_complex32(tmp_path):
 def test_load_array_reshape_fallback_on_wrong_shape(tmp_path):
     """声明 shape 与数据不符：回退原数组（manual output 待 golden infer-shape）。"""
     numpy.arange(4, dtype=numpy.int32).tofile(tmp_path / "x.bin")
-    back = load_array(str(tmp_path / "x.bin"), "int32", [3])
+    back = DataLoader.read_array(str(tmp_path / "x.bin"), "int32", [3])
     assert back.shape == (4,)
 
 

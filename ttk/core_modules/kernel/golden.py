@@ -30,7 +30,6 @@ from ...utilities import (
     get,
     get_dtype_overflow_boundary,
     get_dtype_range,
-    load_array,
     nest_by_distribution,
     resolve_numpy_dtype,
     resolve_numpy_dtypes,
@@ -478,12 +477,6 @@ def _generate_golden(context: TestcaseKernel, output_dtypes: list) -> list:
     )
 
 
-def _load_golden_from_file(fp: str, dtype: str, shape: Optional[Union[list, tuple]]):
-    if shape is None:
-        return None
-    return load_array(fp, dtype, shape)
-
-
 def gen_output(context: TestcaseKernel, stored_goldens=None, dev_id: Optional[int] = None):
     # Enable tensorflow numpy bfloat16 support
     switches = get_global_storage()
@@ -532,12 +525,13 @@ def _select_golden_source(context: TestcaseKernel, output_dtypes: list, stored_g
     if golden_mode(context, switches) == "Disable":
         return ["SUPPRESSED"]
     if context.manual_golden_binaries:
-        flat_binaries = context.flat_manual_golden_binaries
-        flat_shapes = context.flat_output_shapes
-        return [
-            _load_golden_from_file(get(flat_binaries, i), get(output_dtypes, i), get(flat_shapes, i))
-            for i in range(len(flat_shapes))
-        ]
+        from ttk.core_modules.common.dump.manual_data import load_csv_slots
+
+        flat_shapes = list(context.flat_output_shapes)
+        stride = len(flat_shapes)
+        flat_binaries = [get(context.flat_manual_golden_binaries, i) for i in range(stride)]
+        dtypes = [get(output_dtypes, i) for i in range(stride)]
+        return load_csv_slots(flat_binaries, dtypes, flat_shapes)
     return _generate_golden(context, output_dtypes)
 
 

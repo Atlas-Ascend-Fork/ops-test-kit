@@ -21,9 +21,9 @@ import pytest
 
 from ttk.core_modules.common.xpu import (
     MANUAL_XPU_PROVIDER,
-    ManualXpuLoadError,
+    DataLoadError,
     XpuDispatch,
-    load_manual_third_parties,
+    load_third_parties,
     manual_xpu_results,
     overlap_deadline_s,
     snapshot_xpu_inputs,
@@ -77,7 +77,7 @@ class TestCollectFacadeRouting:
             attributes={},
             testcase_name="t",
             switches=_switches(),
-            need_data=True,
+            need_xpu_data=True,
         )
         assert out == ("p", None, {})
         assert calls["op_name"] == "Add"
@@ -95,26 +95,26 @@ class TestXpuMode:
     def test_mode_zero_when_nothing_requested(self):
         from ttk.core_modules.common.xpu import XPU_DATA, XPU_PERF, xpu_mode
 
-        assert xpu_mode(self._sw(), need_data=False) == 0
+        assert xpu_mode(self._sw(), need_xpu_data=False) == 0
         assert (XPU_DATA, XPU_PERF) == (1, 2)  # 位值即公开契约
 
-    def test_need_data_sets_data_bit(self):
+    def test_need_xpu_data_sets_data_bit(self):
         from ttk.core_modules.common.xpu import XPU_DATA, xpu_mode
 
-        assert xpu_mode(self._sw(), need_data=True) == XPU_DATA
+        assert xpu_mode(self._sw(), need_xpu_data=True) == XPU_DATA
 
     def test_dump_xpu_sets_data_bit_without_cross_check(self):
         """--dump xpu 单独即触发 DATA 采集（不依赖 cross_check 判据）。"""
         from ttk.core_modules.common.xpu import XPU_DATA, xpu_mode
 
-        assert xpu_mode(self._sw(dump_xpu=True), need_data=False) == XPU_DATA
+        assert xpu_mode(self._sw(dump_xpu=True), need_xpu_data=False) == XPU_DATA
 
     def test_xpu_perf_sets_perf_bit_and_combines(self):
         from ttk.core_modules.common.xpu import XPU_DATA, XPU_PERF, xpu_mode
 
-        assert xpu_mode(self._sw(xpu_perf=True), need_data=False) == XPU_PERF
-        assert xpu_mode(self._sw(xpu_perf=True, dump_xpu=True), need_data=False) == (XPU_DATA | XPU_PERF)
-        assert xpu_mode(self._sw(xpu_perf=True), need_data=True) == (XPU_DATA | XPU_PERF)
+        assert xpu_mode(self._sw(xpu_perf=True), need_xpu_data=False) == XPU_PERF
+        assert xpu_mode(self._sw(xpu_perf=True, dump_xpu=True), need_xpu_data=False) == (XPU_DATA | XPU_PERF)
+        assert xpu_mode(self._sw(xpu_perf=True), need_xpu_data=True) == (XPU_DATA | XPU_PERF)
 
 
 class TestBindParams:
@@ -373,10 +373,9 @@ class TestKernelDispatchOverlap:
 
         def _fake_do_xpu_profiling(context, mode, deadline_s=None, inputs=None):
             order.append("xpu-start")
-            context.xpu_results = {"remote": {"status": "PASS", "api": "x", "outputs": [[np.arange(4.0)]]}}
             time.sleep(0.05)
             order.append("xpu-done")
-            return "remote"
+            return "remote", {"remote": {"status": "PASS", "api": "x", "outputs": [[np.arange(4.0)]]}}
 
         monkeypatch.setattr(kernel_worker, "_do_xpu_profiling", _fake_do_xpu_profiling)
         monkeypatch.setattr(kernel_worker, "_xpu_inputs", lambda ctx: [np.ones(4)])
@@ -422,8 +421,7 @@ class TestKernelDispatchOverlap:
 
         def _fake_do_xpu_profiling(context, mode, deadline_s=None, inputs=None):
             recorder.append(mode)
-            context.xpu_results = {"r": {"status": "PASS", "api": "x", "outputs": [[np.arange(4.0)]]}}
-            return "r"
+            return "r", {"r": {"status": "PASS", "api": "x", "outputs": [[np.arange(4.0)]]}}
 
         monkeypatch.setattr(kernel_worker, "_do_xpu_profiling", _fake_do_xpu_profiling)
         monkeypatch.setattr(kernel_worker, "_xpu_inputs", lambda ctx: [])
@@ -442,7 +440,7 @@ class TestKernelDispatchOverlap:
         xpu = kernel_worker._dispatch_xpu(case, need_3party=False, manual_case=None)
 
         assert not xpu.pending  # ready——dispatch 点即完成
-        assert recorder == [DATA]  # 同步已执行，且 DATA 位来自 need_data（含 golden_is_xpu）
+        assert recorder == [DATA]  # 同步已执行，且 DATA 位来自 need_xpu_data（含 golden_is_xpu）
         third_parties, _results, _provider = xpu.collect()
         np.testing.assert_array_equal(third_parties[0], np.arange(4.0))
 
@@ -451,15 +449,15 @@ class TestLoadManualThirdParties:
     """装载器：未声明→None；槽位对齐；缺位补 None；shape 校验。"""
 
     def test_undeclared_returns_none(self):
-        assert load_manual_third_parties(_manual_xpu_case(None)) is None
-        assert load_manual_third_parties(_manual_xpu_case(())) is None
+        assert load_third_parties(_manual_xpu_case(None)) is None
+        assert load_third_parties(_manual_xpu_case(())) is None
 
     def test_loads_by_declared_shape_and_dtype(self, tmp_path):
         path = tmp_path / "gpu.bin"
         expected = np.arange(8, dtype=np.float32)
         expected.tofile(path)
 
-        arrays = load_manual_third_parties(_manual_xpu_case((str(path),)))
+        arrays = load_third_parties(_manual_xpu_case((str(path),)))
 
         assert len(arrays) == 1
         np.testing.assert_array_equal(arrays[0], expected)
@@ -469,9 +467,7 @@ class TestLoadManualThirdParties:
         path = tmp_path / "gpu.bin"
         np.arange(8, dtype=np.float32).tofile(path)
 
-        arrays = load_manual_third_parties(
-            _manual_xpu_case((str(path),), shapes=((8,), (8,)), dtypes=("float32", "float32"))
-        )
+        arrays = load_third_parties(_manual_xpu_case((str(path),), shapes=((8,), (8,)), dtypes=("float32", "float32")))
 
         assert len(arrays) == 2
         assert arrays[1] is None
@@ -480,7 +476,7 @@ class TestLoadManualThirdParties:
         path = tmp_path / "gpu.bin"
         np.arange(8, dtype=np.float32).tofile(path)
 
-        arrays = load_manual_third_parties(_manual_xpu_case((str(path), None), shapes=((8,), None)))
+        arrays = load_third_parties(_manual_xpu_case((str(path), None), shapes=((8,), None)))
 
         assert arrays[1] is None
         np.testing.assert_array_equal(arrays[0], np.arange(8, dtype=np.float32))
@@ -489,8 +485,8 @@ class TestLoadManualThirdParties:
         path = tmp_path / "gpu.bin"
         np.arange(7, dtype=np.float32).tofile(path)
 
-        with pytest.raises(ManualXpuLoadError, match="does not match"):
-            load_manual_third_parties(_manual_xpu_case((str(path),)))
+        with pytest.raises(DataLoadError, match="does not match"):
+            load_third_parties(_manual_xpu_case((str(path),)))
 
     def test_complex32_loads_as_physical_storage_shape(self, tmp_path):
         """complex32 逻辑 (2,3) 声明 → 装载为物理 (2,3,2) fp16（实/虚尾维），不误报 shape 不符。
@@ -500,7 +496,7 @@ class TestLoadManualThirdParties:
         path = tmp_path / "gpu.bin"
         np.arange(12, dtype=np.float16).tofile(path)
 
-        arrays = load_manual_third_parties(_manual_xpu_case((str(path),), shapes=((2, 3),), dtypes=("complex32",)))
+        arrays = load_third_parties(_manual_xpu_case((str(path),), shapes=((2, 3),), dtypes=("complex32",)))
 
         assert arrays[0].shape == (2, 3, 2)
         assert arrays[0].dtype == np.float16
@@ -509,8 +505,8 @@ class TestLoadManualThirdParties:
         path = tmp_path / "gpu.bin"
         np.arange(7, dtype=np.float16).tofile(path)
 
-        with pytest.raises(ManualXpuLoadError, match="does not match"):
-            load_manual_third_parties(_manual_xpu_case((str(path),), shapes=((2, 3),), dtypes=("complex32",)))
+        with pytest.raises(DataLoadError, match="does not match"):
+            load_third_parties(_manual_xpu_case((str(path),), shapes=((2, 3),), dtypes=("complex32",)))
 
     def test_kernel_shape_accessor_preferred_over_view_shapes(self, tmp_path):
         """kernel 语义 flat_output_shapes 优先；缺失时回退 aclnn/e2e 的 flat_output_view_shapes。"""
@@ -524,7 +520,7 @@ class TestLoadManualThirdParties:
             flat_output_view_shapes=((8,),),
             flat_output_dtypes=("float32",),
         )
-        arrays = load_manual_third_parties(case)
+        arrays = load_third_parties(case)
         np.testing.assert_array_equal(arrays[0], np.arange(8, dtype=np.float32))
 
 

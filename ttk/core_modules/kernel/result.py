@@ -443,7 +443,7 @@ class KernelReturnStructure(ReturnStructureBase):
         self.golden_source = default_value
 
     # noinspection DuplicatedCode
-    def construct(self, context: TestcaseKernel, compare_result: "ComparisonResult", passed):
+    def construct(self, context: TestcaseKernel, compare_result: "ComparisonResult", passed, xpu_results=None):
         """Construct the structure with context"""
         # Check prof_results and construct one if necessary
         input_size, output_size = context.input_bytes, context.output_bytes
@@ -513,7 +513,7 @@ class KernelReturnStructure(ReturnStructureBase):
         self.cst_workspaces = context.cst_compile_result.workspaces
         self.bin_workspaces = context.bin_compile_result.workspaces
 
-        self.xpu_metrics = format_xpu_metrics(getattr(context, "xpu_results", None))
+        self.xpu_metrics = format_xpu_metrics(xpu_results)
 
         self.precision_metrics = compare_result.metrics or {}
         self.batch_consistency_id = getattr(context, "batch_consistency_id", None)

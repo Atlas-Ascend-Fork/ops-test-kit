@@ -33,8 +33,8 @@ import numpy as np
 
 from ttk.core_modules.common.dump import (
     dump_manual_dataset,
-    load_replay_goldens,
-    manual_data_dump_store,
+    load_manual_goldens,
+    manual_data_dump_case,
     resolve_manual_case,
     snapshot_manual_values,
 )
@@ -585,7 +585,7 @@ class _ProfileContext:
     plan: object = None
     dyn_indexes: tuple = ()
     manual_case: object = None
-    dump_store: object = None
+    dump_case: object = None
     adapter: object = None
     raw_inputs: object = None
     prepared_inputs: object = None
@@ -822,6 +822,8 @@ def _run_profile(testcase, backend, device_grant_events, device_granted_indices,
     if switches.golden_mode == "XPU" and ctx.xpu_dispatch is not None and _xpu_promote_golden(ctx, ctx.xpu_dispatch):
         return
 
+    # no-prof 各阶段内部早退：_resolve_api 不 import 被测 API、_device_profiling
+    # 跳过设备执行、_compare_and_finalize 走 dump-only 收尾
     _device_profiling(ctx)
 
     if _collect_xpu(ctx):
@@ -867,13 +869,13 @@ def _check_preconditions(ctx) -> bool:
 
 def _resolve_manual_stores(ctx) -> bool:
     """manual 数据开仓：--no-prof 建写方向 store；load 方向解析用例（目录空时
-    首跑回落生成+落盘）。产物入 ctx（manual_case/dump_store）。"""
+    首跑回落生成+落盘）。产物入 ctx（manual_case/dump_case）。"""
     ctx.manual_case = None
-    ctx.dump_store = None
+    ctx.dump_case = None
     try:
         if ctx.switches.no_prof:
             # dump 方向：--no-prof 落盘（bridge 已保证写方向激活时设置 manual_data_dirs）
-            ctx.dump_store = manual_data_dump_store(ctx.testcase, ctx.switches)
+            ctx.dump_case = manual_data_dump_case(ctx.testcase, ctx.switches)
     except Exception as exc:
         logging.exception(f"[{ctx.testcase.testcase_name}] Manual data dump store failure")
         ctx.return_struct.construct(f"MANUAL_DATA_PREPARE_FAILURE: {exc}", "FAIL", None)
@@ -896,7 +898,7 @@ def _resolve_manual_stores(ctx) -> bool:
         if ctx.manual_case is None and ctx.switches.dump_config.dump_input:
             # load 方向目录全空的首跑：正常生成并落盘（后续运行即可加载）
             try:
-                ctx.dump_store = manual_data_dump_store(ctx.testcase, ctx.switches)
+                ctx.dump_case = manual_data_dump_case(ctx.testcase, ctx.switches)
             except Exception as exc:
                 logging.exception(f"[{ctx.testcase.testcase_name}] Manual data dump store failure")
                 ctx.return_struct.construct(f"MANUAL_DATA_PREPARE_FAILURE: {exc}", "FAIL", None)
@@ -954,7 +956,7 @@ def _generate_input(ctx) -> bool:
         return True
 
     ctx.prepared_inputs = None
-    if ctx.dump_store is not None and ctx.manual_case is None:
+    if ctx.dump_case is not None and ctx.manual_case is None:
         # 生成态数据将写入 store：先快照（设备执行可能原地改动 backing storage）
         try:
             ctx.prepared_inputs = snapshot_manual_values(
@@ -967,7 +969,7 @@ def _generate_input(ctx) -> bool:
             _profiling_end_print(ctx.testcase, ctx.return_struct, switches=ctx.switches)
             return True
 
-    if ctx.dump_store is None:
+    if ctx.dump_case is None:
         ctx.process_ctx.notify_status("OnDumpInput")
         dump_inputs(ctx.testcase, ctx.raw_inputs, ctx.switches)
     return False
@@ -982,7 +984,7 @@ def _prepare_golden(ctx) -> bool:
     if ctx.manual_case is not None and ctx.manual_case.has_goldens:
         try:
             ctx.process_ctx.notify_status("OnLoadManualGolden")
-            nps = load_replay_goldens(
+            nps = load_manual_goldens(
                 ctx.manual_case,
                 shapes=ctx.testcase.flat_output_view_shapes,
                 dtypes=ctx.testcase.flat_output_dtypes,
@@ -1038,25 +1040,25 @@ def _prepare_golden(ctx) -> bool:
 
 
 def _manual_data_dump(ctx) -> bool:
-    """in+golden 落盘（manual-data store）；no-prof（dump 方向）在此收尾。
+    """in+golden 落盘（manual-data store）。
 
     full-flow：golden_nps 就绪（非 None）即落——golden 已在 _prepare_golden
     内一次解析完成（回放装载 / XPU 占位 / NPU 自锁段生成 / Enable 现算），
     不存在 deferred 二次落盘。落当次实际产物（判据要求 Promote 时即升精度
     标杆），文件名 dtype 自描述、回放按其装载；golden 缺失（dump_golden
     关闭 / 占位串）跳过 golden 位。返回 early。
+
+    no-prof（dump 方向）不在此收尾：不上板只跳过本地 device，收尾由
+    _compare_and_finalize 的 dump-only 分支统一承担；远端三方采集照常。
     """
     if not ctx.switches.no_prof and ctx.golden_outputs is None:
         return False
-    if (
-        ctx.dump_store is not None
-        and ctx.manual_case is None
-        and (ctx.switches.golden_mode != "XPU" or ctx.switches.no_prof)
-    ):
+    if ctx.dump_case is not None and ctx.manual_case is None:
+        # golden-XPU 占位串过滤后仅落 input，与 kernel/aclnn/geir 同口径
         try:
             ctx.process_ctx.notify_status("OnWriteManualData")
             case_dir = dump_manual_dataset(
-                ctx.dump_store, ctx.testcase, "e2e", ctx.prepared_inputs, ctx.golden_outputs or [], ctx.switches
+                ctx.dump_case, ctx.testcase, "e2e", ctx.prepared_inputs, ctx.golden_outputs or [], ctx.switches
             )
             logging.info(f"[{ctx.testcase.testcase_name}] manual data dumped: {case_dir}")
         except Exception as exc:
@@ -1064,25 +1066,15 @@ def _manual_data_dump(ctx) -> bool:
             ctx.return_struct.construct(f"MANUAL_DATA_PREPARE_FAILURE: {exc}", "FAIL", None)
             _profiling_end_print(ctx.testcase, ctx.return_struct, switches=ctx.switches)
             return True
-    elif (
-        not ctx.switches.no_prof
-        and ctx.dump_store is not None
-        and ctx.manual_case is None
-        and ctx.switches.golden_mode == "XPU"
-    ):
-        # 对齐 kernel/aclnn/geir full-flow + XPU：三方 golden 无可落盘，warning 跳过。
-        logging.warning(
-            "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
-            ctx.testcase.testcase_name,
-        )
-    if ctx.switches.no_prof:
-        _dump_only_end(ctx.testcase, ctx.return_struct, ctx.golden_outputs or [], ctx.switches)
-        return True
     return False
 
 
 def _resolve_api(ctx):
     """主 API 解析与图模式开关裁剪（backend 不支持时降级关）。"""
+    if ctx.switches.no_prof:
+        # 跳过 device 执行，不 resolve 被测 API（制备环境可能未装扩展包），
+        # api_binding 留空，后续阶段早退不消费
+        return
     resolved, is_tensor_method = ctx.adapter.load_api(ctx.testcase.api_name)
     is_inplace = ctx.adapter.is_inplace(resolved, is_tensor_method)
     graph_enabled = (
@@ -1109,50 +1101,48 @@ def _resolve_api(ctx):
 
 
 def _dispatch_xpu(ctx):
-    """三方预派发：golden-XPU 同步收割（ready 句柄），cross_check 后台派发
-    （background 句柄）；不命中返回 None，由 _collect_xpu 同步采集。"""
+    """三方预派发：manual 声明命中即不派远端（probe 短路，装载见
+    _collect_xpu）；golden-XPU 同步收割；其余可重叠场景后台派发；无效场景
+    由 _collect_xpu 同步补采。"""
     from ttk.core_modules.common.xpu import (
+        XPU_DATA,
         XpuDispatch,
-        collect_third_party,
         has_manual_xpu_source,
         overlap_deadline_s,
         snapshot_xpu_inputs,
         xpu_join_timeout,
+        xpu_mode,
         xpu_overlap_enabled,
     )
 
     golden_is_xpu = ctx.switches.golden_mode == "XPU"
-    if golden_is_xpu:
-        if has_manual_xpu_source(ctx.testcase, ctx.manual_case):
-            return  # manual 源——_collect_xpu 同步短路（本地文件必然在，无需设备前收割）
-        # golden-XPU：三方即 golden，设备前同步收割（对齐 kernel/aclnn/geir——
-        # FAIL 不空跑设备），经 ready 句柄回传、collect 幂等。
+    need_xpu_data = _cross_check_token(ctx)
+    mode = xpu_mode(ctx.switches, need_xpu_data)
+    if mode & XPU_DATA and has_manual_xpu_source(ctx.testcase, ctx.manual_case):
+        return  # manual 声明命中：不派远端；装载/升格由 _collect_xpu 设备后完成
+    if not mode:
+        return
+    if golden_is_xpu or not xpu_overlap_enabled():
+        # golden-XPU：三方即 golden，设备前同步收割（FAIL 不空跑设备）
         ctx.process_ctx.notify_status("OnXpuProfiling")
-
-        def _collect_golden():
-            priority, third_parties, xpu_results = collect_third_party(
-                op_name=ctx.testcase.api_name,
-                inputs=e2e_xpu_inputs(ctx.testcase, ctx.raw_inputs),
-                input_names=e2e_xpu_input_names(ctx.testcase),
-                op_type=None,
-                attributes=ctx.testcase.attributes or {},
-                testcase_name=ctx.testcase.testcase_name,
-                switches=ctx.switches,
-                need_data=True,
-                input_dtypes=e2e_xpu_input_dtypes(ctx.testcase),
-            )
-            return third_parties, xpu_results, (priority or "xpu")
-
-        ctx.xpu_dispatch = XpuDispatch.ready(_collect_golden())
+        ctx.xpu_dispatch = XpuDispatch.ready(
+            _collect_xpu_remote(ctx, need_xpu_data, e2e_xpu_inputs(ctx.testcase, ctx.raw_inputs))
+        )
         return
-    if has_manual_xpu_source(ctx.testcase, ctx.manual_case):
-        return  # manual 源——_collect_xpu 同步短路（声明探测，不读文件）
-    if not xpu_overlap_enabled():
-        return
+    inputs = snapshot_xpu_inputs(e2e_xpu_inputs(ctx.testcase, ctx.raw_inputs))
+    budget = overlap_deadline_s(ctx.switches)
+    ctx.process_ctx.notify_status("OnXpuDispatch")
+    ctx.xpu_dispatch = XpuDispatch.background(
+        _collect_xpu_remote, ctx, need_xpu_data, inputs, budget, join_timeout=xpu_join_timeout(budget)
+    )
+
+
+def _cross_check_token(ctx) -> bool:
+    """cross_check 判据探测（声明 dtype 可解析；异常/缺档回退 False）。"""
+    output_dtypes = tuple(str(d) for d in (getattr(ctx.testcase, "flat_output_dtypes", ()) or ()))
+    if not output_dtypes:
+        return False
     try:
-        output_dtypes = tuple(str(d) for d in (getattr(ctx.testcase, "flat_output_dtypes", ()) or ()))
-        if not output_dtypes:
-            return
         standards = resolve_tolerance(
             SpecResolver(ctx.testcase.api_name, "e2e", ctx.switches.plugin_path).resolve_tolerance(),
             ctx.testcase.flat_precision_tolerances,
@@ -1160,30 +1150,28 @@ def _dispatch_xpu(ctx):
             output_dtypes,
             ctx.switches.compare_method,
         )
-        if not any(s.token == "cross_check" for s in standards):  # noqa: S105  # token 为精度标准名，非凭据
-            return
-    except Exception:  # noqa: BLE001  预解析失败（dtype 档缺失/配置错）回退同步
-        return
-    inputs = snapshot_xpu_inputs(e2e_xpu_inputs(ctx.testcase, ctx.raw_inputs))
-    budget = overlap_deadline_s(ctx.switches)
-    ctx.process_ctx.notify_status("OnXpuDispatch")
+    except Exception:  # noqa: BLE001  预解析失败（dtype 档缺失/配置错）回退 False
+        return False
+    return any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为精度标准名，非凭据
 
-    def _collect():
-        priority, third_parties, xpu_results = collect_third_party(
-            op_name=ctx.testcase.api_name,
-            inputs=inputs,
-            input_names=e2e_xpu_input_names(ctx.testcase),
-            op_type=None,
-            attributes=ctx.testcase.attributes or {},
-            testcase_name=ctx.testcase.testcase_name,
-            switches=ctx.switches,
-            need_data=True,
-            input_dtypes=e2e_xpu_input_dtypes(ctx.testcase),
-            deadline_s=budget,
-        )
-        return third_parties, xpu_results, (priority or "xpu")
 
-    ctx.xpu_dispatch = XpuDispatch.background(_collect, join_timeout=xpu_join_timeout(budget))
+def _collect_xpu_remote(ctx, need_xpu_data, inputs, deadline_s=None):
+    """e2e 远端采集（同步/后台共用）：返回 (third_parties, xpu_results, provider)。"""
+    from ttk.core_modules.common.xpu import collect_third_party
+
+    priority, third_parties, xpu_results = collect_third_party(
+        op_name=ctx.testcase.api_name,
+        inputs=inputs,
+        input_names=e2e_xpu_input_names(ctx.testcase),
+        op_type=None,
+        attributes=ctx.testcase.attributes or {},
+        testcase_name=ctx.testcase.testcase_name,
+        switches=ctx.switches,
+        need_xpu_data=need_xpu_data,
+        input_dtypes=e2e_xpu_input_dtypes(ctx.testcase),
+        deadline_s=deadline_s,
+    )
+    return third_parties, xpu_results, (priority or "xpu")
 
 
 def _xpu_promote_golden(ctx, xpu) -> bool:
@@ -1193,7 +1181,7 @@ def _xpu_promote_golden(ctx, xpu) -> bool:
     third_parties, xpu_results, xpu_provider = xpu.collect()
     from ..common.xpu import dump_xpu_slot_files
 
-    dump_xpu_slot_files(ctx.testcase, ctx.switches, third_parties, xpu_provider)
+    dump_xpu_slot_files(ctx.testcase, ctx.switches, third_parties, xpu_provider, dump_case=ctx.dump_case)
     if third_parties is None:
         logging.error(
             "[%s] golden-mode XPU: no third_party output (XPU down / no third_party declaration); case FAIL",
@@ -1202,13 +1190,26 @@ def _xpu_promote_golden(ctx, xpu) -> bool:
         ctx.return_struct.construct("GOLDEN_FAILURE", "FAIL", None)
         _profiling_end_print(ctx.testcase, ctx.return_struct, switches=ctx.switches)
         return True
+    ctx.golden_outputs = list(third_parties)
     ctx.return_struct.set_golden_perf(xpu_golden_perf(xpu_results), source="xpu")
-    dump_goldens(ctx.testcase, list(third_parties), ctx.switches)
+    dump_goldens(ctx.testcase, ctx.golden_outputs, ctx.switches)
     return False
 
 
 def _device_profiling(ctx):
     """设备执行（锁内 eager / graph×3 模式）与确定性状态汇总。"""
+    if ctx.switches.no_prof:
+        # 跳过 device 执行；空 npu_results 供 _collect_xpu 判据与
+        # dump-only 收尾使用
+        ctx.npu_results = SimpleNamespace(
+            result_nps=None,
+            perf=None,
+            graph_cst_nps=None,
+            graph_dyn_nps=None,
+            graph_aclgraph_nps=None,
+            device_outputs=(),
+        )
+        return
     # 进程设备在此就绪（首用例触发 open，进程级一次）；输入/golden 已在 CPU
     # 侧完成。TF 设备张量在 open 后按 raw_inputs 重建为 NPU-born；torch 侧
     # CPU 张量 to_device 逐模式上板。
@@ -1362,8 +1363,9 @@ def _device_profiling(ctx):
 
 
 def _collect_xpu(ctx) -> bool:
-    """三方采集与 XPU golden 回填：采集三方输出写 ctx.xpu_outputs/xpu_results，
-    golden-XPU 时升格为 golden；三方缺失则用例 FAIL 收尾（返回 True）。"""
+    """三方采集收口：manual 装载、预派发收割、同步补采、落 xpu 槽位、
+    判据告警与指标回填。golden-XPU 升格统一走 _xpu_promote_golden——
+    远端源由 runner 设备前收割，manual 源装载后包 ready 句柄同入口。"""
     third_parties = None
     xpu_results = None
     golden_is_xpu = ctx.switches.golden_mode == "XPU"
@@ -1374,32 +1376,41 @@ def _collect_xpu(ctx) -> bool:
     # 采集门槛：判据需 DATA（cross_check/golden-XPU）或 --xpu-perf/--dump xpu
     from ttk.core_modules.common.xpu import (
         MANUAL_XPU_PROVIDER,
+        XPU_DATA,
+        XpuDispatch,
         collect_third_party,
         dump_xpu_slot_files,
-        load_manual_third_parties,
+        load_third_parties,
         manual_xpu_results,
         xpu_mode,
     )
 
-    collection_mode = xpu_mode(ctx.switches, need_3party or golden_is_xpu)
+    collection_mode = xpu_mode(ctx.switches, need_3party)
     if golden_is_xpu or collection_mode:
         if ctx.xpu_dispatch is not None:
-            # 预派发重叠句柄：collect 收割（跳过本函数 dispatch 段）
+            # 预派发句柄（golden 同步 / 后台重叠）在此收割
             if ctx.xpu_dispatch.pending:
                 ctx.process_ctx.notify_status("OnXpuCollect")
             third_parties, xpu_results, xpu_provider = ctx.xpu_dispatch.collect()
-            dump_xpu_slot_files(ctx.testcase, ctx.switches, third_parties, xpu_provider)
-        # manual 三方输出：DATA 需求时本地装载短路远端 dispatch；PERF-only
-        # 不走 manual。device_outputs 供 e2e 无声明输出槽时取 shape/dtype。
-        elif need_3party or golden_is_xpu or getattr(getattr(ctx.switches, "dump_config", None), "dump_xpu", False):
-            manual = load_manual_third_parties(
-                ctx.testcase, ctx.manual_case, device_outputs=ctx.npu_results.device_outputs
-            )
+            dump_xpu_slot_files(ctx.testcase, ctx.switches, third_parties, xpu_provider, dump_case=ctx.dump_case)
+        # manual 三方输出：需 DATA 时本地装载短路远端 dispatch，PERF-only 不走
+        # manual。装载留在设备后而非 _dispatch_xpu：e2e 用例 CSV 常不声明输出
+        # shape/dtype，裸路径的 manual_xpu_binaries 文件无自描述，须靠
+        # device_outputs 推导解析；aclnn/kernel 有声明输出槽，故可前置装载。
+        elif collection_mode & XPU_DATA:
+            manual = load_third_parties(ctx.testcase, ctx.manual_case, device_outputs=ctx.npu_results.device_outputs)
             if manual is not None:
                 ctx.process_ctx.notify_status("OnLoadManualXpu")
-                dump_xpu_slot_files(ctx.testcase, ctx.switches, manual, MANUAL_XPU_PROVIDER)
-                third_parties = manual
                 xpu_results = manual_xpu_results()
+                if golden_is_xpu:
+                    # golden 升格同入口：promote 内落槽 + 回填 golden
+                    if _xpu_promote_golden(ctx, XpuDispatch.ready((manual, xpu_results, MANUAL_XPU_PROVIDER))):
+                        return True
+                else:
+                    dump_xpu_slot_files(
+                        ctx.testcase, ctx.switches, manual, MANUAL_XPU_PROVIDER, dump_case=ctx.dump_case
+                    )
+                third_parties = manual
         if collection_mode and xpu_results is None:
             ctx.process_ctx.notify_status("OnXpuProfiling")
             priority, third_parties, xpu_results = collect_third_party(
@@ -1410,11 +1421,11 @@ def _collect_xpu(ctx) -> bool:
                 attributes=ctx.testcase.attributes or {},
                 testcase_name=ctx.testcase.testcase_name,
                 switches=ctx.switches,
-                need_data=need_3party or golden_is_xpu,
+                need_xpu_data=need_3party,
                 input_dtypes=e2e_xpu_input_dtypes(ctx.testcase),
             )
-            dump_xpu_slot_files(ctx.testcase, ctx.switches, third_parties, priority or "xpu")
-        # 三方缺失告警（同步/重叠/manual 三来源统一判定）
+            dump_xpu_slot_files(ctx.testcase, ctx.switches, third_parties, priority or "xpu", dump_case=ctx.dump_case)
+        # 三方缺失告警（预派发/manual/同步三来源统一判定）
         if need_3party and third_parties is None:
             logging.warning(
                 "[%s] cross_check configured but no third_party output "
@@ -1422,22 +1433,6 @@ def _collect_xpu(ctx) -> bool:
                 ctx.testcase.testcase_name,
             )
     _discard_unconsumed(ctx.xpu_dispatch)
-    if golden_is_xpu:
-        # 三方输出升格为 golden；缺失则整例 FAIL（早于比对暴露）。
-        if third_parties is None:
-            logging.error(
-                "[%s] golden-mode XPU: no third_party output (XPU down / no third_party declaration); case FAIL",
-                ctx.testcase.testcase_name,
-            )
-            ctx.return_struct.construct("GOLDEN_FAILURE", "FAIL", ctx.perf)
-            _profiling_end_print(ctx.testcase, ctx.return_struct, switches=ctx.switches)
-            return True
-        ctx.golden_outputs = list(third_parties)
-        # golden 性能回填（三方执行即 golden 真值）
-        from ..common.golden import xpu_golden_perf
-
-        ctx.return_struct.set_golden_perf(xpu_golden_perf(xpu_results), source="xpu")
-        dump_goldens(ctx.testcase, ctx.golden_outputs, ctx.switches)
     ctx.return_struct.xpu_metrics = format_xpu_metrics(xpu_results) if xpu_results else {}
     ctx.xpu_outputs = third_parties
     ctx.xpu_results = xpu_results
@@ -1446,6 +1441,9 @@ def _collect_xpu(ctx) -> bool:
 
 def _compare_and_finalize(ctx):
     """比对收尾：eager / graph 各形态 dump + 精度评估 + 终态屏显。"""
+    if ctx.switches.no_prof:
+        # 跳过 device 执行：无设备输出可比对，dump-only 收尾
+        return _dump_only_end(ctx.testcase, ctx.return_struct, ctx.golden_outputs or [], ctx.switches)
     # golden 为 4bit dtype 时各输出腿先对齐封装（eager + 三种图形态）
     if ctx.golden_outputs:
         for output_nps in (
@@ -1463,10 +1461,10 @@ def _compare_and_finalize(ctx):
             ctx.return_struct.eager_precision = "NO_OUTPUT"
         if not ctx.api_binding.graph_enabled:
             _profiling_end_print(ctx.testcase, ctx.return_struct, ctx.golden_outputs, ctx.switches)
-            return
+            return None
     else:
         ctx.process_ctx.notify_status("OnDumpOutput")
-        dump_outputs(ctx.testcase, ctx.npu_results.result_nps, ctx.switches, segment="eager", backend=ctx.backend)
+        dump_outputs(ctx.testcase, ctx.npu_results.result_nps, ctx.switches, segment="eager")
 
         # pre_compare 随统一比对入口生效（变换不跨 eager→graph 泄漏）
         ctx.process_ctx.notify_status("OnEagerComparison")
@@ -1493,16 +1491,11 @@ def _compare_and_finalize(ctx):
                 ctx.npu_results.graph_aclgraph_nps,
                 ctx.switches,
                 segment="graph_aclgraph",
-                backend=ctx.backend,
             )
         if ctx.switches.cst_switches.enabled and ctx.npu_results.graph_cst_nps:
-            dump_outputs(
-                ctx.testcase, ctx.npu_results.graph_cst_nps, ctx.switches, segment="graph_cst", backend=ctx.backend
-            )
+            dump_outputs(ctx.testcase, ctx.npu_results.graph_cst_nps, ctx.switches, segment="graph_cst")
         if ctx.switches.dyn_switches.enabled and ctx.npu_results.graph_dyn_nps:
-            dump_outputs(
-                ctx.testcase, ctx.npu_results.graph_dyn_nps, ctx.switches, segment="graph_dyn", backend=ctx.backend
-            )
+            dump_outputs(ctx.testcase, ctx.npu_results.graph_dyn_nps, ctx.switches, segment="graph_dyn")
         if getattr(ctx.switches, "aclgraph_enabled", False):
             evaluate_graph_precision(
                 ctx.testcase,
@@ -1544,3 +1537,4 @@ def _compare_and_finalize(ctx):
             )
 
     _profiling_end_print(ctx.testcase, ctx.return_struct, ctx.golden_outputs, ctx.switches)
+    return None

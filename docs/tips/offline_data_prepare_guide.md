@@ -34,12 +34,34 @@ python3 -m ttk e2e -i cases.csv --plugin /path/to/assets \
 
 ### XPU 三方输出
 
-参与三方比对的 XPU 输出也可提前备好：在 XPU 机器上跑 TTK，让输入、Golden 与三方输出一起落盘。
+XPU 三方输出也可以和输入、Golden 一起提前落盘。`--no-prof` 只跳过本地 device 执行，远端三方采集照常；三方在哪台机器算由 xpu-server 决定，纯 CPU 机器即可。运行 worker 的机器要装对应的 torch 扩展算子包（见下）。
 
 支持范围：
 
 - 目前仅 e2e 通路的 torch / tf
-- 需在 XPU 机器上先起 xpu-server（三方硬件在本机时 endpoint 指向 `127.0.0.1` 即可，启动方式见 [三方交叉校验](./cross_check_guide.md)；跨机部署见 [xpu-server 部署指南](../reference/xpu_server.md)）
+- 需先起 xpu-server（三方硬件在本机时 endpoint 指向 `127.0.0.1` 即可，启动方式见 [三方交叉校验](./cross_check_guide.md)；跨机部署见 [xpu-server 部署指南](../reference/xpu_server.md)）
+
+xpu-server 按启动参数选择三方执行硬件，CPU / GPU / NPU 三种形式：
+
+```bash
+# CPU：无卡机器即可，三方按纯 CPU 参考实现计算（要求三方插件自身不依赖设备库）
+python3 -m ttk.remote.server.xpu_server --port 9090 --devices cpu
+
+# GPU：在 GPU 机器上起，三方在指定卡上执行
+python3 -m ttk.remote.server.xpu_server --port 9090 --devices 0,1
+
+# NPU / MLU：不传 --devices 时按 /dev 自动探测（内置段顺序 gpu → mlu，探测不到回落 CPU）；
+# 自定义硬件（如 NPU）在 xpu_server.yaml 的 hardware 里加设备段（dev_prefix + torch_lib），
+# 段名即心跳 hardware 值
+python3 -m ttk.remote.server.xpu_server --port 9090 --devices 0,1
+```
+
+`--dry-run` 返回随机假数据，用于调试。心跳可确认硬件形态：
+
+```bash
+curl http://127.0.0.1:9090/v1/heartbeat
+# → {"status":"ok","hardware":"cpu|gpu|mlu|自定义段名","device_count":...,"providers":["torch"]}
+```
 
 XPU 机器上的配置：
 
@@ -55,13 +77,57 @@ frameworks:
       torch_lib: cuda          # GPU；MLU 用 mlu
 ```
 
-运行（`--dump full` 会把输入、Golden 与三方输出一起落盘）：
+主执行产物恒落 `output_{segment}_*` 调试命名；三方输出经 xpu-server 采集回包后落 `xpu_{provider}_{idx}_{dtype}` 槽位，回放按槽位对位读取。
+
+运行（`--dump full` 会把输入、Golden 与三方输出一起落盘；纯 CPU 机器加 `--no-prof` 跳过本地 device）：
 
 ```bash
 python3 -m ttk e2e -i cases.csv --config ttk.conf.yaml --dump full
 ```
 
+```bash
+# 无卡环境：--no-prof 不执行算子，输入与 Golden 走纯 numpy/torch 实现
+python3 -m ttk e2e -i cases.csv --plugin /path/to/spec.py \
+  --config ttk.conf.yaml --no-prof --dump in,golden,xpu \
+  --manual-data-dirs /data/manual -o result.csv
+```
+
+输入与 Golden 是纯 numpy/torch 实现，不依赖算子包；三方采集要解析算子签名，`torch.ops.<ns>.<op>` 没有真包注册就会 `API_PARSE_FAIL`。装好对应的 torch 扩展算子包即可（TTK 会按 namespace 名自动导入）；制备机没有包时用 `--sig` 提供签名（见下节）。
+
 产物拷回 NPU 环境，作 `manual_xpu_binaries` 回放参与三方比对（见 [三方交叉校验](./cross_check_guide.md)）。
+
+### 无包签名 stub（--sig）
+
+`--sig` 接 `.py/.pyi` 签名文件（可重复传多个），ast 只读源码，不执行、不 import 被测包。文件里两类签名源可并存：
+
+**类型注解**——模块级 `def`，每个参数和返回值都注解齐全（缺注解的函数跳过）：
+
+```python
+# sig_stub.py
+from typing import Optional, Tuple
+import torch
+
+
+def my_op(
+    x: torch.Tensor,
+    *,
+    bias: Optional[torch.Tensor] = None,
+    alpha: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    ...
+```
+
+注解支持：`torch.Tensor`、`int/float/bool/str`、`Optional[X]`、`List[X]`、`Union[int, float]`（按数值标量处理）；默认值限 `None/bool/int/float/str` 字面量；不支持 `*args/**kwargs`。
+
+**schema 字符串字面量**——torch 扩展注册时用的 `name(Tensor x, *, float alpha=1.0) -> (Tensor, Tensor)` 行。含这种 schema 串的算子 python 源文件可直接喂：无注解函数跳过，schema 串照常登记。
+
+```bash
+python3 -m ttk e2e -i cases.csv --plugin /path/to/assets \
+  --no-prof --dump in,golden,xpu --sig sig_stub.py \
+  --manual-data-dirs /data/manual
+```
+
+按文件内函数名 / schema 串名登记，查询时与 CSV `api_name` 全名匹配或尾名唯一匹配可命中（多个 `--sig` 文件存在同名函数时歧义拒绝，需改名消歧）。`--sig` 优先级最高，未命中回落常规解析链——有真包的机器不用传。
 
 ## 二、数据转移
 

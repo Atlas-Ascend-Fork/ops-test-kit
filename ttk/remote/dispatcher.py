@@ -358,6 +358,23 @@ def _read_file_with_hash(file_path: str) -> tuple:
     return base64.b64encode(raw).decode(), hashlib.sha256(raw).hexdigest()
 
 
+def _sync_rel_path(file_path: str, search_roots: list) -> str:
+    """以命中 search root 的相对路径同步——保留包结构（impl/golden.py）。
+
+    server /v1/sync 支持子路径（只拒 .. 与绝对路径）；压平成 basename 会让
+    目录式 spec 的 impl 包在租户目录里永远拼不回来。不在任何 root 下时退回
+    basename（防御：_find_spec_file 的命中必在 root 树内，此处仅兜底）。
+    """
+    for root in search_roots:
+        try:
+            rel = os.path.relpath(file_path, root)
+        except ValueError:  # 跨盘符等 relpath 不可计算
+            continue
+        if not rel.startswith(".."):
+            return rel.replace(os.sep, "/")
+    return os.path.basename(file_path)
+
+
 def _do_http_sync(
     missing: str, search_roots: list, endpoint_host: str, endpoint_port: int, tenant_id: str, timeout: int
 ) -> bool:
@@ -370,7 +387,7 @@ def _do_http_sync(
         logging.warning(f"424: could not find file for missing module '{missing}'")
         return False
 
-    rel_path = os.path.basename(file_path)
+    rel_path = _sync_rel_path(file_path, search_roots)
     content_b64, file_hash = _read_file_with_hash(file_path)
 
     sync_body = json.dumps({"files": {rel_path: {"content": content_b64, "hash": file_hash}}})
@@ -393,14 +410,8 @@ def _do_http_sync(
         return False
 
 
-def _sync_missing_dependency(
-    missing: str, search_roots: list, endpoint_host: str, endpoint_port: int, tenant_id: str, timeout: int
-) -> bool:
-    """Sync a missing dependency, serialized across workers by semaphore.
-
-    The first worker to acquire the per-(endpoint, module) lock performs the
-    upload; concurrent workers poll ``get_semaphore`` and reuse its result,
-    avoiding duplicate uploads and concurrent-write races on xpu_server.
+def _run_sync_locked(sync_id: str, work, timeout: int) -> bool:
+    """一次同步上传，跨 worker 信号量去重：首获锁者上传并回写结果，并发者轮询复用。
 
     信号量 RPC 占用 worker 命令管道，仅限主线程调用；XPU 重叠的后台线程
     直接上传（服务端 /v1/sync 原子写，并发重复无害）。
@@ -412,14 +423,13 @@ def _sync_missing_dependency(
     ctx = process_context()
     if ctx is None:
         # Single-process mode (no pool): sync directly — no concurrent dedup needed.
-        return _do_http_sync(missing, search_roots, endpoint_host, endpoint_port, tenant_id, timeout)
+        return work()
     if threading.current_thread() is not threading.main_thread():
-        return _do_http_sync(missing, search_roots, endpoint_host, endpoint_port, tenant_id, timeout)
-    sync_id = f"xpu_sync_{endpoint_host}:{endpoint_port}:{missing}"
+        return work()
 
     if ctx.acquire_semaphore(sync_id):
         try:
-            ok = _do_http_sync(missing, search_roots, endpoint_host, endpoint_port, tenant_id, timeout)
+            ok = work()
             ctx.set_semaphore(sync_id, "ok" if ok else "fail")
             return ok
         except Exception as e:
@@ -432,15 +442,117 @@ def _sync_missing_dependency(
     # the holder process crashed. The timeout below is a last-resort safety
     # net for edge cases where neither path fires (e.g. holder stuck in
     # zombie state, pool detection delayed).
-    logging.debug(f"424: waiting for another worker to sync '{missing}' ({sync_id})")
+    logging.debug(f"sync: waiting for another worker to finish '{sync_id}'")
     wait_deadline = time.monotonic() + timeout
     while (result := ctx.get_semaphore(sync_id)) is None:
         if time.monotonic() >= wait_deadline:
             raise RemoteExecutionError(
-                f"timed out waiting for sync of '{missing}' (holder may have crashed); sync_id={sync_id}"
+                f"timed out waiting for sync '{sync_id}' (holder may have crashed); sync_id={sync_id}"
             )
         time.sleep(0.5)
     return result == "ok"
+
+
+def _sync_missing_dependency(
+    missing: str, search_roots: list, endpoint_host: str, endpoint_port: int, tenant_id: str, timeout: int
+) -> bool:
+    """Sync a missing dependency, serialized across workers by semaphore.
+
+    The first worker to acquire the per-(endpoint, module) lock performs the
+    upload; concurrent workers poll ``get_semaphore`` and reuse its result,
+    avoiding duplicate uploads and concurrent-write races on xpu_server.
+    """
+    sync_id = f"xpu_sync_{endpoint_host}:{endpoint_port}:{missing}"
+    return _run_sync_locked(
+        sync_id,
+        lambda: _do_http_sync(missing, search_roots, endpoint_host, endpoint_port, tenant_id, timeout),
+        timeout,
+    )
+
+
+# spec 目录整树同步的进程内去重：一个进程对一个 (endpoint, spec_dir) 只真实上传
+# 一次，后续 424 直接短路（服务端另有 hash 比对跳过未变文件，跨进程幂等）。
+# 超限被拒的目录记入 _SPEC_TREE_REJECTED——整树永久放弃（本运行内），回落单文件同步。
+_SPEC_TREE_MAX_FILES = 32
+_SPEC_TREE_SYNCED: set = set()
+_SPEC_TREE_REJECTED: set = set()
+
+
+def _spec_tree_files(spec_dir: str) -> dict:
+    """收集 spec 目录下全部 .py（含 __init__.py），按相对路径组成 /v1/sync 文件集。
+
+    目录式 spec（spec.py + __file__ 相对装载的 impl/ 包）无法靠单文件同步拼回
+    包结构；整树一次上传让 server 侧目录原样成立。
+    """
+    files = {}
+    for dirpath, dirnames, filenames in os.walk(spec_dir):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for name in sorted(filenames):
+            if not name.endswith(".py"):
+                continue
+            full = os.path.join(dirpath, name)
+            content_b64, file_hash = _read_file_with_hash(full)
+            rel = os.path.relpath(full, spec_dir).replace(os.sep, "/")
+            files[rel] = {"content": content_b64, "hash": file_hash}
+    return files
+
+
+def _do_http_sync_tree(files: dict, endpoint_host: str, endpoint_port: int, tenant_id: str, timeout: int) -> bool:
+    """Upload pre-collected .py file set in one /v1/sync call. Returns True on 200."""
+    sync_body = json.dumps({"files": files})
+
+    try:
+        conn = _create_connection(endpoint_host, endpoint_port, timeout=timeout)
+        conn.request(
+            "POST", "/v1/sync", body=sync_body, headers={"Content-Type": "application/json", "X-Tenant-ID": tenant_id}
+        )
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        if resp.status == 200:
+            logging.info(f"424: synced spec tree ({len(files)} files)")
+            return True
+        logging.warning(f"424: spec tree sync failed (status {resp.status})")
+        return False
+    except Exception as e:
+        logging.warning(f"424: spec tree sync error: {e}")
+        return False
+
+
+def _sync_spec_tree(spec_dir: str, endpoint_host: str, endpoint_port: int, tenant_id: str, timeout: int) -> bool:
+    """spec 目录整树同步：进程内一次 + 跨 worker 信号量去重；超规模上限则中断。
+
+    超限说明 spec 目录混入了大量无关 .py（如 spec.py 写在高层目录）——整树放弃
+    并拒绝本运行内重试，单文件同步（import 式 spec 可逐模块自举）不受影响。
+    """
+    key = (endpoint_host, endpoint_port, spec_dir)
+    if key in _SPEC_TREE_SYNCED:
+        return True
+    if key in _SPEC_TREE_REJECTED:
+        return False
+    files = _spec_tree_files(spec_dir)
+    if not files:
+        logging.warning(f"424: no .py files found under spec dir '{spec_dir}'")
+        return False
+    if len(files) > _SPEC_TREE_MAX_FILES:
+        logging.warning(
+            f"424: spec dir '{spec_dir}' has {len(files)} .py files "
+            f"(limit {_SPEC_TREE_MAX_FILES}); tree sync aborted, "
+            f"falling back to per-module sync"
+        )
+        _SPEC_TREE_REJECTED.add(key)
+        return False
+    sync_id = f"xpu_sync_tree_{endpoint_host}:{endpoint_port}:{spec_dir}"
+    ok = _run_sync_locked(
+        sync_id,
+        lambda: _do_http_sync_tree(files, endpoint_host, endpoint_port, tenant_id, timeout),
+        timeout,
+    )
+    if ok:
+        _SPEC_TREE_SYNCED.add(key)
+    else:
+        logging.warning(f"424: spec tree sync failed for '{spec_dir}' (details above)")
+    return ok
 
 
 def _create_connection(host, port, timeout):
@@ -614,6 +726,7 @@ class _DispatchPlan:
     budget_424: int
     used_503: int = 0
     used_conn: int = 0
+    spec_dir: Optional[str] = None  # spec 模式：spec 文件所在目录（424 整树同步根）
 
     def expired(self) -> bool:
         return time.monotonic() >= self.deadline_at
@@ -718,6 +831,10 @@ def _handle_missing_dep(resp, plan: _DispatchPlan) -> None:
             f"in spec search paths; likely a server-side "
             f"environment dependency (pip install) is missing"
         )
+    if plan.spec_dir:
+        # 目录式 spec：整树先上（spec.py + impl/ 包结构原样落租户目录），
+        # 下方单文件同步兜底 search root 里 spec 目录之外的依赖。
+        _sync_spec_tree(plan.spec_dir, plan.endpoint_host, plan.endpoint_port, plan.tenant_id, plan.timeout)
     synced = _sync_missing_dependency(
         missing_module,
         plan.spec_search_roots,
@@ -808,10 +925,12 @@ def dispatch_to_remote(
     """
     spec_search_roots = list(spec_search_roots or [])
     # In spec mode, ensure the spec source dir is searchable for 424 dep sync.
+    spec_dir = None
     if execution_type == "spec" and spec_file:
         _fdir = os.path.dirname(os.path.abspath(spec_file))
         if _fdir not in spec_search_roots:
             spec_search_roots.insert(0, _fdir)
+        spec_dir = _fdir
 
     # KERNEL no-spec (api=None) relies on the server's _resolve_3party_api to
     # derive the API from op_name/op_type — do NOT infer client-side.
@@ -852,6 +971,7 @@ def dispatch_to_remote(
         budget_503=_cfg("max_503_retries", 10.0, int),
         budget_conn=_cfg("max_conn_retries", 5.0, int),
         budget_424=max_retries,
+        spec_dir=spec_dir,
     )
 
     req_dir = None

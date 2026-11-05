@@ -98,6 +98,85 @@ class TestGenerateGolden:
             assert len(result) == 1
             np.testing.assert_array_equal(result[0], [4.0, 5.0, 6.0])
 
+    def test_plugin_receives_golden_mode_kwarg(self):
+        """generate_golden 装配链把生效 golden_mode 接给插件（override 优先级
+        与未声明形参的行为在 TestBuildPluginCallGoldenMode 装配点单测覆盖）。"""
+        _register(
+            "torch.relu",
+            [
+                ParamInfo(name="input", type="Tensor"),
+            ],
+        )
+        raw = [np.array([1.0, 2.0, 3.0], dtype=np.float32)]
+        received = {}
+
+        def golden_with_mode(input, golden_mode=None, **kwargs):  # noqa: A002
+            received["mode"] = golden_mode
+            return np.array([4.0, 5.0, 6.0])
+
+        with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get:
+            mock_get.return_value = golden_with_mode
+            case = _make_testcase("torch.relu", ((3,),), ("float32",))
+            case.tensors = raw
+            generate_golden(case, raw, None, SimpleNamespace(golden_mode="NPU"))
+            assert received["mode"] == "NPU"
+
+    def test_plugin_receives_promoted_tensors_under_promote(self):
+        """Promote 时插件 golden 收升精度副本，testcase.tensors 不动；Enable 原精度。"""
+        _register(
+            "torch.relu",
+            [
+                ParamInfo(name="input", type="Tensor"),
+            ],
+        )
+        raw = [np.array([1.5, 2.5], dtype=np.float32)]
+        received = {}
+
+        def golden_probe(input, **kwargs):
+            received["dtype"] = input.dtype
+            return input
+
+        with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get:
+            mock_get.return_value = golden_probe
+            case = _make_testcase("torch.relu", ((2,),), ("float32",))
+            case.tensors = [torch.tensor([1.5, 2.5], dtype=torch.float32)]
+            generate_golden(case, raw, None, SimpleNamespace(golden_mode="Promote"))
+            assert received["dtype"] == torch.float64  # fp32 → fp64
+            assert case.tensors[0].dtype == torch.float32  # 共享对象不动
+
+            received.clear()
+            case2 = _make_testcase("torch.relu", ((2,),), ("float32",))
+            case2.tensors = [torch.tensor([1.5, 2.5], dtype=torch.float32)]
+            generate_golden(case2, raw, None, SimpleNamespace(golden_mode="Enable"))
+            assert received["dtype"] == torch.float32  # Enable 原精度
+
+    def test_class_golden_receives_promoted_pool(self):
+        """class 形插件 golden：Promote 时绑定池里的张量为升精度副本。"""
+        _register(
+            "torch.relu",
+            [
+                ParamInfo(name="input", type="Tensor"),
+            ],
+        )
+        received = {}
+
+        class ProbeSpec:
+            def __init__(self, input):
+                received["dtype"] = input.dtype
+                self.input = input
+
+            def __call__(self):
+                return self.input
+
+        with patch("ttk.core_modules.common.plugin.resolver.get_plugin_function") as mock_get:
+            mock_get.return_value = ProbeSpec
+            case = _make_testcase("torch.relu", ((2,),), ("float32",))
+            case.tensors = [torch.tensor([1.5, 2.5], dtype=torch.float32)]
+            generate_golden(
+                case, [np.array([1.5, 2.5], dtype=np.float32)], None, SimpleNamespace(golden_mode="Promote")
+            )
+            assert received["dtype"] == torch.float64
+
     def test_priority3_cpu_fallback(self):
         """优先级 3：无插件时回退到 CPU 执行。"""
         _register(

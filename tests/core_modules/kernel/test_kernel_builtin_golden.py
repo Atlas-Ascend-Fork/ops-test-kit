@@ -182,7 +182,7 @@ class TestKernelBuiltinGoldenDispatch:
         with patch("ttk.core_modules.kernel.golden.Invoke.golden") as mock_golden:
             # 模拟 NPU 执行失败后的 CPU 回落：走 invoke 闭包（真实 _invoke_golden）
             mock_golden.side_effect = (
-                lambda context, func, switches, invoke=None, npu_invoke=None, dev_id=None, **_kw: invoke(func)
+                lambda context, func, switches, invoke=None, npu_invoke=None, dev_id=None, **_kw: (invoke(func))
             )
             results, _perf, _source = _mod.generate_npu_golden(case, 0)
 

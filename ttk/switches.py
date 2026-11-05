@@ -95,6 +95,7 @@ class SWITCHES:
         "config_path",
         "provider_filter",
         "plugin_path",
+        "signature_sources",
         # 用例筛选
         "selected_testcases",
         "selected_testcase_indexes",
@@ -154,8 +155,9 @@ class SWITCHES:
         "core_limit",
         # GEIR
         "geir_binary",
-        # 手动数据（kernel/aclnn/e2e 三通路共用）：no_prof=不上板标记（关 prof 执行，
-        # 配合 dump 门控触发 manual-data 落盘）；manual_data_dirs=数据目录集
+        # 手动数据（kernel/aclnn/e2e 三通路共用）：no_prof=跳过 device 执行标记
+        # （关本地执行与 prof；远端三方采集照常；配合 dump 门控触发
+        # manual-data 落盘）；manual_data_dirs=数据目录集
         # （load 方向搜索空间；no-prof 落盘时为单目录写目标）
         "no_prof",
         "manual_data_dirs",
@@ -272,6 +274,7 @@ class SWITCHES:
         self.config_path: Optional[str] = None  # --config yaml 路径，经 pickle 传 worker
         self.provider_filter: Optional[str] = None  # --provider 过滤器，remote/client 消费
         self.plugin_path: Optional[Tuple[pathlib.Path]] = None  # --plugin golden/输入插件目录
+        self.signature_sources: tuple = ()  # --sig 签名源（py stub 路径；worker 侧惰性装载）
 
     def _init_case_selection(self):
         """用例筛选：按名/序号/算子/优先级圈选 + 随机抽取种子。"""

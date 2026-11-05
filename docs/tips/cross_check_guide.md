@@ -96,7 +96,8 @@ python3 -m ttk kernel -i cases.csv --config ttk.conf.yaml --xpu-perf
 - `--config`：都要。只有 cross_check 缺它不报错，结果为 `GOLDEN_FAILURE`
 - `--plugin`：建议。未声明 `third_party` 时框架自动匹配
 - `--provider`：可选，缩小范围
-- `--no-prof` / `--validate`：这三种用法都不触发采集
+- `--validate`：不触发采集（仅校验用例）
+- `--no-prof`：跳过 device 执行，远端采集照常（`--dump xpu/full` 落 xpu 槽位）；`--xpu-perf` 采集 XPU 侧指标
 
 > [!TIP]
 > E2E 且 `op_name` 为点分路径（如 `torch.add`）时可不声明 `third_party`，框架直接按路径解析。

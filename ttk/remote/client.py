@@ -33,7 +33,7 @@ import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import ExecutionSpec, get_tenant_id, xpu_mode
+from . import DATA, ExecutionSpec, get_tenant_id, xpu_mode
 from .endpoint_view import _TP_ALIASES
 
 
@@ -177,7 +177,7 @@ def dispatch_xpu(
     input_dtypes: Optional[list] = None,
     testcase_name: str,
     switches,
-    need_data: bool,
+    need_xpu_data: bool,
     param_order: Optional[list] = None,
     deadline_s: Optional[float] = None,
 ):
@@ -228,7 +228,7 @@ def dispatch_xpu(
         specs,
         inputs=inputs,
         input_names=input_names,
-        mode=xpu_mode(switches, need_data),
+        mode=xpu_mode(switches, need_xpu_data),
         tenant_id=get_tenant_id(),
         op_name=op_name,
         op_type=op_type,
@@ -272,7 +272,7 @@ def collect_third_party(
     attributes: dict,
     testcase_name: str,
     switches,
-    need_data: bool = True,
+    need_xpu_data: bool = True,
     param_order: Optional[list] = None,
     input_formats: Optional[list] = None,
     input_dtypes: Optional[list] = None,
@@ -297,7 +297,7 @@ def collect_third_party(
     """
     from ttk.utilities import deep_flatten
 
-    mode = xpu_mode(switches, need_data)
+    mode = xpu_mode(switches, need_xpu_data)
     if not mode:
         return None, None, None
 
@@ -309,14 +309,15 @@ def collect_third_party(
         attributes=attributes,
         testcase_name=testcase_name,
         switches=switches,
-        need_data=need_data,
+        need_xpu_data=need_xpu_data,
         param_order=param_order,
         input_formats=input_formats,
         input_dtypes=input_dtypes,
         deadline_s=deadline_s,
     )
 
-    if need_data:
+    if mode & DATA:
+        # dump_xpu 已并入 xpu_mode 的 DATA 位，调用方无需显式置位
         nested = extract_third_party(xpu_results, priority)
         if nested is None:
             if priority is None and not xpu_results:

@@ -25,6 +25,14 @@
 本包为汇总 re-export 面，消费方 import 路径保持不变。
 """
 
+from ..dump.dumper import dump_xpu_slot_files
+from ..dump.loader import DataLoadError
+from ..dump.manual_data import (
+    MANUAL_XPU_PROVIDER,
+    has_manual_xpu_source,
+    load_third_parties,
+    manual_xpu_results,
+)
 from .binding import UnknownParamError, bind_params, invoke_third_party
 from .dispatch import (
     XPU_DATA,
@@ -36,14 +44,6 @@ from .dispatch import (
     xpu_join_timeout,
     xpu_mode,
     xpu_overlap_enabled,
-)
-from .manual import (
-    MANUAL_XPU_PROVIDER,
-    ManualXpuLoadError,
-    dump_xpu_slot_files,
-    has_manual_xpu_source,
-    load_manual_third_parties,
-    manual_xpu_results,
 )
 from .resolver import (
     XpuResolver,
@@ -70,8 +70,8 @@ __all__ = [
     "extract_third_party",
     # manual_xpu 装载/落盘（--dump xpu 回放契约）
     "MANUAL_XPU_PROVIDER",
-    "ManualXpuLoadError",
-    "load_manual_third_parties",
+    "DataLoadError",
+    "load_third_parties",
     "has_manual_xpu_source",
     "manual_xpu_results",
     "dump_xpu_slot_files",

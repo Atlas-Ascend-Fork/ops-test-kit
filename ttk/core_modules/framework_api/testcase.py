@@ -109,7 +109,6 @@ class TestcaseE2e(ApiTestcaseBase):
     option_headers = {
         **ApiTestcaseBase.option_headers,
         # XPU 三方输出本地装载（--dump xpu 回放契约；FREE_EVAL 支持嵌套 TensorList 声明）
-        "manual_xpu_binaries": (FIELD_TYPES.FREE_EVAL, None, ()),
     }
 
     complete_headers = {
@@ -466,7 +465,6 @@ class TestcaseE2e(ApiTestcaseBase):
         self._expand_compressed_fields()
         self._check_field_counts()
         self._check_dyn_shape_slots()
-        self._check_manual_xpu_binaries()
 
     def _validate_api_contract(self):
         """API 签名侧：重载匹配、必选属性与 out 参数对账。"""

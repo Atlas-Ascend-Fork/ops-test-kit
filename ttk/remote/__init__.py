@@ -18,8 +18,9 @@ DATA = 0b01  # return remote xpu outputs
 PERF = 0b10  # collect performance
 
 
-def xpu_mode(switches, need_data: bool) -> int:
-    """三方采集模式位：xpu_perf→PERF，need_data/--dump xpu→DATA。
+def xpu_mode(switches, need_xpu_data: bool) -> int:
+    """三方采集模式位：xpu_perf→PERF；DATA 位由 switches 级需求（--golden-mode
+    XPU / --dump xpu）与调用方 per-case 判据 need_xpu_data（cross_check）共同置位。
 
     正本在协议层（client/dispatcher 与 xpu_mode 消费方共享）；
     ttk.core_modules.common.xpu re-export 供 worker 侧统一导入。
@@ -28,7 +29,11 @@ def xpu_mode(switches, need_data: bool) -> int:
     if getattr(switches, "xpu_perf", False):
         mode |= PERF
     dump_config = getattr(switches, "dump_config", None)
-    if need_data or (dump_config is not None and getattr(dump_config, "dump_xpu", False)):
+    if (
+        need_xpu_data
+        or getattr(switches, "golden_mode", None) == "XPU"
+        or (dump_config is not None and getattr(dump_config, "dump_xpu", False))
+    ):
         mode |= DATA
     return mode
 

@@ -119,6 +119,22 @@ def _normalize_aten_schema_type(t: str) -> str:
     return _normalize_npu_type(t)
 
 
+def parse_signature_line(func_line: str):
+    """aten func 行 → (name, params, return_count)。签名源与 torch.ops schema
+    源共用 _parse_aten_schema_arguments，类型/默认值/kwarg_only/(a!) 语义一致。
+    带点全名不是合法 schema 名，先切名再以占位名解析。
+    """
+    import torch
+
+    head, paren, rest = func_line.partition("(")
+    name = head.strip()
+    if not name or not paren:
+        raise ValueError(f"invalid signature line (want 'name(params) -> returns'): {func_line!r}")
+    schema = torch._C.parse_schema(f"__ttk_sig__({rest}")
+    params = _parse_aten_schema_arguments(schema) or []
+    return name, params, len(schema.returns)
+
+
 def _torch_tensor_type():
     """torch.Tensor;torch 不可用时返回一个不会与任何注解相等的哨兵。"""
     try:

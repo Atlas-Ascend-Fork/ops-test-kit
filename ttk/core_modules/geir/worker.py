@@ -33,8 +33,8 @@ from ..common.comparison.batch_consistency import assemble_batch_summary
 from ..common.comparison.resolve import needs_promote_golden, resolve_tolerance
 from ..common.dump import (
     dump_manual_dataset,
-    load_replay_goldens,
-    manual_data_dump_store,
+    load_manual_goldens,
+    manual_data_dump_case,
     resolve_manual_case,
     snapshot_manual_values,
 )
@@ -47,10 +47,11 @@ from ..common.testcase.input_data import reseed_per_testcase
 from ..common.testcase.tensor import values_match_slots
 from ..common.xpu import (
     MANUAL_XPU_PROVIDER,
+    XPU_DATA,
     XpuDispatch,
     collect_third_party,
     dump_xpu_slot_files,
-    load_manual_third_parties,
+    load_third_parties,
     manual_xpu_results,
     overlap_deadline_s,
     snapshot_xpu_inputs,
@@ -110,19 +111,19 @@ def run(
             grant_event=device_grant_events.get(dev_id),
             granted_idx=device_granted_indices.get(dev_id),
         ):
-            manual_case, stored_goldens, dump_store, early = _resolve_manual_stores(testcase, switches, process_ctx)
+            manual_case, stored_goldens, dump_case, early = _resolve_manual_stores(testcase, switches, process_ctx)
             if early is not None:
                 result = early
             elif switches.no_prof:
-                result = _manual_data_dump(testcase, switches, process_ctx, dump_store)
+                result = _manual_data_dump(testcase, switches, process_ctx, dump_case)
             else:
                 result = None
                 for mode in _expand_modes(switches):
                     mode_result = _run_profile(
-                        testcase, dev_id, switches, process_ctx, mode, manual_case, stored_goldens, dump_store
+                        testcase, dev_id, switches, process_ctx, mode, manual_case, stored_goldens, dump_case
                     )
                     result = _merge_mode_result(result, mode_result, mode)
-                    dump_store = None  # 首跑数据集由首个模式写一次，后续模式不再落
+                    dump_case = None  # 首跑数据集由首个模式写一次，后续模式不再落
     except Exception as e:
         logging.exception("GEIR profiling exception")
         message = str(e)
@@ -229,12 +230,16 @@ def _profiling_end_print(result):
 
 def _geir_param_order(testcase) -> list:
     """def.cpp param order (inputs then attrs) for server-side pool merge."""
-    from ttk.core_modules.kernel.info_keeper import OpInfoKeeper
+    try:
+        from ttk.core_modules.kernel.info_keeper import OpInfoKeeper
 
-    op_info = OpInfoKeeper().info_of(testcase.op_name)
-    if not op_info:
+        op_info = OpInfoKeeper().info_of(testcase.op_name)
+        if not op_info:
+            return []
+        return [inp["name"] for inp in op_info["inputs"]] + [attr["name"] for attr in op_info["attr"]]
+    except Exception as exc:  # noqa: BLE001  纯 CPU/GPU 制备环境可能缺 CANN 配置，降级为空序
+        logging.debugc("[GEIR/%s] param order unavailable, fallback to []: %s", testcase.op_name, exc)
         return []
-    return [inp["name"] for inp in op_info["inputs"]] + [attr["name"] for attr in op_info["attr"]]
 
 
 def _manual_data_failure(status: str, exc: Exception) -> GeirReturnStructure:
@@ -253,7 +258,7 @@ def _manual_data_failure(status: str, exc: Exception) -> GeirReturnStructure:
 def _resolve_manual_stores(testcase, switches, process_ctx):
     """manual-data 来源裁决（与 kernel/aclnn/e2e worker 同构）。
 
-    返回 (manual_case, stored_goldens, dump_store, early_result)；
+    返回 (manual_case, stored_goldens, dump_case, early_result)；
     early_result 非 None = 提前结束（开仓/装载失败）。
 
     - dump 方向（--no-prof）：开单目录 store（旧同名用例先失效）；
@@ -263,7 +268,7 @@ def _resolve_manual_stores(testcase, switches, process_ctx):
     """
     if switches.no_prof:
         try:
-            return None, None, manual_data_dump_store(testcase, switches), None
+            return None, None, manual_data_dump_case(testcase, switches), None
         except Exception as exc:
             logging.exception("Manual data dump store failure")
             return None, None, None, _manual_data_failure("MANUAL_DATA_PREPARE_FAILURE", exc)
@@ -283,7 +288,7 @@ def _resolve_manual_stores(testcase, switches, process_ctx):
     if manual_case is None and switches.dump_config.dump_input:
         # load 方向目录全空的首跑：正常生成并落盘（后续运行即可加载）
         try:
-            return None, None, manual_data_dump_store(testcase, switches), None
+            return None, None, manual_data_dump_case(testcase, switches), None
         except Exception as exc:
             logging.exception("Manual data dump store failure")
             return None, None, None, _manual_data_failure("MANUAL_DATA_PREPARE_FAILURE", exc)
@@ -293,7 +298,7 @@ def _resolve_manual_stores(testcase, switches, process_ctx):
             process_ctx.notify_status("OnLoadManualGolden")
             # 槽位声明经 testcase 协议（manual_data_golden_shapes/dtypes——
             # 含 shape-unknown 元数据槽，GeirTestcase 继承 TestcaseKernel）
-            stored_goldens = load_replay_goldens(
+            stored_goldens = load_manual_goldens(
                 manual_case,
                 shapes=testcase.manual_data_golden_shapes,
                 dtypes=testcase.manual_data_golden_dtypes,
@@ -304,11 +309,12 @@ def _resolve_manual_stores(testcase, switches, process_ctx):
     return manual_case, stored_goldens, None, None
 
 
-def _manual_data_dump(testcase, switches, process_ctx, dump_store) -> GeirReturnStructure:
+def _manual_data_dump(testcase, switches, process_ctx, dump_case) -> GeirReturnStructure:
     """--no-prof：输入 → 快照 → 判据/golden（Promote 遵从）→ store 落盘。
 
     数据集（输入+golden）与图模式（const/dynamic × binary）无关，单遍落盘；
-    三方采集 / 图编译 / 图执行全部跳过（geir 的主执行 = 图编译 + 图执行）。
+    图编译/图执行跳过（geir 的主执行 = 图编译 + 图执行）；远端三方采集照常
+    （--dump xpu/full 落 xpu_* 槽位、golden-XPU 升格、--xpu-perf 采指标）。
     """
     try:
         process_ctx.notify_status("OnGenerateInput")
@@ -325,11 +331,11 @@ def _manual_data_dump(testcase, switches, process_ctx, dump_store) -> GeirReturn
         elif write_goldens:
             process_ctx.notify_status("OnGenerateGolden")
             _prepare_golden(testcase, tol_state.golden_is_xpu)
-        if dump_store is None:
+        if dump_case is None:
             raise ValueError("no manual-data output directory configured")
         process_ctx.notify_status("OnWriteManualData")
         case_dir = dump_manual_dataset(
-            dump_store,
+            dump_case,
             testcase,
             "geir",
             input_snapshot,
@@ -340,30 +346,38 @@ def _manual_data_dump(testcase, switches, process_ctx, dump_store) -> GeirReturn
         logging.exception("GEIR manual-data dump failure")
         return _manual_data_failure("MANUAL_DATA_PREPARE_FAILURE", exc)
     logging.info("[%s] manual GEIR data dumped: %s", testcase.testcase_name, case_dir)
+    # 跳过 device 执行（图编译/图执行跳过），远端三方采集照常
+    xpu = _dispatch_xpu(testcase, switches, process_ctx, None, tol_state.need_3party)
+    if tol_state.golden_is_xpu:
+        early = _xpu_promote_golden(testcase, xpu)
+        if early is not None:
+            return early
+    _third_parties, xpu_results = _collect_xpu(testcase, switches, xpu, dump_case)
     result = GeirReturnStructure()
+    result.xpu_metrics = format_xpu_metrics(xpu_results) if xpu_results else {}
     result.precision = "MANUAL_DATA_PREPARED"
     result.precision_status = "MANUAL_DATA_PREPARED"
     result.passed = True
     return result
 
 
-def _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_snapshot) -> None:
+def _write_first_run_dump(testcase, switches, process_ctx, dump_case, input_snapshot) -> None:
     """load 方向首跑落盘：首模式输入与 golden 生成后写入数据集（输入快照 + golden）。"""
     try:
         process_ctx.notify_status("OnWriteManualData")
-        case_dir = dump_manual_dataset(dump_store, testcase, "geir", input_snapshot, testcase.golden_arrays, switches)
+        case_dir = dump_manual_dataset(dump_case, testcase, "geir", input_snapshot, testcase.golden_arrays, switches)
     except Exception as exc:
         raise RuntimeError(f"MANUAL_DATA_PREPARE_FAILURE: {exc}") from exc
     logging.info("[%s] manual GEIR data dumped (first run): %s", testcase.testcase_name, case_dir)
 
 
 def _run_profile(
-    testcase, dev_id, switches, process_ctx, mode="const", manual_case=None, stored_goldens=None, dump_store=None
+    testcase, dev_id, switches, process_ctx, mode="const", manual_case=None, stored_goldens=None, dump_case=None
 ):
     """单模式编排（输入/golden/判据/三方/图编译/图执行/比对/打包，图编译嵌在图执行前）。
 
     manual_case/stored_goldens：load 方向复跑装载（存储输入逐模式恢复，
-    golden 装载一次全程复用）；dump_store：首跑空目录落盘（仅首模式生效）。
+    golden 装载一次全程复用）；dump_case：首跑空目录落盘（仅首模式生效）。
     """
     process_ctx.notify_status("OnGenerateInput")
     testcase.device_id = dev_id
@@ -375,7 +389,7 @@ def _run_profile(
     _reconcile_inputs(testcase)  # 输入段后对账（结构 fail-fast + 字节 advisory）
 
     input_snapshot = None
-    if dump_store is not None and manual_case is None:
+    if dump_case is not None and manual_case is None:
         # 生成态数据将写入 store：先快照（图执行可能原地改动 backing storage）
         input_snapshot = snapshot_manual_values(list(_iter_flat_values(testcase.input_arrays or ())), "input")
 
@@ -387,17 +401,10 @@ def _run_profile(
         testcase, tol_state.golden_is_xpu, stored_goldens, golden_is_npu=tol_state.golden_is_npu, dev_id=dev_id
     )  # golden 生成
 
-    if dump_store is not None:
-        if tol_state.golden_is_xpu:
-            # 对齐 kernel full-flow + XPU：三方 golden 无可落盘，warning 跳过。
-            # NPU 不跳过：golden 已在 _prepare_golden 内生成（自起锁段），首跑
-            # 落盘后 replay 可直接复用。
-            logging.warning(
-                "[%s] golden-mode XPU: skip manual-data output (golden produced by third party)",
-                testcase.testcase_name,
-            )
-        else:
-            _write_first_run_dump(testcase, switches, process_ctx, dump_store, input_snapshot)
+    if dump_case is not None:
+        # golden-XPU 占位串过滤后仅落 input；NPU golden 已在 _prepare_golden
+        # 内生成（自起锁段），首跑落盘后 replay 复用。
+        _write_first_run_dump(testcase, switches, process_ctx, dump_case, input_snapshot)
 
     xpu = _dispatch_xpu(testcase, switches, process_ctx, manual_case, tol_state.need_3party)  # 三方 dispatch
     if tol_state.golden_is_xpu:
@@ -421,7 +428,7 @@ def _run_profile(
     )
     exec_result = execute_graph(testcase, dev_id, switches, plan, tol_state.pre_compare)  # 图执行（XPU 并行中）
 
-    third_parties, xpu_results = _collect_xpu(testcase, switches, xpu)
+    third_parties, xpu_results = _collect_xpu(testcase, switches, xpu, dump_case)
     if tol_state.golden_is_xpu:
         # golden 性能回填：三方执行即 golden 真值，device_us 进 golden_* 列
         from ..common.golden import xpu_golden_perf
@@ -439,7 +446,7 @@ def _run_profile(
     )
     # store 已落输入/golden 时跳过常规数据 dump（输出仍落——来自执行，store 表达不了）
     compared = compare_case(
-        testcase, mode.replace("_binary", ""), inputs, skip_stored_data=dump_store is not None
+        testcase, mode.replace("_binary", ""), inputs, skip_stored_data=dump_case is not None
     )  # 比对 + dump
 
     # dl=3 batch 一致性：比对后切片哈希——按 batch_axis 切
@@ -609,37 +616,38 @@ def _dispatch_xpu(testcase, switches, process_ctx, manual_case, need_3party) -> 
     (third_parties, xpu_results, provider)。
     """
     golden_is_xpu = switches.golden_mode == "XPU"
-    need_data = need_3party or golden_is_xpu
-    if need_data:
-        manual = load_manual_third_parties(testcase, manual_case)
+    mode = xpu_mode(switches, need_3party)
+    if mode & XPU_DATA:
+        # DATA 位（cross_check / golden-XPU / --dump xpu）才走 manual 源短路
+        manual = load_third_parties(testcase, manual_case)
         if manual is not None:
             process_ctx.notify_status("OnLoadManualXpu")
             return XpuDispatch.ready((manual, manual_xpu_results(), MANUAL_XPU_PROVIDER))
-    if not xpu_mode(switches, need_data):
+    if not mode:
         return XpuDispatch.ready((None, None, None))
     if golden_is_xpu or not xpu_overlap_enabled():
         process_ctx.notify_status("OnXpuProfiling")
-        return XpuDispatch.ready(_collect_xpu_remote(testcase, switches, need_data))
+        return XpuDispatch.ready(_collect_xpu_remote(testcase, switches, need_3party))
     # 重叠：主线程派生+快照（防图执行原地改写 backing storage vs 线程序列化读竞争）
     inputs = snapshot_xpu_inputs(getattr(testcase, "original_input_arrays", None) or testcase.input_arrays)
     budget = overlap_deadline_s(switches)
     process_ctx.notify_status("OnXpuDispatch")
     return XpuDispatch.background(
-        _collect_xpu_remote, testcase, switches, need_data, inputs, budget, join_timeout=xpu_join_timeout(budget)
+        _collect_xpu_remote, testcase, switches, need_3party, inputs, budget, join_timeout=xpu_join_timeout(budget)
     )
 
 
-def _collect_xpu(testcase, switches, xpu) -> tuple:
+def _collect_xpu(testcase, switches, xpu, dump_case=None) -> tuple:
     """NPU 执行完毕的三方收割（ready 即取/幂等；重叠形态 join）+ case 目录槽位落盘。"""
     process_ctx = process_context()
     if xpu.pending:
         process_ctx.notify_status("OnXpuCollect")
     third_parties, xpu_results, xpu_provider = xpu.collect()
-    dump_xpu_slot_files(testcase, switches, third_parties, xpu_provider)
+    dump_xpu_slot_files(testcase, switches, third_parties, xpu_provider, dump_case=dump_case)
     return third_parties, xpu_results
 
 
-def _collect_xpu_remote(testcase, switches, need_data, inputs=None, deadline_s=None) -> tuple:
+def _collect_xpu_remote(testcase, switches, need_xpu_data, inputs=None, deadline_s=None) -> tuple:
     """geir 远端采集（同步形态 = 现状语义；重叠形态由 _dispatch_xpu 以快照
     inputs/deadline 调起）。经 common.xpu 门面，GEIR 的 input_names 来自
     ProtoLoader，op_type 无概念传 None（服务端靠 op_name 推导）。"""
@@ -653,7 +661,7 @@ def _collect_xpu_remote(testcase, switches, need_data, inputs=None, deadline_s=N
         attributes=getattr(testcase, "attributes", {}) or {},
         testcase_name=testcase.testcase_name,
         switches=switches,
-        need_data=need_data,
+        need_xpu_data=need_xpu_data,
         param_order=_geir_param_order(testcase),
         input_formats=getattr(testcase, "input_formats", None),
         input_dtypes=getattr(testcase, "input_dtypes", None),

@@ -111,8 +111,8 @@ def test_do_xpu_profiling_resolve_failure_sets_empty_and_survives(monkeypatch, t
     # OpInfoKeeper / TestSpecManager lookups must not break the fail-loud path;
     # the resolve failure happens after them, before collect_xpu_results.
     with caplog.at_level(logging.ERROR):
-        priority = prof._do_xpu_profiling(context, xpu_mode=0b11)  # must NOT raise
+        priority, xpu_results = prof._do_xpu_profiling(context, xpu_mode=0b11)  # must NOT raise
 
-    assert context.xpu_results == {}  # empty: no provider dispatched
+    assert xpu_results == {}  # empty: no provider dispatched
     assert priority is None  # resolve failed -> None priority
     assert any("XPU resolve failed" in r.message for r in caplog.records)

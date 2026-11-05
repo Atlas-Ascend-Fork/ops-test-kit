@@ -25,7 +25,7 @@ import numpy as np
 from ttk.core_modules.common.testcase.batch import batch_relation_kwargs
 from ttk.utilities.dtypes import is_4bit_dtype, unpack_4bits
 
-from ..common.invoke import accepts_var_keyword, sig_params
+from ..common.invoke import accepts_var_keyword, golden_mode, sig_params
 
 # eager（adapter.run_eager）与图模式（torch/graph_runner.py）共用的 warmup 轮数
 WARMUP_COUNT = 1
@@ -54,7 +54,8 @@ def build_plugin_call(
     """按 ParamPlan 装配插件入参（input/golden 插件共用）：build_args + 上下文注入 + 签名过滤。
 
     extra = testcase_name/tensor_formats/tensor_dtypes/use_numpy/short_soc_version/
-    backend（device 与 input_ranges 可选）+ attributes 未消耗项 + batch_relation_kwargs；
+    backend/golden_mode（device 与 input_ranges 可选）+ attributes 未消耗项 +
+    batch_relation_kwargs；golden_mode 为本例生效值（override 优先于全局）；
     func 无 **kwargs 时只传已声明形参。返回 (args, kwargs)。
     """
     args, kwargs, extra_attrs = plan.build_args(nested_inputs)
@@ -65,6 +66,7 @@ def build_plugin_call(
         "use_numpy": use_numpy,
         "short_soc_version": getattr(switches, "short_soc_version", None),
         "testcase_name": testcase.testcase_name,
+        "golden_mode": golden_mode(testcase, switches),
     }
     if device is not None:
         extra["device"] = device

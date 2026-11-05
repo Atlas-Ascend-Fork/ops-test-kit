@@ -23,6 +23,7 @@ import logging
 import os
 
 __all__ = [
+    "cgroup_file_cache",
     "cgroup_mem_current",
     "cgroup_mem_limit",
     "cgroup_memory_snapshot",
@@ -34,6 +35,8 @@ _CGROUP_V2_MAX = "/sys/fs/cgroup/memory.max"
 _CGROUP_V2_CURRENT = "/sys/fs/cgroup/memory.current"
 _CGROUP_V1_LIMIT = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 _CGROUP_V1_CURRENT = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+_CGROUP_V2_STAT = "/sys/fs/cgroup/memory.stat"
+_CGROUP_V1_STAT = "/sys/fs/cgroup/memory/memory.stat"
 # v2 "max"（读出非整数→None）；v1 以近 2^63 的巨值表示无限额
 _UNLIMITED = 1 << 60
 
@@ -69,6 +72,44 @@ def cgroup_mem_current():
     if raw is None:
         raw = _read_int(_CGROUP_V1_CURRENT)
     return raw
+
+
+def _read_stat_bytes(paths, keys):
+    """首个可读 memory.stat 里 keys 各行之和（字节）；无匹配 → None。"""
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        total = 0
+        found = False
+        for line in lines:
+            name, _, value = line.partition(" ")
+            if name in keys:
+                try:
+                    total += int(value)
+                except ValueError:
+                    continue
+                found = True
+        if found:
+            return total
+    return None
+
+
+def cgroup_file_cache():
+    """cgroup 可回收文件缓存（字节）：memory.stat 的 file（v2）/cache（v1）
+    减去 shmem/tmpfs。
+
+    shmem 不写 swap 释放不了：v1 把它计在 cache 里，全额扣除会虚增余量；
+    v2 的 file 与 shmem 分列，减法同样成立（字段缺失按 0，最多偏保守）。
+    无 cgroup / stat 不可读 → None。
+    """
+    cache = _read_stat_bytes((_CGROUP_V2_STAT, _CGROUP_V1_STAT), ("file", "cache"))
+    if cache is None:
+        return None
+    shmem = _read_stat_bytes((_CGROUP_V2_STAT, _CGROUP_V1_STAT), ("shmem",)) or 0
+    return max(0, cache - shmem)
 
 
 def cgroup_memory_snapshot():

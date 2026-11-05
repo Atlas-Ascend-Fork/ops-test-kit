@@ -77,6 +77,67 @@ def _promote_raw_inputs(testcase, raw_inputs, switches=None):
     return promoted
 
 
+def _promote_tensor_value(value, target, source_dtype):
+    """单张量升精度副本：torch .to() / numpy astype，载体类型不变。
+
+    转换失败（含 torch 缺席、dtype 无法解析）告警后原样返回。"""
+    import numpy
+
+    if isinstance(value, numpy.ndarray):
+        try:
+            return value.astype(numpy.dtype(target))
+        except (TypeError, ValueError):
+            logging.warning(f"[golden] promote tensor {source_dtype}->{target} failed, keep original")
+            return value
+    if not hasattr(value, "dtype"):
+        return value
+    try:
+        from ttk.utilities import str_to_torch_dtype
+
+        tgt = str_to_torch_dtype(target)
+    except ImportError:
+        return value
+    if tgt is None or getattr(value, "dtype", None) == tgt:
+        return value
+    try:
+        return value.to(tgt)
+    except (RuntimeError, TypeError, ValueError):
+        logging.warning(f"[golden] promote tensor {source_dtype}->{target} failed, keep original")
+        return value
+
+
+def _promoted_golden_inputs(testcase, switches):
+    """Promote 时插件 golden 的升精度输入（与 kernel/aclnn 同语义）。
+
+    golden_mode=="Promote"（含判据隐式 override）时，flat 输入张量按
+    DTYPE_PROMOTE_MAP 升精度、按 tensor_list_dist 重新嵌套；纯输出槽
+    （pure_output_indexes）与 None 槽不动。新建副本，不改 testcase 上的
+    共享张量；标量为 python 原生值不升。无可升槽位返回 None。"""
+    if golden_mode(testcase, switches) != "Promote":
+        return None
+    flat = getattr(testcase, "flat_tensors", None)
+    dtypes = getattr(testcase, "flat_tensor_dtypes", None)
+    if not flat or not dtypes:
+        return None
+    out_flat = set(getattr(testcase, "pure_output_indexes", None) or ())
+    new_flat = list(flat)
+    changed = False
+    for idx, tensor in enumerate(new_flat):
+        if tensor is None or idx >= len(dtypes) or idx in out_flat:
+            continue
+        target = DTYPE_PROMOTE_MAP.get(dtypes[idx])
+        if target is None:
+            continue
+        promoted = _promote_tensor_value(tensor, target, dtypes[idx])
+        if promoted is not tensor:
+            new_flat[idx] = promoted
+            changed = True
+    if not changed:
+        return None
+    dist = testcase.tensor_list_dist
+    return nest_by_distribution(new_flat, dist) if dist else new_flat
+
+
 def _reset_mutable_inputs(api_name, testcase, raw_inputs):
     """复位 mutable-ref 算子的输入变量：golden 与被测共用同一个 tf.Variable，
     不复位会在被测改写后的状态上计算。复位经 adapter 钩子实现（tf 有效，
@@ -207,8 +268,9 @@ def generate_golden(testcase, raw_inputs, plugin_path=None, switches=None, backe
     # exec_backend 决定设备：传入 NPU 后端则上板，否则全程 CPU
     run_on_npu = exec_backend is not None and exec_backend.is_npu()
 
-    # Promote：抬高浮点输入精度。golden_api 与同 API 路径共用 raw_inputs，
-    # 插件路径自行取数不受影响；Promote 与 NPU/XPU 模式互斥
+    # Promote：抬高浮点输入精度。golden_api 与同 API 路径共用 raw_inputs；
+    # 插件路径（func/class）经 _promoted_golden_inputs 收升精度副本；
+    # Promote 与 NPU/XPU 模式互斥
     raw_inputs = _promote_raw_inputs(testcase, raw_inputs, switches)
 
     # --- Priority 1: CSV golden_api column ---
@@ -350,7 +412,8 @@ def has_dynamic_golden_source(testcase, switches, manual_case=None):
 def _call_plugin_with_plan(testcase, func, switches=None, backend="cpu", device=None):
     """Call golden plugin using testcase's param plan — same arg order as profiling.
     Interface is identical to input plugin, except golden returns values.
-    Uses testcase.tensors (CPU nested tensors) directly.
+    Uses testcase.tensors (CPU nested tensors)；Promote 时经 _promoted_golden_inputs
+    换升精度副本。
 
     device 非 None 时（NPU）：args/kwargs 中 torch 张量 .to(device) 上板，
     extra 注入 device 字符串（声明 device 形参或 **kwargs 的插件才收到）；
@@ -363,8 +426,11 @@ def _call_plugin_with_plan(testcase, func, switches=None, backend="cpu", device=
 
     if isinstance(func, type):
         return _call_class_golden(testcase, func, plan, switches, cpu_backend, device=device)
+    # Promote 时插件收升精度输入副本，testcase.tensors 原样
+    promoted = _promoted_golden_inputs(testcase, switches)
+    nested_inputs = promoted if promoted is not None else testcase.tensors
     args, kwargs = build_plugin_call(
-        func, testcase, switches, plan, testcase.tensors, backend=backend, use_numpy=use_numpy, device=device or "cpu"
+        func, testcase, switches, plan, nested_inputs, backend=backend, use_numpy=use_numpy, device=device or "cpu"
     )
     if device is not None:
         import torch
@@ -386,18 +452,22 @@ def _call_class_golden(testcase, func, plan, switches, cpu_backend, device=None)
     """class 形插件 golden：按名池绑定 __init__/__call__。
 
     池 = 张量参数名绑定值（plan.tensor_param_bindings，TensorList 参数为
-    列表）+ testcase.attributes + device（class_accepts_device 声明才注入）。
-    device 非 None 时池内 torch 张量 .to(device) 上板；返回值经
-    result_to_numpy 回转。
+    列表，Promote 时为升精度副本）+ testcase.attributes + golden_mode
+    （本例生效值）+ device（class_accepts_device 声明才注入）。device
+    非 None 时池内 torch 张量 .to(device) 上板；返回值经 result_to_numpy
+    回转。
     """
     from ttk.core_modules.common.invoke import class_accepts_device, instantiate_and_call
 
-    args, kwargs, _extra = plan.build_args(testcase.tensors)
+    promoted = _promoted_golden_inputs(testcase, switches)
+    nested_inputs = promoted if promoted is not None else testcase.tensors
+    args, kwargs, _extra = plan.build_args(nested_inputs)
     pool = {}
-    for name, entries in plan.tensor_param_bindings(testcase.tensors).items():
+    for name, entries in plan.tensor_param_bindings(nested_inputs).items():
         vals = [kwargs[key] if container == "kwargs" else args[key] for _top_index, container, key, _vararg in entries]
         pool[name] = vals[0] if len(vals) == 1 else vals
     pool.update(testcase.attributes or {})
+    pool["golden_mode"] = golden_mode(testcase, switches)
     if device is not None:
         import torch
 

@@ -12,7 +12,9 @@
 
 Snapshot is cgroup-aware: in limited containers the host free figure is a
 mirage (e.g. 754 GB host / 32 GB cgroup), so headroom is computed from
-min(cgroup limit, host total).
+min(cgroup limit, host total). Cgroup usage takes the working set: the
+reclaimable file cache is deducted (the kernel evicts file pages under
+pressure long before OOM, so cache does not consume real headroom).
 
 Concurrent worker spawns can be OOM-killed outright when free memory is
 exhausted; the gate pauses the workload at critically low headroom
@@ -32,7 +34,7 @@ import logging
 import os
 import time
 
-from ....utilities.memory import cgroup_mem_current, cgroup_mem_limit
+from ....utilities.memory import cgroup_file_cache, cgroup_mem_current, cgroup_mem_limit
 
 __all__ = ["gate_host_memory", "host_memory_floor"]
 
@@ -43,8 +45,10 @@ _GB = 1024**3
 def _memory_snapshot():
     """(total, available)：有限额容器按 cgroup 算（宿主 free 是假象）。
 
-    available 取 cgroup 限额余量与宿主可用的较小者——两者任一耗尽都会
-    OOM kill；无 cgroup（裸机）退化为宿主快照。
+    cgroup 用量取 working set——扣除可回收 file cache（压力下内核先逐出
+    file 页再 OOM，缓存占满不构成 OOM 风险，裸 usage 会把文件缓存误计入
+    占用）；available 取 working set 余量与宿主可用的较小者，无 cgroup
+    （裸机）退化为宿主快照。
     """
     import psutil
 
@@ -53,7 +57,9 @@ def _memory_snapshot():
     if limit is None:
         return vm.total, vm.available
     total = min(limit, vm.total)
-    available = max(0, limit - (cgroup_mem_current() or 0))
+    current = cgroup_mem_current() or 0
+    file_cache = min(cgroup_file_cache() or 0, current)
+    available = max(0, limit - (current - file_cache))
     return total, min(available, vm.available)
 
 

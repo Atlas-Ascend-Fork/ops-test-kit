@@ -14,7 +14,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from ttk.core_modules.common.dump import DumpConfig, ManualDataStore
+from ttk.core_modules.common.dump import DumpConfig
+from ttk.core_modules.common.dump.manual_data import ManualDataStore
 from ttk.core_modules.kernel import golden as output_generation
 from ttk.core_modules.kernel import input_generate as input_generation
 from ttk.core_modules.kernel import worker as profiling

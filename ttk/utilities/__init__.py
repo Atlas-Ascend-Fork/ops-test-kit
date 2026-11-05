@@ -83,7 +83,6 @@ _EXPORTS = {
     "is_transformable": ".format",
     "kernel_debug_compile_enabled": ".proc",
     "lcm": ".math",
-    "load_array": ".file_utils",
     "longest_match": ".string",
     "msdebug_runtime_injection_enabled": ".proc",
     "mx_quantize": ".mx_quant",

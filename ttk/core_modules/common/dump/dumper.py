@@ -38,7 +38,7 @@ from typing import Optional, Sequence, Union
 from ....utilities.dtypes import dtype_to_name
 from .config import DumpConfig
 from .formatter import get_formatter
-from .manual_data import _encode_shape, case_directory_name
+from .naming import case_directory_name, encode_shape
 
 
 def _safe_dump_token(value, default: str) -> str:
@@ -89,7 +89,7 @@ def _shape_token(data) -> Optional[str]:
     shape = getattr(data, "shape", None)
     if shape is None:
         return None
-    return _encode_shape(tuple(int(dimension) for dimension in shape))
+    return encode_shape(tuple(int(dimension) for dimension in shape))
 
 
 class DataDumper:
@@ -161,11 +161,11 @@ class DataDumper:
             self._write("output", data, idx, _slot_dtype(dtypes, idx, data), segment)
 
     def dump_goldens(
-        self, goldens: Sequence, dtypes: Sequence = (), force: bool = False, provider: Optional[str] = None
+        self, goldens: Sequence, dtypes: Sequence = (), segment: Optional[str] = None, force: bool = False
     ) -> None:
-        """force or cfg.dump_golden → golden[_{provider}]_{idx}_{dtype}.{ext}
-        （provider 非 None 时占用 segment 位，如 golden_npu_0_float32——golden
-        来源区分；默认 None 保持 `golden_{idx}_{dtype}` 现状命名，replay 协议
+        """force or cfg.dump_golden → golden[_{segment}]_{idx}_{dtype}.{ext}
+        （segment 非 None 时占用段位，如 golden_npu_0_float32——golden 来源
+        区分；默认 None 保持 `golden_{idx}_{dtype}` 现状命名，replay 协议
         依赖）。None/str 占位跳过保 idx，同 dump_inputs。bin 追加 `_shape_<token>`
         段——调试期无需对齐声明槽即可从文件名读出 shape（回放协议本就支持）。"""
         if not (force or self.cfg.dump_golden):
@@ -176,7 +176,7 @@ class DataDumper:
             if data is None or isinstance(data, str):
                 continue
             shape_token = _shape_token(data) if bin_format else None
-            self._write("golden", data, idx, _slot_dtype(dtypes, idx, data), provider, shape_token=shape_token)
+            self._write("golden", data, idx, _slot_dtype(dtypes, idx, data), segment, shape_token=shape_token)
 
     def dump_xpu(self, third_parties: dict, force: bool = False) -> None:
         """force or cfg.dump_xpu → xpu_{provider}_{idx}_{dtype}.{ext}
@@ -194,16 +194,6 @@ class DataDumper:
                     continue
                 shape_token = _shape_token(data) if bin_format else None
                 self._write("xpu", data, idx, _slot_dtype((), idx, data), str(provider), shape_token=shape_token)
-
-    def dump_xpu_outputs(self, outputs: Sequence, provider: str, dtypes: Sequence = (), force: bool = False) -> None:
-        """XPU 后端执行：force or cfg.dump_output → xpu_{provider}_{idx}_{dtype}.{ext}。
-
-        开关口径与 dump_outputs 一致（--dump out/full），只改命名——device
-        输出落地为三方槽位协议（provider 口径同三方比对：torch/tf），供跨
-        机器 manual-data 回放比对。"""
-        if not (force or self.cfg.dump_output):
-            return
-        self.dump_xpu({provider: list(outputs)}, force=True)
 
     def dump_named(self, name: str, data, dtype=None) -> None:
         """特殊条目（tiling_data 等）：按调用方组合名直写 {name}.{ext}，不走开关。"""
@@ -236,3 +226,21 @@ class DataDumper:
                 self.dump_outputs(outputs, dtypes=dtypes, segment=segment, force=True)
         if not self.cfg.dump_golden:
             self.dump_goldens(goldens, dtypes=dtypes, force=True)
+
+
+def dump_xpu_slot_files(testcase, switches, third_parties, provider, dump_case=None) -> None:
+    """--dump xpu 开启时三方输出落盘。
+
+    dump 方向（--no-prof，dump_case 非 None）写 manual-data 数据集，xpu 槽位
+    与 input/golden 同目录；其余场景写调试 dump 目录（DataDumper）。命名协议：
+    xpu_{provider}_{idx}_{dtype}[_shape_{dims}].{ext}。
+    """
+    if not third_parties:
+        return
+    if not getattr(getattr(switches, "dump_config", None), "dump_xpu", False):
+        return
+    if dump_case is not None:
+        dump_case.dump_xpu({provider: list(third_parties)}, switches)
+        return
+    name_prefix = getattr(testcase, "dump_file_prefix", None) or getattr(testcase, "testcase_name", None) or "case"
+    DataDumper(switches, name_prefix).dump_xpu({provider: list(third_parties)})

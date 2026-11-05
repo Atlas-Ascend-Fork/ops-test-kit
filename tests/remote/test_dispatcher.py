@@ -397,6 +397,157 @@ class TestRoundTrip:
             os.unlink(npz_path)
 
 
+class TestSpecTreeSync:
+    """424 整树同步：目录式 spec（spec.py + impl/ 包）按相对子路径一次上齐。"""
+
+    def _write_assets(self, root):
+        (root / "impl").mkdir()
+        (root / "spec.py").write_text("class S: pass")
+        (root / "impl" / "__init__.py").write_text("")
+        (root / "impl" / "golden.py").write_text("def golden(): pass")
+        return str(root / "spec.py")
+
+    def test_sync_rel_path_preserves_package_structure(self, tmp_path):
+        from ttk.remote.dispatcher import _sync_rel_path
+
+        impl = tmp_path / "impl"
+        impl.mkdir()
+        golden = impl / "golden.py"
+        golden.write_text("x")
+        assert _sync_rel_path(str(golden), [str(tmp_path)]) == "impl/golden.py"
+        # 不在任何 root 树内 → 退回 basename（防御路径）
+        assert _sync_rel_path(str(golden), [str(tmp_path / "other")]) == "golden.py"
+
+    def test_spec_tree_files_recursive_relative_and_filtered(self, tmp_path):
+        import base64
+        import hashlib
+
+        from ttk.remote.dispatcher import _spec_tree_files
+
+        (tmp_path / "impl").mkdir()
+        (tmp_path / "spec.py").write_text("S")
+        (tmp_path / "impl" / "__init__.py").write_text("I")
+        (tmp_path / "impl" / "golden.py").write_text("G")
+        pycache = tmp_path / "impl" / "__pycache__"
+        pycache.mkdir()
+        (pycache / "golden.cpython-312.pyc").write_bytes(b"\x00")
+        (tmp_path / "notes.txt").write_text("skip")
+        files = _spec_tree_files(str(tmp_path))
+        assert sorted(files) == ["impl/__init__.py", "impl/golden.py", "spec.py"]
+        assert base64.b64decode(files["impl/golden.py"]["content"]) == b"G"
+        assert files["spec.py"]["hash"] == hashlib.sha256(b"S").hexdigest()
+
+    def test_spec_tree_sync_dedup_per_process(self, tmp_path, monkeypatch):
+        from ttk.remote import dispatcher
+
+        self._write_assets(tmp_path)
+        calls = []
+        monkeypatch.setattr(dispatcher, "_do_http_sync_tree", lambda *a, **k: calls.append(a) or True)
+        dispatcher._SPEC_TREE_SYNCED.clear()
+        dispatcher._SPEC_TREE_REJECTED.clear()
+        try:
+            assert dispatcher._sync_spec_tree(str(tmp_path), "h", 1, "t", 5) is True
+            assert dispatcher._sync_spec_tree(str(tmp_path), "h", 1, "t", 5) is True
+            assert len(calls) == 1  # 进程内第二次短路，不再上传
+        finally:
+            dispatcher._SPEC_TREE_SYNCED.clear()
+            dispatcher._SPEC_TREE_REJECTED.clear()
+
+    def test_spec_tree_sync_aborts_over_file_limit(self, tmp_path, monkeypatch):
+        from ttk.remote import dispatcher
+
+        for i in range(dispatcher._SPEC_TREE_MAX_FILES + 1):
+            (tmp_path / f"m{i:02d}.py").write_text("x")
+        calls = []
+        monkeypatch.setattr(dispatcher, "_do_http_sync_tree", lambda *a, **k: calls.append(a) or True)
+        dispatcher._SPEC_TREE_SYNCED.clear()
+        dispatcher._SPEC_TREE_REJECTED.clear()
+        try:
+            assert dispatcher._sync_spec_tree(str(tmp_path), "h", 1, "t", 5) is False
+            assert calls == []  # 超限中断：未发起上传
+            assert dispatcher._sync_spec_tree(str(tmp_path), "h", 1, "t", 5) is False
+            assert calls == []  # 拒绝名单短路，本运行内不再整树重试
+        finally:
+            dispatcher._SPEC_TREE_SYNCED.clear()
+            dispatcher._SPEC_TREE_REJECTED.clear()
+
+    def test_424_triggers_tree_sync_with_subpaths(self, tmp_path, monkeypatch):
+        from ttk.remote import PERF
+        from ttk.remote.dispatcher import dispatch_to_remote
+
+        spec_file = self._write_assets(tmp_path)
+        requests = []
+        script = [
+            _FakeResp(424, body=json.dumps({"error": "missing spec dependency: spec", "missing": "spec"}).encode()),
+            _FakeResp(200),  # tree /v1/sync
+            _FakeResp(200),  # module /v1/sync（hash 比对服务端跳过）
+            _FakeResp(200),  # retry /v1/run（PERF-only，无输出体）
+        ]
+
+        class _CaptureConn:
+            def __init__(self, host, port, timeout=None):
+                self.path = None
+                self.body = None
+
+            def request(self, method, path, body=None, headers=None):
+                self.path = path
+                self.body = body
+
+            def putrequest(self, method, path):
+                self.path = path
+
+            def putheader(self, k, v):
+                pass
+
+            def endheaders(self):
+                pass
+
+            def send(self, chunk):
+                pass
+
+            def getresponse(self):
+                return script.pop(0) if script else _FakeResp(500)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("ttk.remote.dispatcher.http.client.HTTPConnection", _CaptureConn)
+        monkeypatch.setattr("ttk.remote.dispatcher.time.sleep", lambda *a, **k: None)
+
+        import ttk.remote.dispatcher as dispatcher_mod
+
+        def _capture_create(host, port, timeout=None):
+            conn = _CaptureConn(host, port, timeout=timeout)
+            requests.append(conn)
+            return conn
+
+        monkeypatch.setattr(dispatcher_mod, "_create_connection", _capture_create)
+        dispatcher_mod._SPEC_TREE_SYNCED.clear()
+        dispatcher_mod._SPEC_TREE_REJECTED.clear()
+        try:
+            out = dispatch_to_remote(
+                op_name="op",
+                inputs=[np.array([1.0])],
+                input_names=["x"],
+                mode=PERF,
+                endpoint_port=9,
+                tenant_id="t",
+                execution_type="spec",
+                spec_file=spec_file,
+                spec_module="spec",
+                spec_class="S",
+            )
+            assert out == []
+            syncs = [r for r in requests if r.path == "/v1/sync"]
+            assert len(syncs) == 2  # 整树 + 单文件兜底
+            tree_files = sorted(json.loads(syncs[0].body)["files"])
+            assert tree_files == ["impl/__init__.py", "impl/golden.py", "spec.py"]
+            assert sorted(json.loads(syncs[1].body)["files"]) == ["spec.py"]
+        finally:
+            dispatcher_mod._SPEC_TREE_SYNCED.clear()
+            dispatcher_mod._SPEC_TREE_REJECTED.clear()
+
+
 class TestParseClientMode:
     """X-Mode 客户端解析：data/data_perf/perf 全档映射，未知回 DATA。"""
 

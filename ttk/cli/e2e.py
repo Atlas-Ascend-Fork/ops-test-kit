@@ -87,6 +87,18 @@ def _add_e2e_args(parser):
         help="Capture full graph in torch.compile (0=off, 1=on; default: 0)",
     )
     group.add_argument(
+        "--sig",
+        "--signature",
+        dest="signature",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="API signature file (.py/.pyi, repeatable): provides params without importing the "
+        "op package (e.g. --no-prof preparation on machines without the op package installed). "
+        "Plain annotated defs register by function name; a CSV api_name matches by full name "
+        "or its unique tail. Highest priority, falls back to the normal extraction chain on miss",
+    )
+    group.add_argument(
         "--super-kernel",
         dest="super_kernel",
         action="store_true",

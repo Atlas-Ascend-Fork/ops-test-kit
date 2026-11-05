@@ -27,8 +27,13 @@ __spec__ = {"torch.abs": "TorchAbsTestSpec"}
 
 class TorchAbsTestSpec:
     def golden(x, **kwargs):
+        # kwargs 元信息同 customize_inputs：testcase_name / tensor_dtypes 等元信息
         return [torch.abs(x)]
 ```
+
+### Promote 下的输入精度
+
+`--golden-mode Promote`（或浮点输出配 mix_tolerance/cross_check 判据的隐式升格）时，golden 收到的**输入张量已是升精度副本**（fp16/bf16/float8→fp32、fp32→fp64，整型不动；out 结果槽不升），插件无需再自行升精度。`kwargs` 里的 `tensor_dtypes` 仍是 CSV 声明值——需要声明 dtype 时以此为准，需要实际 dtype 时读 `x.dtype`。Enable/NPU/XPU 模式下输入保持声明精度。
 
 ### golden_api（CSV 字段，替代 golden 的简单方案）
 

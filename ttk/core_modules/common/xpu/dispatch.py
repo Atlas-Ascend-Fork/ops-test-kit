@@ -13,7 +13,7 @@
 不可用由 client 既有语义降级。
 """
 
-# 数据位模式（need_data / need_perf 按位组合）——正本在 ttk.remote（协议层
+# 数据位模式（need_xpu_data / need_perf 按位组合）——正本在 ttk.remote（协议层
 # client/server 共享），此处 re-export 保持 worker 侧统一从 common.xpu 导入
 from ....remote import DATA as XPU_DATA  # noqa: F401
 from ....remote import PERF as XPU_PERF  # noqa: F401

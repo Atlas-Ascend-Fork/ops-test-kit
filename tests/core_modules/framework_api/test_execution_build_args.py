@@ -15,6 +15,7 @@ and ttk.core_modules.framework_api.testcase: get_param_plan.
 """
 
 import importlib.util
+from types import SimpleNamespace
 
 import pytest
 
@@ -815,3 +816,81 @@ class TestTensorListOutBuildArgs:
         assert kwargs["statistic"] is True
         assert "out" in kwargs
         assert len(kwargs["out"]) == 4
+
+
+class TestBuildPluginCallGoldenMode:
+    """build_plugin_call 的 golden_mode 注入（e2e input/golden 插件共用装配点）。"""
+
+    def _plan(self):
+        from ttk.core_modules.framework_api.api_param import ParamPlan
+
+        _register(
+            "torch.plugin_mode",
+            [
+                ParamInfo(name="input", type="Tensor"),
+            ],
+        )
+        params, oidx = _match_overload("torch.plugin_mode", 1)
+        return ParamPlan("torch.plugin_mode", params, oidx, (), {})
+
+    @staticmethod
+    def _case(override=None):
+        return SimpleNamespace(
+            testcase_name="t_mode",
+            api_name="torch.plugin_mode",
+            tensor_formats=("ND",),
+            tensor_dtypes=("float32",),
+            attributes={},
+            golden_mode_override=override,
+        )
+
+    def test_declared_param_receives_effective_mode(self):
+        from ttk.core_modules.framework_api.utils import build_plugin_call
+
+        def plugin(input, golden_mode=None):  # noqa: A002
+            return input, golden_mode
+
+        _, kwargs = build_plugin_call(
+            plugin,
+            self._case(),
+            SimpleNamespace(golden_mode="NPU"),
+            self._plan(),
+            ["T"],
+            backend="cpu",
+            use_numpy=False,
+        )
+        assert kwargs["golden_mode"] == "NPU"
+
+    def test_case_override_wins(self):
+        from ttk.core_modules.framework_api.utils import build_plugin_call
+
+        def plugin(input, **kw):
+            return input, kw
+
+        _, kwargs = build_plugin_call(
+            plugin,
+            self._case(override="XPU"),
+            SimpleNamespace(golden_mode="Enable"),
+            self._plan(),
+            ["T"],
+            backend="cpu",
+            use_numpy=False,
+        )
+        assert kwargs["golden_mode"] == "XPU"
+
+    def test_undeclared_plugin_unaffected(self):
+        from ttk.core_modules.framework_api.utils import build_plugin_call
+
+        def plugin(input):
+            return input
+
+        _, kwargs = build_plugin_call(
+            plugin,
+            self._case(),
+            SimpleNamespace(golden_mode="NPU"),
+            self._plan(),
+            ["T"],
+            backend="cpu",
+            use_numpy=False,
+        )
+        assert "golden_mode" not in kwargs

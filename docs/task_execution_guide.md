@@ -95,7 +95,7 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2     # 预览 Excel（指定工�
 | `--input-dist` | | `uniform` | 输入数据分布：`uniform`/`normal` | `--input-dist normal` |
 | `--seed` | | 随机 | 随机种子：固定后同一 CSV 连跑两次输入/golden 逐位一致，可用于改动前后 A/B 对比 | `--seed 42` |
 | `--golden-mode` | | `Enable` | Golden 生成模式：`Enable`/`Disable`/`Promote`（CPU 高精度）/`XPU`（三方输出作 golden）/`NPU`（golden 上 NPU 执行）。`Disable` 时不做精度比对，结论为 `SKIP`。onnx：`XPU` 启动期拒绝，`NPU` 退化同 `Enable` | `--golden-mode NPU` |
-| `--deterministic-level` | `--dl` | `0` | 确定性等级：`0` 关闭 / `1` 确定性计算 / `2` 强一致 / `3` 确定性执行 | `--dl=1` |
+| `--deterministic-level` | `--dl` | `0` | 确定性等级：`0` 关闭 / `1` 确定性计算 / `2` 强一致 / `3` batch 一致性 | `--dl=1` |
 
 > [!NOTE]
 > 精度比对方法的公式、容差及选择建议详见[精度比对方法](./reference/precision_comparison.md)。确定性计算详见[确定性计算与批一致性](./reference/determinism_compute.md)。
@@ -109,6 +109,7 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2     # 预览 Excel（指定工�
 | `--dump-on-fail` | | 关闭 | 精度失败时自动补 dump 输入/输出/Golden | `--dump-on-fail` |
 | `--manual-data-dirs` | | 无 | 离线数据目录（prepare 输出或 replay 搜索目录） | `--manual-data-dirs /data/op` |
 | `--plugin` | | 无 | 外部插件路径 | `--plugin /path/to/plugin.py` |
+| `--sig`, `--signature` | | 无 | （e2e）API 签名文件（`.py/.pyi`，可重复）：制备机无被测算子包时提供参数解析，不 import 被测包；标准 Python 注解 stub 按函数名登记，查询按全名或尾名唯一匹配（歧义拒绝）；优先级最高，未命中回落常规解析链 | `--sig /path/signatures.py` |
 | `--xpu-perf` | | 关闭 | 采集三方 XPU 性能（需远端 XPU 配置） | `--xpu-perf` |
 
 ### 6. 结果输出

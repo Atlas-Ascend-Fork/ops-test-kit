@@ -137,9 +137,23 @@ def _process_ctx(recorder):
     return SimpleNamespace(notify_status=lambda stage, *_: recorder.append(stage))
 
 
-def _slot_case(paths):
-    # manual-data case 目录槽位形态（load_manual_third_parties 的第二来源）
-    return SimpleNamespace(has_third_parties=True, third_party_paths=lambda: list(paths))
+def _slot_case(paths, saved_shapes=(), filename_dtypes=()):
+    # manual-data case 目录槽位形态（load_third_parties 的第二来源）；
+    # 真实 ManualDataCase.load_xpu 委托内部 store，桩按同口径走静态装载器
+    from ttk.core_modules.common.dump.manual_data import ManualDataStore
+
+    def load_xpu(testcase, device_outputs=None):
+        return ManualDataStore.load_xpu(
+            testcase, list(paths), list(saved_shapes), list(filename_dtypes), device_outputs=device_outputs
+        )
+
+    return SimpleNamespace(
+        has_third_parties=True,
+        third_party_paths=lambda: list(paths),
+        third_party_saved_shapes=lambda: list(saved_shapes),
+        third_party_dtypes=lambda: list(filename_dtypes),
+        load_xpu=load_xpu,
+    )
 
 
 @pytest.mark.parametrize(
@@ -180,7 +194,7 @@ def test_undeclared_goes_remote(tmp_path, monkeypatch):
 
     def _remote(**kwargs):
         recorder.append("remote")
-        assert kwargs["need_data"] is True
+        assert kwargs["need_xpu_data"] is True
         return "remote", sentinel_third, sentinel_results
 
     monkeypatch.setattr(geir_worker, "collect_third_party", _remote)
@@ -198,7 +212,7 @@ def test_undeclared_goes_remote(tmp_path, monkeypatch):
 
 
 def test_no_data_need_with_manual_still_skips(tmp_path):
-    """need_data=False（纯 PERF 场景）不短路——manual 无法提供性能数据。"""
+    """need_xpu_data=False（纯 PERF 场景）不短路——manual 无法提供性能数据。"""
     case = _manual_xpu_case(("gpu.bin",), tmp_path)
     recorder = []
 

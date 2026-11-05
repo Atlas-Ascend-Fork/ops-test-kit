@@ -101,6 +101,25 @@ def test_manual_xpu_tensor_list_is_flattened():
     assert case.flat_manual_xpu_binaries == ("gpu0.bin", "gpu1.bin")
 
 
+def _slot_case(paths, saved_shapes=(), filename_dtypes=()):
+    # manual-data case 目录槽位形态（load_third_parties 的第二来源）；
+    # 真实 ManualDataCase.load_xpu 委托内部 store，桩按同口径走静态装载器
+    from ttk.core_modules.common.dump.manual_data import ManualDataStore
+
+    def load_xpu(testcase, device_outputs=None):
+        return ManualDataStore.load_xpu(
+            testcase, list(paths), list(saved_shapes), list(filename_dtypes), device_outputs=device_outputs
+        )
+
+    return SimpleNamespace(
+        has_third_parties=True,
+        third_party_paths=lambda: list(paths),
+        third_party_saved_shapes=lambda: list(saved_shapes),
+        third_party_dtypes=lambda: list(filename_dtypes),
+        load_xpu=load_xpu,
+    )
+
+
 @pytest.mark.parametrize(
     ("need_3party", "golden_is_xpu", "via_slots"),
     [(True, False, False), (False, True, True)],
@@ -113,7 +132,7 @@ def test_manual_xpu_bypasses_xpu_dispatch(tmp_path, monkeypatch, need_3party, go
 
     case = _make_testcase()
     if via_slots:
-        manual_case = SimpleNamespace(has_third_parties=True, third_party_paths=lambda: [str(gpu_path)])
+        manual_case = _slot_case((str(gpu_path),))
     else:
         case.manual_xpu_binaries = (str(gpu_path),)
         _validate(case)
@@ -156,7 +175,7 @@ def test_manual_xpu_wrong_element_count_is_rejected(tmp_path):
     case.manual_xpu_binaries = (str(gpu_path),)
     _validate(case)
 
-    from ttk.core_modules.common.xpu import ManualXpuLoadError, load_manual_third_parties
+    from ttk.core_modules.common.xpu import DataLoadError, load_third_parties
 
-    with pytest.raises(ManualXpuLoadError, match="does not match"):
-        load_manual_third_parties(case)
+    with pytest.raises(DataLoadError, match="does not match"):
+        load_third_parties(case)

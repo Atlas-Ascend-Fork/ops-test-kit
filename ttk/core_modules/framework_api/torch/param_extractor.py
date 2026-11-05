@@ -671,14 +671,79 @@ def register_api_params(api_name: str, params: List[ParamInfo], source: str = "m
     _MANUAL_OVERRIDES[api_name] = APIParamInfo(api_name=api_name, params=params, source=source)
 
 
+# --signature 签名源（--sig）：路径经 switches pickle 传 worker，进程内惰性装载
+# ——CLI 进程注册进不了 worker 子进程（_MANUAL_OVERRIDES 是模块级状态）。
+# 尾名 → 登记全名 的兜底索引。
+_SIGNATURE_OVERRIDES_READY = False
+_SIGNATURE_TAIL_INDEX: Dict[str, List[str]] = {}
+
+
+def _load_signature_overrides():
+    """--sig 签名源惰性装载（幂等，对齐 _load_hccl_manual_table 模式）。
+
+    直存全量 APIParamInfo 进 _MANUAL_OVERRIDES（不走 register_api_params 平参
+    登记——会重建 overloads 丢 return_count）；后于 hccl 表装载，用户显式
+    签名覆盖内置手工表。单源失败 log 后继续（该源 API 自然回落六源链）。
+    """
+    global _SIGNATURE_OVERRIDES_READY
+    if _SIGNATURE_OVERRIDES_READY:
+        return
+    _SIGNATURE_OVERRIDES_READY = True
+    from ttk.switches import get_global_storage
+
+    sources = getattr(get_global_storage(), "signature_sources", None) or ()
+    if not sources:
+        return
+    from .signature_parser import parse_signature_source
+
+    loaded = 0
+    for source in sources:
+        try:
+            entries = parse_signature_source(source)
+        except Exception:
+            logging.exception(
+                "[signature] failed to load signature source %s; its APIs fall back to the normal chain", source
+            )
+            continue
+        for api_name, info in entries.items():
+            _MANUAL_OVERRIDES[api_name] = info
+            _SIGNATURE_TAIL_INDEX.setdefault(api_name.rsplit(".", 1)[-1], []).append(api_name)
+            loaded += 1
+    if loaded:
+        logging.info("[signature] %d signature(s) loaded from %d source(s)", loaded, len(sources))
+
+
+def _lookup_signature_override(api_name: str) -> Optional[APIParamInfo]:
+    """全名精确 → 尾名唯一匹配（INFO 告警）→ None。尾名歧义拒绝并列出候选。"""
+    info = _MANUAL_OVERRIDES.get(api_name)
+    if info is not None:
+        return info
+    tail = api_name.rsplit(".", 1)[-1]
+    candidates = _SIGNATURE_TAIL_INDEX.get(tail)
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        logging.error(
+            "[signature] ambiguous tail match %r: candidates %s; make the stub function name unique across --sig files",
+            api_name,
+            candidates,
+        )
+        return None
+    logging.info("[signature] tail match %r -> %r", api_name, candidates[0])
+    return _MANUAL_OVERRIDES.get(candidates[0])
+
+
 def get_api_params(api_name: str) -> Optional[APIParamInfo]:
-    """keeper 面解析入口：manual 表首查（惰性装载 hccl 表）→ 六源链 → Tensor 方法
-    补 self 位（别名结果已含 self 等价张量的除外）→ 置解析标志（is_tensor_method /
-    is_mutable 命名投影，schema 源已在 _parse_aten_schema_arguments 落位）。
+    """keeper 面解析入口：manual 表首查（惰性装载 hccl 表 + --sig 签名源，尾名
+    兜底）→ 六源链 → Tensor 方法补 self 位（别名结果已含 self 等价张量的除外）
+    → 置解析标志（is_tensor_method / is_mutable 命名投影，schema 源已在
+    _parse_aten_schema_arguments 落位）。
     """
     _load_hccl_manual_table()
-    if api_name in _MANUAL_OVERRIDES:
-        return _MANUAL_OVERRIDES[api_name]
+    _load_signature_overrides()
+    signature_hit = _lookup_signature_override(api_name)
+    if signature_hit is not None:
+        return signature_hit
     result = extract_api_params(api_name)
     if result is not None:
         result.is_tensor_method = is_tensor_method_name(api_name)

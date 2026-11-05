@@ -248,9 +248,23 @@ def _mx_case(path):
     )
 
 
-def _mx_slot_case(paths):
-    # manual-data case 目录槽位形态（load_manual_third_parties 的第二来源）
-    return SimpleNamespace(has_third_parties=True, third_party_paths=lambda: list(paths))
+def _mx_slot_case(paths, saved_shapes=(), filename_dtypes=()):
+    # manual-data case 目录槽位形态（load_third_parties 的第二来源）；
+    # 真实 ManualDataCase.load_xpu 委托内部 store，桩按同口径走静态装载器
+    from ttk.core_modules.common.dump.manual_data import ManualDataStore
+
+    def load_xpu(testcase, device_outputs=None):
+        return ManualDataStore.load_xpu(
+            testcase, list(paths), list(saved_shapes), list(filename_dtypes), device_outputs=device_outputs
+        )
+
+    return SimpleNamespace(
+        has_third_parties=True,
+        third_party_paths=lambda: list(paths),
+        third_party_saved_shapes=lambda: list(saved_shapes),
+        third_party_dtypes=lambda: list(filename_dtypes),
+        load_xpu=load_xpu,
+    )
 
 
 def _mx_switches():

@@ -20,6 +20,8 @@ import copy
 import logging
 from collections.abc import Callable
 
+from ttk.core_modules.common.dump.loader import DataLoader
+
 # Third-party Packages
 from ttk.switches import get_global_storage
 
@@ -33,7 +35,6 @@ from ...utilities import (
     str_to_torch_dtype,
 )
 from ...utilities.container import deep_flatten, nest_by_distribution
-from ...utilities.file_utils import load_array
 from ..common.invoke import (
     Invoke,
     accepts_device,
@@ -160,7 +161,7 @@ class GoldenGenerator:
                 continue
             flat_idx = self._ctx.flat_index_of(nested_idx)
             view_shape = get(self._ctx.flat_output_view_shapes, flat_idx)
-            goldens.append(load_array(fp, get(dtypes, flat_idx), view_shape))
+            goldens.append(DataLoader.read_array(fp, get(dtypes, flat_idx), view_shape))
         return goldens
 
     def _call_torch_api(self, gf, device=None):
