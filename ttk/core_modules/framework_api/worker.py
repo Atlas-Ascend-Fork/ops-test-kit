@@ -1141,7 +1141,15 @@ def _cross_check_token(ctx) -> bool:
     """cross_check 判据探测（声明 dtype 可解析；异常/缺档回退 False）。"""
     output_dtypes = tuple(str(d) for d in (getattr(ctx.testcase, "flat_output_dtypes", ()) or ()))
     if not output_dtypes:
-        return False
+        # e2e 用例 CSV 常不声明输出槽（flat_out_dtypes 为空）：保守探测 Spec 容差，
+        # 任一 dtype 声明 cross_check 即预派发取数（多输出无害，漏传恒 GOLDEN_FAILURE)。
+        try:
+            tol = SpecResolver(ctx.testcase.api_name, "e2e", ctx.switches.plugin_path).resolve_tolerance()
+        except Exception:  # noqa: BLE001 容差解析失败（无插件/配置错）回退 False
+            return False
+        return any(
+            isinstance(v, dict) and str(v.get("standard", "")).lower() == "cross_check" for v in (tol or {}).values()
+        )
     try:
         standards = resolve_tolerance(
             SpecResolver(ctx.testcase.api_name, "e2e", ctx.switches.plugin_path).resolve_tolerance(),
