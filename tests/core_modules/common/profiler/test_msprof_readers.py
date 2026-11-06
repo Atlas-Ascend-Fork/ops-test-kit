@@ -142,11 +142,17 @@ def test_ms_profiler_result_none_type_is_disabled(tmp_path):
 
 
 def test_ms_profiler_result_api_view(tmp_path):
-    _write(tmp_path / "op_statistic_20240101000000.csv", _OP_STATISTIC_DATA)
+    # Add 每轮 1 次、Mul 每轮 2 次：同类型重复调用按 Total 计入
+    _write(
+        tmp_path / "op_statistic_20240101000000.csv",
+        "OP Type,Avg Time(us),Total Time(us),Count,Min Time(us),Max Time(us)\n"
+        "Add,2.0,20.0,10,1.0,3.0\n"
+        "Mul,1.5,30.0,20,0.5,2.5\n",
+    )
     res = _msprof_for_result(tmp_path, TtkMsProfType.API).result(repeat_count=10)
     assert res.source == "msprof"
-    assert res.elapsed_us == 3.5  # Σ Avg（单轮口径）
-    assert res.kernel_details.total_device_us == 35.0  # Σ Avg × repeat
+    assert res.elapsed_us == 5.0  # Σ Total / repeat：(20 + 30) / 10
+    assert res.kernel_details.total_device_us == 50.0  # Σ Total
     assert res.kernel_details.total_cpu_us == 0.0
     assert [k.name for k in res.kernel_details.kernels] == ["Add", "Mul"]
 

@@ -359,8 +359,8 @@ def _run_compiled(
             r = compiled(*args, **kwargs)
             if not is_inplace:
                 result = r
+            backend.synchronize(dev_id)
             if deterministic:
-                backend.synchronize(dev_id)
                 run_nps = []
                 if r is not None:
                     run_nps.extend(backend.result_to_numpy(r))

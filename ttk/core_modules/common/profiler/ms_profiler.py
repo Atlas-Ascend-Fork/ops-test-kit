@@ -406,8 +406,8 @@ class MsProfiler(Profiler):
         - OP：read_task_durations 每 launch 时长，elapsed = median
           （warmup 处理归通路——kernel 的 start_step 首轮隔离是编排，
           不在采集器职责内）
-        - API：op_statistic 聚合，elapsed = Σ Avg（单轮口径——Avg 已被
-          msprof 按实际采集次数平均），total_device = Σ Avg × repeat
+        - API：op_statistic 聚合，elapsed = Σ Total / repeat（单轮口径，
+          repeat 为窗内实际采集轮数，不含 warmup），total_device = Σ Total
         - NONE / is_model（未采集）或无数据：空结果
         """
         if self._msprof_dll is None:
@@ -426,14 +426,14 @@ class MsProfiler(Profiler):
             if not csv_path:
                 return ProfileResult(source="msprof")
             kernels = read_op_statistic(csv_path)
-            total_avg = round(sum(k.avg_us for k in kernels), 3)
-            if total_avg <= 0:
+            total_device_us = round(sum(k.device_us for k in kernels), 3)
+            if total_device_us <= 0:
                 return ProfileResult(source="msprof")
             return ProfileResult(
-                elapsed_us=total_avg,
+                elapsed_us=round(total_device_us / max(repeat_count, 1), 3),
                 kernel_details=KernelDetails(
                     kernels=kernels,
-                    total_device_us=total_avg * max(repeat_count, 1),
+                    total_device_us=total_device_us,
                     total_cpu_us=0.0,
                 ),
                 source="msprof",

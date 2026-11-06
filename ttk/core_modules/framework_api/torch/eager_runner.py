@@ -56,8 +56,8 @@ def run_torch_eager_rounds(
                     profiler.step()
                     continue
                 result = r
+                ctx.backend.synchronize(ctx.dev_id)
                 if deterministic:
-                    ctx.backend.synchronize(ctx.dev_id)
                     run_nps = round_nps(
                         ctx.backend,
                         r,
