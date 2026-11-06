@@ -46,6 +46,10 @@ python3 --version
 
 torch 与 torch_npu 版本不配套：报错栈看不出是版本问题，实为两者底层库注册冲突。按 torch_npu 官方配套矩阵重装配套版本组合即可恢复（实测组合：`torch==2.12.0` + `torch-npu==2.12.0.post2`，CANN 9.3.0）。
 
+### torch 与 TensorFlow 共装后 `import torch` 报 `cannot import name 'TypeIs' from 'typing_extensions'`？
+
+装 TensorFlow 时 pip 会把 `typing_extensions` 降级到旧版，torch 依赖的 `TypeIs` 随之缺失：`import torch` 直接崩溃，依赖 torch 的用例（ACLNN golden 生成、E2E torch 域）报 `INPUT_GEN_FAILURE`，栈落在 `ttk/utilities/dtypes.py`，看不出是依赖冲突。执行 `pip3 install --upgrade typing_extensions` 即恢复，对两个框架均兼容（实测恢复后 aclnn PASS、TF 用例不受影响）。
+
 ## 用例编写问题
 
 ### CSV中数据类型怎么写？

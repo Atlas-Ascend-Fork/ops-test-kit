@@ -93,7 +93,7 @@ class TestKernelMode:
         assert sw.bin_switches.realtime == "release"
 
     def test_compile_opts_key_value_passthrough(self, captured):
-        """--compile-opts KEY=VALUE 可多次指定，累积成 dict。"""
+        """--compile-opts KEY=VALUE 可多次指定，累积成 dict；纯整数字面量转 int，其余字符串透传。"""
         sw = _run(
             [
                 "kernel",
@@ -105,10 +105,20 @@ class TestKernelMode:
                 "k=v",
                 "--compile-opts",
                 "macros=-DFOO=1",
+                "--compile-opts",
+                "enable_deterministic_mode=1",
+                "--compile-opts",
+                "tbe_debug_level=2",
             ],
             captured,
         )
-        assert sw.compile_options == {"op_debug_config": "oom", "k": "v", "macros": "-DFOO=1"}
+        assert sw.compile_options == {
+            "op_debug_config": "oom",
+            "k": "v",
+            "macros": "-DFOO=1",
+            "enable_deterministic_mode": 1,
+            "tbe_debug_level": 2,
+        }
 
 
 # -- geir 模式 --------------------------------------------------------------

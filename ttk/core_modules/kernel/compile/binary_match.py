@@ -244,7 +244,7 @@ def generate_simplified_key(interface: OperatorInterface, testcase: TestcaseKern
 
     # simplifiedKey: op_type/deterministic,impl_mode/required input dtype,format/output dtype,format
     op_type = OpInfoKeeper().op_type_of(testcase.op_name)
-    deterministic = 1 if (compile_options or {}).get("enable_deterministic_mode", "0") == "1" else 0
+    deterministic = 1 if str((compile_options or {}).get("enable_deterministic_mode", "0")) == "1" else 0
     impl_mode_str = testcase.attributes.get("impl_mode", "")
     impl_mode = get_impl_mode_int(impl_mode_str)
 
@@ -396,7 +396,7 @@ def generalize_with_default_rule(
         dynamic_json.update({"attrs": dynamic_attr_json})
     deterministic_opt = (compile_options or {}).get("enable_deterministic_mode")
     if deterministic_opt:
-        dynamic_json.update({"deterministic": deterministic_opt.lower()})
+        dynamic_json.update({"deterministic": str(deterministic_opt).lower()})
     logging.debug(f"Static json: {static_json}")
     logging.debug(f"Dynamic json: {dynamic_json}")
     return static_json, dynamic_json

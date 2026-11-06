@@ -8,7 +8,7 @@
 python3 -m ttk kernel -i cases.csv --compile-opts KEY1=VALUE1 --compile-opts KEY2=VALUE2
 ```
 
-所有键值先收进编译选项字典，再沿两条路径消费：一条透传给 CANN 的 `build_config`（引擎配置，仅 CANN 注册过的键生效），一条把 `macros` 键的值直接拼进 ccec 编译命令行。
+所有键值先收进编译选项字典，再沿两条路径消费：一条透传给 CANN 的 `build_config`（引擎配置，仅 CANN 注册过的键生效），一条把 `macros` 键的值直接拼进 ccec 编译命令行。值的类型按字面量自动判定：纯整数字面量（如 `1`、`-1`、`0x10`）转 int 后传给 `build_config`，其余按字符串透传——CANN 的数值类键收到字符串会在 TVM 深层报 IntImm 类型错误。
 
 文档导览：
 
@@ -69,7 +69,7 @@ python3 -m ttk kernel -i cases.csv --compile-opts tbe_debug_level=2
 python3 -m ttk kernel -i cases.csv --compile-opts enable_deterministic_mode=1
 ```
 
-注意该键的值以字符串透传，部分 CANN 版本在 tiling 侧对字符串值不兼容，传任何值都会导致 tiling 进程崩溃、用例报 FAIL。如无明确需要不要使用；确定性比对请改用 `--deterministic-level`。
+该键为编译期确定性开关（整数类型，`1` 开启）。注意它与 `--deterministic-level`（`--dl`）是两条独立链路：后者做执行侧输出一致性（MD5）比对，验证输出一致性请优先用 `--dl`。
 
 ## 三、编译产物
 
@@ -101,7 +101,7 @@ python3 -m ttk kernel -i cases.csv --compile-opts save_temp_cce_file=1
 
 ## 五、注意事项
 
-1. **值一律按字符串透传，非空即"开"**：`build_config` 消费端多把值当布尔用，`save_temp_cce_file=0` 实际仍是开启状态。想关闭某个键，就不要传它。
+1. **值类型按字面量自动判定**：纯整数字面量转 int 传入 `build_config`，其余按字符串透传。布尔类键传 `1`/`0` 即开/关；想保持默认就不要传它。
 2. **未知键会被静默丢弃**：不在 CANN 注册表内的键只产生告警 `build_config cannot set attribute '<key>'`，用例日志中可见，不会报错。
 3. **TBE 与 AscendC 栈消费的键不同**：`save_temp_cce_file`/`dump_cce_code`/`dump_ir` 只在 TBE 栈生效；AscendC 栈的编译命令组装只读 `op_debug_config`。给两类算子传编译宏请统一使用 `macros`。
 4. **`--compile-opts` 属于全局编译控制**：对本次运行的全部用例生效，逐用例的编译控制不在该参数的职责范围内。

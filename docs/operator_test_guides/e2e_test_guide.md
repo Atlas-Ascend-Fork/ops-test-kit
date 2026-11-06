@@ -18,6 +18,9 @@
 
 ## 一、环境准备
 
+> [!CAUTION]
+> torch 与 TensorFlow 共装时，后装 TensorFlow 会把 `typing_extensions` 降级，`import torch` 报 `cannot import name 'TypeIs'`、torch 域用例报 `INPUT_GEN_FAILURE`，修复见 [FAQ](../faq/faq_guide.md)。
+
 ### 1. torch
 
 - Python 3.8+，安装 PyTorch 2.0+

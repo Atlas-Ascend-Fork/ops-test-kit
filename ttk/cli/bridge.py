@@ -43,6 +43,21 @@ def parse_cli_bool(value: str) -> bool:
     return value.lower() not in _FALSY_FLAG_TOKENS
 
 
+def _compile_opt_value(value: str):
+    """--compile-opts VALUE 取值语义：整数字面量（含 0x/0o/0b 前缀）转 int，其余保持字符串。
+
+    build_config 数值键为 IntImm，字符串值会在 CANN TVM PassConfigManager
+    类型检查处报 AttributeError（expect type IntImm but get runtime.String）。
+    """
+    literal = value.strip()
+    if _INTEGER_CLEAN_VALUE.fullmatch(literal):
+        try:
+            return int(literal, 0)
+        except ValueError:
+            return value
+    return value
+
+
 def _apply_case_selection_args(sw, args):
     if hasattr(args, "testcase") and args.testcase:
         sw.selected_testcases = _split_csv(args.testcase)
@@ -278,13 +293,13 @@ def apply_kernel_args(sw, args):
             sw.bin_switches.enabled = val
     if hasattr(args, "compile_only") and args.compile_only:
         sw.compile_only = True
-    # --compile-opts key=value (append, direct passthrough)
+    # --compile-opts key=value (append)：值经 _compile_opt_value 定类型后落库
     if hasattr(args, "compile_opts") and args.compile_opts:
         for pair in args.compile_opts:
             if "=" not in pair:
                 raise ValueError(f"--compile-opts requires KEY=VALUE format, got: {pair}")
             key, value = pair.split("=", 1)
-            sw.compile_options[key] = value
+            sw.compile_options[key] = _compile_opt_value(value)
     if hasattr(args, "impl_mode") and args.impl_mode:
         sw.op_impl_mode = args.impl_mode
     if hasattr(args, "expect_impl_source") and args.expect_impl_source:

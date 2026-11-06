@@ -128,8 +128,11 @@ python3 -m ttk kernel -i add.csv --co
 示例：
 
 ```shell
-# 编译选项
-python3 -m ttk kernel -i cases.csv --compile-opts op_debug_config=oom,dump_cce --compile-opts enable_deterministic_mode=1
+# 编译选项（字符串值：调试开关组合）
+python3 -m ttk kernel -i cases.csv --compile-opts op_debug_config=oom,dump_cce
+
+# 编译选项（数值开关：纯整数字面量按 int 传入 CANN build_config）
+python3 -m ttk kernel -i cases.csv --compile-opts enable_deterministic_mode=1
 
 # 透传编译宏到 ccec 命令行（空格分隔，可引号包裹）
 python3 -m ttk kernel -i cases.csv --compile-opts "macros=-DFOO=1 -DBAR=2"
@@ -137,6 +140,9 @@ python3 -m ttk kernel -i cases.csv --compile-opts "macros=-DFOO=1 -DBAR=2"
 # 多次执行间复用HBM（使能L2 Cache）
 python3 -m ttk kernel -i cases.csv --reuse-hbm
 ```
+
+> [!NOTE]
+> `--compile-opts` 的值按字面量定类型：纯整数（如 `enable_deterministic_mode=1`、`tbe_debug_level=2`）转 int 后传给 CANN `build_config`，其余（如 `op_debug_config=oom,dump_cce`）按字符串透传。`--dl=1` 的确定性比对与编译开关相互独立，详见 [Kernel 编译选项使用技巧](../tips/kernel_compile_options.md)与[确定性计算](../reference/determinism_compute.md)。
 
 > [!NOTE]
 > 精度比对方法详见[精度比对方法](../reference/precision_comparison.md)，Dump 调试详见[Dump 数据调试](../dump_debug_guide.md)。

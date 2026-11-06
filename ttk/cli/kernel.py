@@ -52,6 +52,7 @@ def _add_kernel_args(parser):
         action="append",
         metavar="KEY=VALUE",
         help="Compile option as key=value. Can be specified multiple times. "
+        "Pure-integer values are passed to CANN build_config as int, others as string. "
         "e.g. --compile-opts op_debug_config=oom,dump_cce "
         "--compile-opts enable_deterministic_mode=1 "
         '--compile-opts "macros=-DFOO=1 -DBAR=2"',
