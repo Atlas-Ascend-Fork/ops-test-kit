@@ -32,19 +32,39 @@ def _read_output_chunk(buf):
     return byte_count, raw
 
 
+def _static_empty_shape(expect_shape):
+    """声明形状是「已知静态且元素数为 0」时返回该形状，否则返回 None。
+
+    shape-unknown 槽位用负数（-1 动态维 / -2 未知 rank）编码，这类输出不能
+    按声明形状还原；声明非空却收到 0 字节则是真实异常，也不该在这里 reshape
+    掩盖过去。
+    """
+    if not expect_shape:
+        return None
+    dims = list(expect_shape)
+    if any(dim is None or dim < 0 for dim in dims):
+        return None
+    if int(np.prod(dims)) != 0:
+        return None
+    return dims
+
+
 def _reshape_output(arr, expect_shape, idx, case_name):
     if expect_shape is None:
         return arr
     if arr.size == 0:
-        expect_numel = int(np.prod(expect_shape)) if expect_shape else 0
-        logging.warning(
-            "[%s] output[%d] empty from GE; expect_shape=%s, expect_numel=%d; skipping reshape",
-            case_name,
-            idx,
-            expect_shape,
-            expect_numel,
-        )
-        return arr
+        static_empty = _static_empty_shape(expect_shape)
+        if static_empty is None:
+            expect_numel = int(np.prod(expect_shape)) if expect_shape else 0
+            logging.warning(
+                "[%s] output[%d] empty from GE; expect_shape=%s, expect_numel=%d; skipping reshape",
+                case_name,
+                idx,
+                expect_shape,
+                expect_numel,
+            )
+            return arr
+        return arr.reshape(static_empty)
     try:
         return arr.reshape(expect_shape)
     except ValueError as e:
