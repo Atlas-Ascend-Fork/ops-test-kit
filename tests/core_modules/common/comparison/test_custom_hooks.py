@@ -8,10 +8,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-"""compare 钩子（pre_compare / compare）的哨兵处理：str 哨兵不进钩子；
-None golden（抑制位置）交由插件钩子自行处理，不禁用钩子。"""
+"""compare 钩子（pre_compare / compare）的哨兵处理：str 哨兵（输出侧在入口
+挡、golden 侧在 invoke 内部挡）与 NO_OUTPUT 槽（output None + golden 真值）
+不进钩子；双 None 抑制位交由插件钩子自行处理，不禁用钩子。"""
 
 import numpy as np
+import pytest
 
 from ttk.core_modules.common.comparison import CompareHooks, compare_with_hooks
 from ttk.core_modules.common.comparison.resolve import resolve_tolerance
@@ -33,26 +35,37 @@ def _cmp(o0, o1, g0, g1):
     ]
 
 
-def test_str_sentinel_not_customizable():
-    """golden 含 str 哨兵（SUPPRESSED/UNSUPPORTED/GOLDEN_FAILURE 等）不进钩子：入口透传占位、FAIL，钩子零调用。"""
-    outputs = [np.array([1.0]), np.array([2.0])]
-    goldens = [np.array([1.0]), "GOLDEN_FAILURE"]
+@pytest.mark.parametrize(
+    ("outputs", "goldens", "expected_precision", "expected_pass"),
+    [
+        pytest.param(
+            [np.array([1.0]), np.array([2.0])],
+            [np.array([1.0]), "GOLDEN_FAILURE"],
+            "100.0%,GOLDEN_FAILURE",
+            False,
+            id="golden_sentinel",
+        ),
+        pytest.param(["DYN_OFF"], [np.array([1.0])], "DYN_OFF", True, id="output_sentinel"),
+    ],
+)
+def test_str_sentinel_not_customizable(outputs, goldens, expected_precision, expected_pass):
+    """str 哨兵不进钩子（输出侧在入口挡、golden 侧在 invoke 内部挡）：占位透传，钩子零调用。"""
     called = []
 
-    def custom_compare(o0, o1, g0, g1):
-        called.append(1)
-        return _cmp(o0, o1, g0, g1)
+    def custom_compare(*args):
+        called.append(args)
+        return [{"pass": True, "precision": 100}]
 
     precision, _log, passed, _m = compare_with_hooks(
         _Case(),
         outputs,
         goldens,
-        resolve_tolerance(None, None, None, ["float32", "float32"], None),
-        CompareHooks(output_dtypes=("float32", "float32"), custom_compare=custom_compare),
+        resolve_tolerance(None, None, None, ["float32"] * len(outputs), None),
+        CompareHooks(output_dtypes=("float32",) * len(outputs), custom_compare=custom_compare),
     )
     assert called == []
-    assert precision == "100.0%,GOLDEN_FAILURE"
-    assert passed is False
+    assert precision == expected_precision
+    assert passed is expected_pass
 
 
 def test_custom_compare_runs_when_all_goldens_real():
@@ -70,18 +83,23 @@ def test_custom_compare_runs_when_all_goldens_real():
     assert passed is True
 
 
-def test_custom_compare_runs_with_suppressed_golden():
-    """golden 含 None 抑制位（如 return_softmax_lse=False 的 LSE）不禁用钩子：
-    插件 compare 接管全部输出位，抑制位由插件自行处理（对齐重构前行为）。"""
-    outputs = [np.array([1.0]), np.array([2.0])]
-    goldens = [np.array([1.0]), None]
+@pytest.mark.parametrize(
+    ("outputs", "goldens", "none_positions"),
+    [
+        pytest.param([np.array([1.0]), np.array([2.0])], [np.array([1.0]), None], (3,), id="golden_none"),
+        pytest.param([np.array([1.0]), None], [np.array([1.0]), None], (1, 3), id="both_none"),
+    ],
+)
+def test_custom_compare_runs_with_suppressed_slot(outputs, goldens, none_positions):
+    """双 None 抑制位（golden 侧 / 输出侧双侧同 None，如 return_softmax_lse=False
+    的 LSE 位）不禁用钩子：插件接管全部输出位，抑制位由插件自行处理。"""
     called = []
 
     def custom_compare(o0, o1, g0, g1):
         called.append((o0, o1, g0, g1))
         return [
             {"pass": bool(np.array_equal(o0, g0)), "precision": 100},
-            {"pass": True, "precision": 100},
+            {"pass": g1 is None or bool(np.array_equal(o1, g1)), "precision": 100},
         ]
 
     precision, _log, passed, _m = compare_with_hooks(
@@ -92,9 +110,33 @@ def test_custom_compare_runs_with_suppressed_golden():
         CompareHooks(output_dtypes=("float32", "float32"), custom_compare=custom_compare),
     )
     assert len(called) == 1
-    assert called[0][3] is None
+    assert all(called[0][pos] is None for pos in none_positions)
     assert precision == "100%,100%"
     assert passed is True
+
+
+def test_output_none_with_real_golden_still_blocks_hooks():
+    """output None + golden 真值（NO_OUTPUT 槽）仍禁用钩子：执行失败的 FAIL
+    语义不经插件改写（单槽死位不禁用整组钩子，但死位须是双 None 抑制位）。"""
+    called = []
+
+    def custom_compare(o0, o1, g0, g1):
+        called.append(1)
+        return [
+            {"pass": True, "precision": 100},
+            {"pass": True, "precision": 100},
+        ]
+
+    precision, _log, passed, _m = compare_with_hooks(
+        _Case(),
+        [np.array([1.0]), None],
+        [np.array([1.0]), np.array([2.0])],
+        resolve_tolerance(None, None, None, ["float32", "float32"], None),
+        CompareHooks(output_dtypes=("float32", "float32"), custom_compare=custom_compare),
+    )
+    assert called == []
+    assert passed is False
+    assert "NO_OUTPUT" in precision
 
 
 def test_failed_custom_compare_has_bounded_diagnostics(caplog):

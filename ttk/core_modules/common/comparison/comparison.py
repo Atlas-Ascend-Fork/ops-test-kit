@@ -265,12 +265,13 @@ def compare_with_hooks(testcase, outputs, goldens, standards, hooks: CompareHook
     流程：
     1) validate_outputs 分类——无钩子/输出占位 → 委托 compare()（占位路透传 +
         VALID 子集走标准比对，分类结论复用不重算）；
-    2) 声明钩子且输出均为真实数组 → 钩子路径：列表浅拷贝隔离 + 复制 golden
-        防改写 → pre_compare → custom compare（非 None 采信）→ 回落标准
-        compare（对变换后数据重新分类）。golden 的 str 哨兵由
-        invoke_pre_compare/invoke_custom_compare 内部 _can_customize 拦截；
-        None（抑制位，如 return_softmax_lse=False 的 LSE）交由插件钩子
-        自行处理，不禁用钩子（对齐重构前 comparison/custom.py 门控语义）。
+    2) 声明钩子、输出不含 str 哨兵且不含 NO_OUTPUT 槽（output None 而 golden
+        真值）→ 钩子路径：列表浅拷贝隔离 + 复制 golden 防改写 → pre_compare →
+        custom compare（非 None 采信）→ 回落标准 compare（对变换后数据重新
+        分类）。golden 的 str 哨兵由 invoke_pre_compare/invoke_custom_compare
+        内部 _can_customize 拦截；双 None 抑制位（如 return_softmax_lse=False
+        时 LSE 位双侧同为 None）交由插件钩子自行处理——单槽抑制不禁用整组
+        钩子，但执行失败的 NO_OUTPUT 槽恒走标准比对判 FAIL。
 
     【形状契约】钩子拿到即真实形状——由各通路数据源头保证（kernel 在
     __outputs_to_numpy_arrays 解码处按声明 shape 还原，geir 在 _parse_stdout
@@ -282,9 +283,11 @@ def compare_with_hooks(testcase, outputs, goldens, standards, hooks: CompareHook
     """
     verdict = validate_outputs(outputs, goldens, hooks.third_parties)
     hooks_enabled = testcase is not None and (hooks.pre_compare is not None or hooks.custom_compare is not None)
-    # 重构前语义：只要输出是真实数组即可进钩子；golden 的 str 哨兵在
-    # invoke_pre_compare/invoke_custom_compare 内部拦截，None 抑制位交由插件处理
-    has_runtime_output = bool(outputs) and not any(isinstance(output, (str, type(None))) for output in outputs)
+    # 单槽门控见 _blocks_plugin_hooks：str 哨兵与 NO_OUTPUT 槽不进钩子，双 None
+    # 抑制位（同 golden None）交由插件处理。无钩子/被挡时回落 compare() 照常分类。
+    has_runtime_output = bool(outputs) and not any(
+        _blocks_plugin_hooks(output, golden) for output, golden in zip(outputs, goldens)
+    )
     if hooks_enabled and has_runtime_output:
         mode_outputs = list(outputs)  # 浅拷贝隔离：invoke_pre_compare 原地改写不外溢到调用方列表
         mode_goldens = _copy_goldens(goldens)
@@ -320,6 +323,13 @@ class CompareContext:
     input_scalars: Any
     attributes: Mapping[str, Any]
     csv_fields: Mapping[str, Any]
+
+
+def _blocks_plugin_hooks(output, golden):
+    """钩子入口的单槽门控：str 哨兵（模式开关/能力占位，框架协议位非数据）或
+    NO_OUTPUT 槽（运行时输出缺失而 golden 非 None——执行失败的 FAIL 语义不经
+    插件改写）；双 None 抑制位放行，交由插件自行处理。"""
+    return isinstance(output, str) or (output is None and golden is not None)
 
 
 def _can_customize(outputs, goldens):

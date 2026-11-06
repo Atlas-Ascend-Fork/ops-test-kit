@@ -16,6 +16,8 @@ Generates numpy arrays from testcase metadata, applies custom plugin overrides,
 and converts to framework tensors (torch).
 """
 
+from contextlib import nullcontext
+
 import numpy as np
 
 from ttk.core_modules.common.testcase.input_data import (
@@ -42,8 +44,6 @@ def _cpu_placement_scope(backend, enabled):
         from ..common.backend.cpu_tf_backend import cpu_device_context
 
         return cpu_device_context()
-    from contextlib import nullcontext
-
     return nullcontext()
 
 
@@ -54,44 +54,49 @@ def generate_inputs(testcase, switches, backend, plan, stored_inputs=None, cpu_p
     上创建，设备张量由执行侧重建。"""
     if stored_inputs is not None:
         testcase.np_storages = list(stored_inputs)
-        raw_inputs = build_views_from_storages(testcase)
+        raw_inputs = _build_views_from_storages(testcase)
         set_runtime_tensors(testcase, raw_inputs, backend, cpu_placement=cpu_placement)
         return raw_inputs
 
-    raw_inputs = default_generate_inputs(testcase, switches)
-    apply_attribute_tensors(testcase, raw_inputs)
-
-    plugin_path = switches.plugin_path
-    input_func = get_plugin_function(testcase.api_name, "input", "e2e", plugin_path)
-    plugin_inputs = None
-    if input_func is not None:
-        with _cpu_placement_scope(backend, cpu_placement):
-            plugin_inputs = backend.inputs_from_numpy(testcase, raw_inputs)
-        use_numpy = backend.needs_numpy_fallback(testcase)
-        dist = testcase.tensor_list_dist
-        nested_for_plugin = nest_by_distribution(plugin_inputs, dist) if dist else plugin_inputs
-        args, kwargs = build_plugin_call(
-            input_func,
-            testcase,
-            switches,
-            plan,
-            nested_for_plugin,
-            backend=backend.device_type(),
-            use_numpy=use_numpy,
-            input_ranges=testcase.input_data_ranges,
-        )
-        result = input_func(*args, **kwargs)
-        _apply_input_plugin_result(result, raw_inputs, testcase, backend)
+    raw_inputs = _default_generate_inputs(testcase, switches)
+    _apply_attribute_tensors(testcase, raw_inputs)
+    plugin_tensors = _run_input_plugin(testcase, switches, backend, plan, raw_inputs, cpu_placement)
     # 统一重建 runtime tensors：数据/shape 恒来自 raw_inputs（插件对象不进入）；
     # 插件命中的仅回放其置的 requires_grad（部分算子按该标志门控输入）。
     set_runtime_tensors(
         testcase,
         raw_inputs,
         backend,
-        plugin_tensors=plugin_inputs,
+        plugin_tensors=plugin_tensors,
         cpu_placement=cpu_placement,
     )
     return raw_inputs
+
+
+def _run_input_plugin(testcase, switches, backend, plan, raw_inputs, cpu_placement):
+    """调用 customize_inputs 并把返回值按槽位写回 raw_inputs；返回插件侧 flat
+    张量列表供 requires_grad 回放，无插件命中时 None。"""
+    input_func = get_plugin_function(testcase.api_name, "input", "e2e", switches.plugin_path)
+    if input_func is None:
+        return None
+    with _cpu_placement_scope(backend, cpu_placement):
+        plugin_inputs = backend.inputs_from_numpy(testcase, raw_inputs)
+    use_numpy = backend.needs_numpy_fallback(testcase)
+    dist = testcase.tensor_list_dist
+    nested_for_plugin = nest_by_distribution(plugin_inputs, dist) if dist else plugin_inputs
+    args, kwargs = build_plugin_call(
+        input_func,
+        testcase,
+        switches,
+        plan,
+        nested_for_plugin,
+        backend=backend.device_type(),
+        use_numpy=use_numpy,
+        input_ranges=testcase.input_data_ranges,
+    )
+    result = input_func(*args, **kwargs)
+    _apply_input_plugin_result(result, raw_inputs, testcase, backend)
+    return plugin_inputs
 
 
 def _apply_input_plugin_result(result, raw_inputs, testcase, backend):
@@ -120,11 +125,11 @@ def _apply_input_plugin_result(result, raw_inputs, testcase, backend):
                 f"{slot} which has no generated tensor (dynamic/optional); write into shared "
                 "views in-place instead"
             )
-        arr = _plugin_value_to_numpy(val, backend)
-        if np.asarray(arr).shape != view.shape:
+        arr = np.asarray(_plugin_value_to_numpy(val, backend))
+        if arr.shape != view.shape:
             raise RuntimeError(
                 f"[{testcase.testcase_name}] customize_inputs returned shape "
-                f"{np.asarray(arr).shape} for flat slot {slot}, expected {view.shape}"
+                f"{arr.shape} for flat slot {slot}, expected {view.shape}"
             )
         view[...] = arr
 
@@ -158,9 +163,9 @@ def set_runtime_tensors(testcase, raw_inputs, backend, plugin_tensors=None, cpu_
     with _cpu_placement_scope(backend, cpu_placement):
         flat_tensors = backend.inputs_from_numpy(testcase, raw_inputs)
     if plugin_tensors is not None:
-        for i, pt in enumerate(plugin_tensors):
-            if i < len(flat_tensors) and pt is not None and getattr(pt, "requires_grad", False):
-                flat_tensors[i].requires_grad_(True)
+        for pt, ft in zip(plugin_tensors, flat_tensors):
+            if pt is not None and getattr(pt, "requires_grad", False):
+                ft.requires_grad_(True)
     dist = testcase.tensor_list_dist
     if dist:
         testcase.tensors = nest_by_distribution(flat_tensors, dist)
@@ -168,7 +173,7 @@ def set_runtime_tensors(testcase, raw_inputs, backend, plugin_tensors=None, cpu_
         testcase.tensors = flat_tensors
 
 
-def apply_attribute_tensors(testcase, raw_inputs):
+def _apply_attribute_tensors(testcase, raw_inputs):
     """把 attributes 按参数名声明的值写进输入张量，并记 const 位。
 
     普通张量：标量或可广播数组；TensorList 两态：标量广播全体 / 逐张量列表。
@@ -214,7 +219,7 @@ def apply_attribute_tensors(testcase, raw_inputs):
                     testcase.const_input_values[idx] = nested_np[idx].tolist()
 
 
-def default_generate_inputs(testcase, switches):
+def _default_generate_inputs(testcase, switches):
     """Default input generation -- flat iteration over all tensors.
 
     Iterates flat_tensor_view_shapes so nested TensorList structures
@@ -223,10 +228,10 @@ def default_generate_inputs(testcase, switches):
     """
     storages, _ = generate_np_storages(testcase, switches, zero_init_apis=("torch.ones", "tf.ones"))
     testcase.np_storages = storages
-    return build_views_from_storages(testcase)
+    return _build_views_from_storages(testcase)
 
 
-def build_views_from_storages(testcase):
+def _build_views_from_storages(testcase):
     """Build (possibly non-contiguous) numpy views from contiguous storages."""
     flat_shapes = testcase.flat_tensor_view_shapes
     flat_dtypes = testcase.flat_tensor_dtypes or ()

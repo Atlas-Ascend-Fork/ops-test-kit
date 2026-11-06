@@ -203,7 +203,7 @@
     },
     "ttk/core_modules/framework_api/input_generate.py": {
       "C901": 1,
-      "PLR0913": 1
+      "PLR0913": 2
     },
     "ttk/core_modules/framework_api/testcase.py": {
       "C901": 1

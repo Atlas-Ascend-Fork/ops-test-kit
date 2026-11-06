@@ -58,18 +58,29 @@ class CausalConv1dFnTestSpec:
         return [x]
 ```
 
-## customize_inputs（仅原地写法）
+## customize_inputs（自定义输入）
 
-E2E 的返回值被忽略，**只能原地修改**（`x[:] = value` / `x.copy_(...)`），返回 `None`：
+两种写法，改动最终写回 raw_inputs，由框架重建执行张量（插件张量不进入执行链路）：
+
+- **原地修改**（返回 `None`）：`x.copy_(...)` / `x[:] = value`，torch 入参与 numpy 存储零拷贝共享，改动即穿透；
+- **返回序列**（按槽位回写）：返回与输入张量槽同序的序列，替换位给新张量、不变位给 `None`，框架逐槽转 numpy、校验 shape 后写回；单张量算子可裸返回张量，TensorList 可按原嵌套或平铺返回。
 
 ```python
 class TorchAddTestSpec:
     def customize_inputs(x, y, alpha=1.0, **kwargs):
         # 直接修改入参；kwargs 含 testcase_name / tensor_dtypes / input_ranges /
         # batch_applied（batch 一致性片段替换标记）/ testcase 等元信息
-        x.copy_(x.clamp(-100, 100))
+        x.copy_(x.clamp(-100, 100))                         # 原地写法
         return None
+
+class TfAddTestSpec:
+    def customize_inputs(x, y, **kwargs):
+        return (tf.clip_by_value(x, -100, 100), None)       # 返回序列写回
 ```
+
+> [!NOTE]
+> - TF 张量不可变且转换即拷贝，`x[:] = value` 无法生效——**TF 算子必须走返回序列**；torch/numpy 入参可用原地写法。
+> - 槽数/shape 不符、dynamic（-1）槽返回非 None 时在输入生成阶段显式报错，不会静默丢弃。
 
 只需调整随机数据范围时，不写本函数，直接在 CSV 设 `input_data_ranges`。
 
@@ -100,7 +111,7 @@ class TorchAddTestSpec:
 
 ## compare / pre_compare（numpy）
 
-入参**始终为 numpy.ndarray**（任何通路；框架把输出转 numpy 再传入）。需要读取当前或 replay 恢复输入时，必须显式声明仅关键字参数 `compare_context`（仅声明 `**kwargs` 不会收到）。
+入参**始终为 numpy.ndarray**（任何通路；框架把输出转 numpy 再传入）。双 `None` 抑制槽（输出与 golden 同为 `None`，多输出算子部分输出合法为 `None`）会原样传入钩子，插件须自行处理；运行时输出缺失而 golden 有值的槽（NO_OUTPUT）与 str 哨兵（`SUPPRESSED`/`DYN_OFF` 等占位）不会进钩子。需要读取当前或 replay 恢复输入时，必须显式声明仅关键字参数 `compare_context`（仅声明 `**kwargs` 不会收到）。
 
 ## tolerance（精度标准）
 

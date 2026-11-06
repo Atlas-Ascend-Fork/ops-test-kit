@@ -12,7 +12,7 @@
 测试 ttk.core_modules.framework_api worker/execute/compare（原 profiling.py 拆分）。
 
 覆盖内容：
-- make_storage_view / default_generate_inputs: 非连续视图与默认输入生成；
+- make_storage_view: 非连续视图构造；
 - invoke_pre_compare/invoke_custom_compare（钩子契约在 common/comparison/comparison.py）：跳过条件、原地/返回模式、返回值适配；
 - evaluate_eager_precision（统一比对入口内联处）/ compare_with_hooks：端到端集成。
 """
@@ -24,7 +24,6 @@ import numpy as np
 import pytest
 
 from ttk.core_modules.common.testcase.tensor import make_storage_view
-from ttk.core_modules.framework_api.input_generate import default_generate_inputs
 
 
 def _make_switches(**overrides):
@@ -36,57 +35,6 @@ def _make_switches(**overrides):
     for k, v in overrides.items():
         setattr(sw, k, v)
     return sw
-
-
-def _make_testcase(
-    shapes,
-    dtypes,
-    attrs=None,
-    output_tensor_indexes=(),
-    pure_output_indexes=None,
-    storage_shapes=(),
-    view_strides=(),
-    view_offsets=(),
-    input_data_ranges=None,
-):
-    """构造一个 MagicMock 测试用例，模拟 flat_tensor_* 系列接口。"""
-    case = MagicMock()
-    case.flat_tensor_view_shapes = shapes
-    case.flat_tensor_dtypes = dtypes
-    case.flat_input_data_ranges = input_data_ranges or ()
-    case.pure_output_indexes = pure_output_indexes or []
-    case.flat_tensor_storage_shapes = storage_shapes
-    case.flat_tensor_view_strides = view_strides
-    case.flat_tensor_view_offsets = view_offsets
-
-    def flat_storage_side_effect(idx):
-        if storage_shapes and idx < len(storage_shapes):
-            val = storage_shapes[idx]
-            if val is not None:
-                return val
-        return shapes[idx] if idx < len(shapes) else None
-
-    def flat_stride_side_effect(idx):
-        if view_strides and idx < len(view_strides):
-            s = view_strides[idx]
-            if s is not None and s != ():
-                return s
-        from ttk.utilities.shape import shape_stride
-
-        v = shapes[idx] if idx < len(shapes) else None
-        return shape_stride(v) if v is not None else None
-
-    def flat_offset_side_effect(idx):
-        if view_offsets and idx < len(view_offsets):
-            val = view_offsets[idx]
-            if val is not None:
-                return val
-        return 0
-
-    case.flat_storage_shape.side_effect = flat_storage_side_effect
-    case.flat_view_stride.side_effect = flat_stride_side_effect
-    case.flat_view_offset.side_effect = flat_offset_side_effect
-    return case
 
 
 # --- 模块级 compare 辅助函数（供参数化测试引用） ---
@@ -247,28 +195,6 @@ class TestToNonContiguousView:
         assert result.shape == (3, 2)
         expected = np.array([[1, 3], [5, 7], [9, 11]], dtype=np.float32)
         np.testing.assert_array_equal(np.array(result), expected)
-
-
-class TestDefaultGenerateInputs:
-    """default_generate_inputs: 默认输入张量生成逻辑。"""
-
-    def test_basic_input_generation(self):
-        """基本场景：两个 float32 张量正确生成。"""
-        case = _make_testcase(shapes=((4,), (4,)), dtypes=("float32", "float32"))
-        switches = _make_switches()
-        inputs = default_generate_inputs(case, switches)
-        assert len(inputs) == 2
-        assert inputs[0].shape == (4,)
-        assert inputs[0].dtype == np.float32
-        assert inputs[1].shape == (4,)
-        assert inputs[1].dtype == np.float32
-
-    def test_complex32_input_keeps_lane_storage(self):
-        """complex32：视图即存储（fp16 + 尾维 2），不按声明形状坍缩成半数据。"""
-        case = _make_testcase(shapes=((2, 3),), dtypes=("complex32",))
-        inputs = default_generate_inputs(case, _make_switches())
-        assert inputs[0].shape == (2, 3, 2)
-        assert inputs[0].dtype == np.float16
 
 
 class TestApplyPreCompareSkip:

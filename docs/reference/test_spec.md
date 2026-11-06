@@ -139,6 +139,7 @@ class EyeImpl:  # third_party 实现类
 ### compare / pre_compare
 
 - 入参始终是 numpy ndarray
+- 双 `None` 抑制槽（输出与 golden 同为 `None`，多输出算子部分输出合法为 `None`，如 `return_softmax_lse=False` 的 LSE 位）会原样传入钩子，插件须自行处理；运行时输出缺失而 golden 有值的槽（NO_OUTPUT）与 str 哨兵（`SUPPRESSED`/`DYN_OFF` 等占位）不会进钩子
 - 需要读当前/replay 输入时，显式声明 `compare_context`（只写 `**kwargs` 收不到）
 
 ## 五、tolerance
