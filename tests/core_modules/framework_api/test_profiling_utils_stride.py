@@ -16,6 +16,7 @@ which materialize non-contiguous views into contiguous tensors.
 """
 
 import numpy as np
+import pytest
 import torch
 
 from ttk.core_modules.common.backend.torch_backend import TorchBackend
@@ -70,3 +71,50 @@ class TestClonePreservingStride:
         assert out.stride() == (16384, 64, 4, 1)
         assert not out.is_contiguous()
         assert torch.equal(out, t)
+
+    @pytest.mark.parametrize("dtype", [torch.complex64, torch.complex128])
+    @pytest.mark.parametrize("view_kind", ["conjugate", "imaginary"])
+    def test_clone_preserves_lazy_view_values_and_storage(self, dtype, view_kind):
+        """共轭及虚部取负视图的克隆保留数值、布局和独立存储。"""
+        backend = self._backend()
+        values = torch.arange(24, dtype=torch.float64)
+        storage = torch.complex(values, values + 1).to(dtype)
+        source = storage.as_strided((3, 2), (7, 2), 3).conj()
+        if view_kind == "imaginary":
+            source = source.imag
+        expected = source.clone()
+
+        out = backend.clone(source)
+
+        assert torch.equal(out, expected)
+        assert out.shape == source.shape
+        assert out.stride() == source.stride()
+        assert out.storage_offset() == source.storage_offset()
+        assert out.is_conj() == source.is_conj()
+        assert out.is_neg() == source.is_neg()
+        assert out.untyped_storage().data_ptr() != source.untyped_storage().data_ptr()
+        assert list(out.untyped_storage()) == list(source.untyped_storage())
+        out.add_(2)
+        assert torch.equal(out, expected + 2)
+        assert torch.equal(source, expected)
+
+    @pytest.mark.parametrize("view_kind", ["conjugate", "imaginary"])
+    @pytest.mark.parametrize("key", [0, "input"])
+    def test_mutable_rounds_keep_lazy_view_inputs(self, view_kind, key):
+        """每轮原地运算均从同一逻辑输入开始，源张量保持原值。"""
+        backend = self._backend()
+        values = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        source = torch.complex(values, values + 1).T.conj()
+        if view_kind == "imaginary":
+            source = source.imag
+        expected = source.clone()
+        args = [source] if isinstance(key, int) else []
+        kwargs = {key: source} if isinstance(key, str) else {}
+        load = backend.prepare_mutable_rounds(args, kwargs, [key], total=3)
+
+        for i in range(3):
+            load(i)
+            current = args[key] if isinstance(key, int) else kwargs[key]
+            current.add_(2)
+            assert torch.equal(current, expected + 2)
+        assert torch.equal(source, expected)

@@ -126,6 +126,11 @@ class TorchBackend(Backend):
         src_flat = torch.empty(0, dtype=tensor.dtype, device=tensor.device).set_(src_storage, 0, (storage_numel,), (1,))
         new_flat = src_flat.to(dst_device) if dst_device else src_flat.clone()
         result = torch.as_strided(new_flat, tensor.shape, tensor.stride(), tensor.storage_offset())
+        # set_ 只恢复物理存储；共轭和取负标记决定视图的逻辑数值。
+        if tensor.is_conj():
+            result = result.conj()
+        if tensor.is_neg():
+            result = torch._neg_view(result)
         # src_flat 由 torch.empty 起底，requires_grad 默认 False，重建视图会丢标记；
         # 非连续输入经此路径到设备执行时需把源 tensor 的 requires_grad 带过去。
         if tensor.requires_grad:
