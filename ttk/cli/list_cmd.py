@@ -12,8 +12,13 @@ from .bridge import _split_csv
 
 
 def register_list_command(subparsers):
-    parser = subparsers.add_parser("list", help="List test cases from a test case file (csv/xlsx)")
-    parser.add_argument("-i", "--input", required=True, help="Test case file (csv/xlsx)")
+    parser = subparsers.add_parser("list", help="List test cases from a CSV, Excel or ZIP file")
+    parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="Test case file (csv/xlsx/xlsm/zip; zip contains csv files)",
+    )
     parser.add_argument("--sheet", default=None, help="Excel worksheet name (default: first worksheet)")
     parser.add_argument("--op", "--operator", dest="operator", help="Filter by operator name")
     parser.set_defaults(handler=_handle_list)

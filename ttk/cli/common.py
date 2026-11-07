@@ -43,7 +43,13 @@ def _add_io_args(parser):
         default=None,
         help="Path to ttk config YAML (overrides ~/.config/ttk/ and ./ttk.conf.yaml)",
     )
-    group.add_argument("-i", "--input", metavar="FILE", required=True, help="Test case file (csv/xlsx)")
+    group.add_argument(
+        "-i",
+        "--input",
+        metavar="FILE",
+        required=True,
+        help="Test case file (csv/xlsx/xlsm/zip; zip contains csv files)",
+    )
     output_group.add_argument("-o", "--output", metavar="FILE", help="Output CSV file (overwrite existing)")
     group.add_argument("--po", "--progress-output", dest="progress_output", metavar="FILE", help="Progress output file")
     group.add_argument("--sheet", default=None, help="Excel worksheet name (default: first worksheet); ignored for csv")
@@ -196,7 +202,7 @@ def _add_run_args(parser):
         "--validate",
         dest="validate_only",
         action="store_true",
-        help="Validate test cases (csv/xlsx) only, skip device execution",
+        help="Validate input test cases only, skip device execution",
     )
 
 
