@@ -245,11 +245,19 @@ class TestSlotSubstrateSafety:
         assert case.is_valid is False
         assert "output_tensor_indexes" in case.fail_reason
 
-    def test_output_tensor_indexes_negative_marks_invalid(self):
+    def test_output_tensor_indexes_negative_normalized(self):
         case = self._declared_case()
         case.output_tensor_indexes = (-1,)
         case._expand_compressed_fields()
+        assert case.is_valid is True
+        assert case.output_tensor_indexes == (1,)  # -1 → 最后一个张量槽
+
+    def test_output_tensor_indexes_negative_out_of_range_marks_invalid(self):
+        case = self._declared_case()
+        case.output_tensor_indexes = (-3,)
+        case._expand_compressed_fields()
         assert case.is_valid is False
+        assert "output_tensor_indexes" in case.fail_reason
 
     def test_output_accessors_safe_when_out_of_range(self):
         case = self._declared_case()

@@ -85,7 +85,9 @@ pytestmark = [
 
 
 def _run_e2e(*extra_args, timeout=1800):
-    cmd = [sys.executable, "-m", "ttk", "e2e", "-i", str(CSV), *extra_args]
+    """--devices 0 固定首个可见卡：ASCEND_RT_VISIBLE_DEVICES 限卡时可见卡自 0 重编号，
+    默认按物理卡数推导的调度池会派发到 runtime 不可见的卡号（EE1003）。"""
+    cmd = [sys.executable, "-m", "ttk", "e2e", "-i", str(CSV), "--devices", "0", *extra_args]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(REPO), check=False)
 
 

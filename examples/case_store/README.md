@@ -15,7 +15,7 @@
 
 ### CANN 版本配套说明
 
-示例用例分「基线场景」与「较新 dtype/算子」两类。后一类用例是否通过取决于本地 CANN 的算子支持面；不支持时报错签名与「环境装错」不同，可据此区分：
+示例用例基于 Ascend950 实装配套给出，分「基线场景」与「较新 dtype/算子」两类。后一类用例是否通过取决于本地芯片与 CANN 的算子支持面——Ascend910_93 等其他芯片上，内置算子的 dtype 白名单可能不含较新 dtype（int16 / float4_e2m1 / float8_e5m2 等），与 CANN 版本新旧无关；不支持时报错签名与「环境装错」不同，可据此区分：
 
 | 通路 | 用例 | 验证特性 | 本地 CANN 不支持时的错误签名 |
 |------|------|---------|------------------------------|
@@ -28,4 +28,4 @@
 | E2E | `causal_conv1d_fn_basic` | torch.ops.cann_ops_transformer | `EZ1013: JSON configuration file of operator aclnnCausalConv1dFn_* cannot be found`（需部署配套 cann-ops-transformer 自定义算子包；加载 C++ 扩展还需系统 `ninja`） |
 | E2E | `add_bool` | bool add（logical or 语义，binary_equal 字节级比对） | 部分版本线 NPU 侧按算术加实现（1+1 字节为 0x02 而非 0x01），比对失败，日志显示 `Expected: True(0x01) Actual: True(0x02)`——这是设备侧 bool 表示缺陷，不是用例或环境问题 |
 
-遇到上表签名，说明本地 CANN 不支持对应 dtype/算子（或缺算子包），属于预期内的失败；升级 CANN 或装包后重跑。基线用例各版本均应通过，失败先查环境。
+遇到上表签名，说明本地芯片/CANN 不支持对应 dtype/算子（或缺算子包），属于预期内的失败；升级 CANN、装包或换用支持的芯片后重跑。基线用例各版本均应通过，失败先查环境。

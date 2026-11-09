@@ -38,7 +38,7 @@ from ..common.dump import (
     resolve_manual_case,
     snapshot_manual_values,
 )
-from ..common.logging import build_single_log_dir, default_logging_config
+from ..common.logging import LOG_FILE_NAME, build_single_log_dir, default_logging_config
 from ..common.plugin import SpecResolver
 from ..common.process import DeviceLock, gate_host_memory, process_context
 from ..common.result import format_xpu_metrics
@@ -419,12 +419,14 @@ def _run_profile(
 
     process_ctx.notify_status("OnGeirExecute")
     input_prefix = os.path.join(compiler.build_dir, f"{testcase.testcase_name}_input")
+    case_log_dir = build_single_log_dir(switches.test_mode, testcase.testcase_name, switches.root_path)
     plan = GraphExecPlan(
         binary=binary,
         config_path=config_path,
         build_dir=compiler.build_dir,
         prof_path=_prof_path(switches, testcase, mode),
         input_prefix=input_prefix,
+        log_path=os.path.join(case_log_dir, LOG_FILE_NAME) if switches.logging_to_file else "",
     )
     exec_result = execute_graph(testcase, dev_id, switches, plan, tol_state.pre_compare)  # 图执行（XPU 并行中）
 

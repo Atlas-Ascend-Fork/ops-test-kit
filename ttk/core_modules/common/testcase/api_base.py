@@ -958,6 +958,10 @@ class ApiTestcaseBase(TestcaseBase):
         if not self.is_valid or not self.tensor_view_shapes:
             return
         dist = self.tensor_list_dist
+        # 负索引 Python 语义归一化（-1 = 最后一个张量槽）后再做区间校验；
+        # 留空不在此处理（auto-fill 的 [-1] 兜底在 _check_output_configuration）
+        if self.output_tensor_indexes:
+            self.output_tensor_indexes = tuple(i + len(dist) if i < 0 else i for i in self.output_tensor_indexes)
         if any(not 0 <= i < len(dist) for i in self.output_tensor_indexes or ()):
             self.is_valid = False
             self.fail_reason = (

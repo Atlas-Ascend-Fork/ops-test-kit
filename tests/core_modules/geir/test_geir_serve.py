@@ -95,10 +95,13 @@ def test_read_exact_times_out_without_allocating_declared_frame():
         os.close(write_fd)
 
 
-def test_serve_success_frame_roundtrip():
+def _ok_frame():
     payload = np.array([1.5, 2.5], dtype=np.float32).tobytes()
-    frame = struct.pack("<q", 1) + struct.pack("<q", len(payload)) + payload
-    serve = _serve_with_frame(frame)
+    return struct.pack("<q", 1) + struct.pack("<q", len(payload)) + payload
+
+
+def test_serve_success_frame_roundtrip():
+    serve = _serve_with_frame(_ok_frame())
     outputs = serve.run_case(_testcase(), _plan(), types.SimpleNamespace(proc_timeout=1))
     assert len(outputs) == 1
     np.testing.assert_allclose(outputs[0], np.array([1.5, 2.5], dtype=np.float32))
@@ -111,6 +114,28 @@ def test_serve_failure_frame_message():
     serve = _serve_with_frame(frame)
     with pytest.raises(RuntimeError, match="RunGraph failed"):
         serve.run_case(_testcase(), _plan(), types.SimpleNamespace(proc_timeout=1))
+    os.close(serve._data_r)
+
+
+@pytest.mark.parametrize(
+    ("plan_overrides", "expected_entry"),
+    [
+        ({}, b"/tmp/case.json\t/tmp/input\t\t\t0\t1\n"),
+        ({"log_path": "/log/geir/case/ttk.log"}, b"/tmp/case.json\t/tmp/input\t\t/log/geir/case/ttk.log\t0\t1\n"),
+        (
+            {"prof_path": "/prof", "log_path": "/log/geir/case/ttk.log", "round_idx": 2, "run_total": 3},
+            b"/tmp/case.json\t/tmp/input\t/prof\t/log/geir/case/ttk.log\t2\t3\n",
+        ),
+    ],
+)
+def test_run_case_entry_wire_format(plan_overrides, expected_entry):
+    """entry 六字段线上格式：prof/log 缺省为空串占位，轮次取自 plan 字段。"""
+    plan = _plan()
+    for key, value in plan_overrides.items():
+        setattr(plan, key, value)
+    serve = _serve_with_frame(_ok_frame())
+    serve.run_case(_testcase(), plan, types.SimpleNamespace(proc_timeout=1))
+    assert serve.proc.stdin.getvalue() == expected_entry
     os.close(serve._data_r)
 
 

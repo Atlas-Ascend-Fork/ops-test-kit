@@ -47,7 +47,7 @@ source /usr/local/Ascend/cann/set_env.sh
 
 无需 torch/tensorflow：
 
-- `pip install onnx`（onnx ≥ 1.13 且 opset ≤ 18，CANN 9.2.x 配套 onnx 1.13.x）
+- `pip install "onnx==1.13.1"`（onnx ≥ 1.13 且 opset ≤ 18，CANN 9.2.x 配套 onnx 1.13.x）
 - CANN `atc`（被测腿 atc 编译 .om → aclmdl 执行）
 
 失败码与缓存见 [FAQ 一本通](../faq/faq_guide.md)。

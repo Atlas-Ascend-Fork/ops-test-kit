@@ -91,7 +91,10 @@ def lifecycle_binary(request, tmp_path_factory):
     scope_type = _block(source, "struct ProfScope") if "struct ProfScope" in source else ""
     scope_instance = "ProfScope prof_scope{prof_teardown};" if scope_type else ""
     if profiling:
-        declarations = "bool prof_init_done = false, prof_started = false; aclgrphProfConfig* prof_cfg = nullptr;"
+        declarations = (
+            "bool prof_init_done = false, prof_started = false; "
+            "aclgrphProfConfig* prof_cfg = nullptr; string ttk_prof_session;"
+        )
         run = r"""
     aclgrphProfConfig cfg;
     auto begin = [&](bool start, bool config) {
@@ -112,29 +115,30 @@ def lifecycle_binary(request, tmp_path_factory):
         assert(std::fread(text, 1, size, data_out) == static_cast<size_t>(size));
         assert(string(text) == "original RunGraph error");
     } else if (scenario == 3) {
+        // 单会话续用: 裸 continue(空行)不收尾, 会话跨轮存活; 末轮收尾一次
+        begin(true, true);
         for (int i = 0; i < 2; ++i) {
-            // SCOPE_INSTANCE
-            begin(true, true);
-            continue; // Configuration/graph failures must not leak into the next case.
+            continue;
         }
-        assert(finalizes == 2 && stops == 2 && destroys == 2);
+        assert(active && finalizes == 0 && stops == 0 && destroys == 0);
+        prof_teardown();
+        assert(!active && finalizes == 1);
     } else if (scenario == 4) {
         for (;;) {
-            // SCOPE_INSTANCE
             begin(true, true);
-            break; // EOF / loop exit.
+            break; // EOF → 循环外 finalize_all 收尾, 循环退出本身不收尾
         }
+        assert(active);
+        prof_teardown();
         assert(!active && finalizes == 1);
     } else if (scenario == 5) {
         { // Failed Init leaves all flags clear; cleanup must be a no-op.
-            // SCOPE_INSTANCE
             write_fail_frame("original RunGraph error");
         }
         assert(stops == 0 && destroys == 0 && finalizes == 0);
     } else {
-        { // Explicit success cleanup and destructor backstop are idempotent.
-            // SCOPE_INSTANCE
-            begin(true, true); prof_teardown();
+        { // Explicit success cleanup is idempotent.
+            begin(true, true); prof_teardown(); prof_teardown();
         }
         assert(finalizes == 1 && stops == 1 && destroys == 1);
     }

@@ -56,6 +56,8 @@ REG_OP(Const)
 #include <new>
 #include <string>
 #include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
 
 using namespace ge;
 using namespace std;
@@ -378,13 +380,14 @@ int main(int argc, char* argv[]) {
     }
 
     const bool ttk_serve_mode = (config_path[0] == '-' && config_path[1] == '\0');
+    string ttk_prof_session;   // 常驻模式当前打开的 profiling 会话路径(空=无会话)
 {% if ge_prof_ok %}
     bool prof_init_done = false;
     bool prof_started = false;
     aclgrphProfConfig* prof_cfg = nullptr;
     // 一次性模式: 路径由 argv[4] 给定, 整进程 init 一次。
-    // 常驻模式: profiling 产物要求逐例分目录, 而 aclgrphProfInit 绑定的是进程级
-    // 输出路径 —— 故这里不 init, 改为每例进来时按该例的路径 init、跑完即 finalize。
+    // 常驻模式: 单会话模型——同用例多轮共用一个 PROF 目录(会话续用逻辑见
+    // serve 循环), 末轮/换路径时 teardown 落盘。
     if (!ttk_serve_mode && prof_path[0] != '\0') {
         if (aclgrphProfInit(prof_path, (uint32_t)strlen(prof_path)) == GE_PROF_SUCCESS) {
             prof_init_done = true;
@@ -396,6 +399,7 @@ int main(int argc, char* argv[]) {
         if (prof_started && prof_cfg) { aclgrphProfStop(prof_cfg); prof_started = false; }
         if (prof_cfg) { aclgrphProfDestroyConfig(prof_cfg); prof_cfg = nullptr; }
         if (prof_init_done) { aclgrphProfFinalize(); prof_init_done = false; }
+        ttk_prof_session.clear();
     };
 {% else %}
     auto prof_teardown = [&]() {};
@@ -415,8 +419,8 @@ int main(int argc, char* argv[]) {
     auto write_fail_frame = [&](const string& msg) {
         // The parent may start the next case as soon as it reads this frame.
         prof_teardown();
-        int64_t neg = -1;
-        fwrite(&neg, 8, 1, data_out);
+        int64_t fail_code = -1;
+        fwrite(&fail_code, 8, 1, data_out);
         int64_t msg_len = (int64_t)msg.size();
         fwrite(&msg_len, 8, 1, data_out);
         fwrite(msg.data(), 1, msg_len, data_out);
@@ -424,62 +428,87 @@ int main(int argc, char* argv[]) {
     };
 
     // ---------- 常驻模式 ----------
-    // argv[5] 为 "-" 时进入常驻: 从 stdin 逐行读 "config_path<TAB>input_prefix",
-    // 每读一行跑一个用例, 读到 EOF 退出。GEInitialize 因此**整批只做一次**
+    // argv[5] 为 "-" 时进入常驻: 从 stdin 逐行读
+    //   "config_path<TAB>input_prefix<TAB>prof_path<TAB>log_path<TAB>round_idx<TAB>run_total"
+    // 每读一行跑一轮, 读到 EOF 退出。GEInitialize 因此**整批只做一次**
     // —— 实测它要 8.5 秒, 而逐例真正必须做的 AddGraph/RunGraph 只要 4.3 秒。
     // 传具体路径时行为与原来完全一致(跑一个用例就退出)。
     // 单例失败(配置/Session/AddGraph/RunGraph)在常驻模式下发失败帧后继续下一例;
     // 一次性模式保持原行为(stderr 报错 + 退出)。
-    bool ttk_first_round = true;
+    // profiling 单会话: 同用例共用一个 PROF 目录——预热轮(round_idx<0)与首个
+    // 运行轮(run_total>1)不入窗, 对齐 kernel start_step=1, 采 run-1 次, run=1
+    // 唯一轮照采; 同路径续用不重 Init, 末轮发结果帧前 Stop/Finalize 落盘;
+    // 跨用例路径变化先收尾再重开。
+    bool ttk_one_shot_pending = true;   // 一次性模式单次门控; 常驻模式恒 true 不消费
     string ttk_cfg_path;
-    string ttk_prof_buf;
-    string ttk_prefix_buf = input_prefix ? string(input_prefix) : string();
+    string ttk_prof_path;
+    string ttk_log_path;
+    string ttk_input_prefix = input_prefix ? string(input_prefix) : string();
+    long ttk_round_idx = 0;             // 当轮序号(0 基, entry 第 5 段)
+    long ttk_run_total = 1;             // 总轮数(entry 第 6 段)
+    bool ttk_last_round = true;         // 末轮标记: 发帧前收尾 profiling; 一次性模式恒 true
 
-    struct ProfScope {
-        decltype(prof_teardown)& teardown;
-        ~ProfScope() { teardown(); }
-    };
     while (true) {
-    // Backstop for continue/return/EOF paths, including failures before RunGraph.
-    // Explicit teardown before frames is still needed to avoid a parent race.
-    ProfScope prof_scope{prof_teardown};
     if (ttk_serve_mode) {
-        char ttk_line[4096];
-        if (fgets(ttk_line, sizeof(ttk_line), stdin) == nullptr) break;   // EOF -> 正常收工
-        string entry(ttk_line);
+        char entry_line[4096];
+        if (fgets(entry_line, sizeof(entry_line), stdin) == nullptr) break;   // EOF -> 正常收工
+        string entry(entry_line);
         while (!entry.empty() && (entry.back() == '\n' || entry.back() == '\r')) entry.pop_back();
         if (entry.empty()) continue;
-        // 每行: config_path<TAB>input_prefix[<TAB>prof_path]
-        size_t tab = entry.find('\t');
-        ttk_prof_buf.clear();
-        if (tab == string::npos) {
-            ttk_cfg_path = entry;
-        } else {
-            ttk_cfg_path = entry.substr(0, tab);
-            string rest = entry.substr(tab + 1);
-            size_t tab2 = rest.find('\t');
-            if (tab2 == string::npos) {
-                ttk_prefix_buf = rest;
+        // 每行: config_path<TAB>input_prefix<TAB>prof_path<TAB>log_path<TAB>round_idx<TAB>run_total
+        // (后四段可缺省: 空路径按无, 轮次按 0/1)
+        vector<string> entry_fields;
+        size_t scan = 0;
+        while (true) {
+            size_t tab_pos = entry.find('\t', scan);
+            if (tab_pos == string::npos) { entry_fields.push_back(entry.substr(scan)); break; }
+            entry_fields.push_back(entry.substr(scan, tab_pos - scan));
+            scan = tab_pos + 1;
+        }
+        ttk_cfg_path     = entry_fields.size() > 0 ? entry_fields[0] : "";
+        ttk_input_prefix = entry_fields.size() > 1 ? entry_fields[1] : "";
+        ttk_prof_path    = entry_fields.size() > 2 ? entry_fields[2] : "";
+        ttk_log_path     = entry_fields.size() > 3 ? entry_fields[3] : "";
+        ttk_round_idx    = entry_fields.size() > 4 ? atol(entry_fields[4].c_str()) : 0;
+        ttk_run_total    = entry_fields.size() > 5 ? atol(entry_fields[5].c_str()) : 1;
+        ttk_last_round = (ttk_round_idx + 1 >= ttk_run_total);
+        // fd 1 → 当前用例 ttk.log: CANN slog 打屏直写 fd 1, PIPE 捕不进档;
+        // 每例 dup2 重指, O_APPEND 与 worker 侧共写同档。GEInitialize 早于
+        // 首行 entry, 启动段 slog 仍走原 PIPE。
+        if (!ttk_log_path.empty()) {
+            int ttk_log_fd = open(ttk_log_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
+            if (ttk_log_fd >= 0) {
+                fflush(stdout);
+                dup2(ttk_log_fd, 1);
+                close(ttk_log_fd);
             } else {
-                ttk_prefix_buf = rest.substr(0, tab2);
-                ttk_prof_buf   = rest.substr(tab2 + 1);
+                fprintf(stderr, "[TTK-GEIR] open case log %s failed (errno=%d)\n", ttk_log_path.c_str(), errno);
             }
         }
 {% if ge_prof_ok %}
-        if (!ttk_prof_buf.empty()) {
-            if (aclgrphProfInit(ttk_prof_buf.c_str(), (uint32_t)ttk_prof_buf.size()) == GE_PROF_SUCCESS) {
+        // 单会话: 预热轮(round_idx<0)与首个运行轮(run_total>1)不入窗, 对齐
+        // kernel start_step=1; run=1 唯一轮照采。失败路径的收尾由
+        // write_fail_frame/finalize_all 覆盖, 不做逐轮 backstop。
+        bool ttk_prof_on =
+            !ttk_prof_path.empty() && (ttk_round_idx > 0 || (ttk_round_idx == 0 && ttk_run_total == 1));
+        if (ttk_prof_on && ttk_prof_session != ttk_prof_path) {
+            prof_teardown();
+            if (aclgrphProfInit(ttk_prof_path.c_str(), (uint32_t)ttk_prof_path.size()) == GE_PROF_SUCCESS) {
                 prof_init_done = true;
+                ttk_prof_session = ttk_prof_path;
             } else {
                 fprintf(stderr, "[TTK-GEIR] aclgrphProfInit failed, profiling disabled\n");
             }
+        } else if (!ttk_prof_on && !ttk_prof_session.empty()) {
+            prof_teardown();   // 异常序残留会话兜底(正常序末轮已收尾)
         }
 {% endif %}
     } else {
-        if (!ttk_first_round) break;
-        ttk_first_round = false;
+        if (!ttk_one_shot_pending) break;
+        ttk_one_shot_pending = false;
         ttk_cfg_path = config_path;
     }
-    const char* input_prefix = ttk_prefix_buf.c_str();
+    const char* input_prefix = ttk_input_prefix.c_str();
 
     JsonValue config = jsonParseFile(ttk_cfg_path.c_str());
     if (config.isNull()) {
@@ -753,7 +782,9 @@ int main(int argc, char* argv[]) {
     }
 
 {% if ge_prof_ok %}
-    if (prof_init_done) {
+    if (prof_init_done && !prof_started) {
+        // 会话开启轮才 Start, 续用轮不重复(单会话跨轮); 失败重试先销毁旧 config
+        if (prof_cfg != nullptr) { aclgrphProfDestroyConfig(prof_cfg); prof_cfg = nullptr; }
         uint32_t dev_list[1] = {(uint32_t)device_id};
         prof_cfg = aclgrphProfCreateConfig(dev_list, 1, kAicoreArithmeticUtilization,
                                            nullptr, kProfTaskTime);
@@ -787,17 +818,17 @@ int main(int argc, char* argv[]) {
     // output_generation.py::__append_out_shape_unknown_golden.
     vector<uint64_t> shape_meta;
     if (config.has("shape_unknown_indexes")) {
-        const JsonValue& sui = config.at("shape_unknown_indexes");
-        if (sui.type == JsonValue::Array) {
-            for (size_t si = 0; si < sui.size(); si++) {
-                int64_t sidx = sui.at(si).getInt();
-                if (sidx < 0 || (size_t)sidx >= output_tensors.size()) {
+        const JsonValue& unknown_idx_cfg = config.at("shape_unknown_indexes");
+        if (unknown_idx_cfg.type == JsonValue::Array) {
+            for (size_t cfg_idx = 0; cfg_idx < unknown_idx_cfg.size(); cfg_idx++) {
+                int64_t marked_out_idx = unknown_idx_cfg.at(cfg_idx).getInt();
+                if (marked_out_idx < 0 || (size_t)marked_out_idx >= output_tensors.size()) {
                     fprintf(stderr, "[TTK-GEIR] shape_unknown_indexes[%zu]=%lld out of range (outputs=%zu)\n",
-                            si, (long long)sidx, output_tensors.size());
+                            cfg_idx, (long long)marked_out_idx, output_tensors.size());
                     continue;
                 }
                 const vector<int64_t>& dims =
-                    output_tensors[(size_t)sidx].GetTensorDesc().GetShape().GetDims();
+                    output_tensors[(size_t)marked_out_idx].GetTensorDesc().GetShape().GetDims();
                 uint64_t words[9] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
                 size_t rank = dims.size() > 8 ? 8 : dims.size();
                 words[0] = (uint64_t)rank | (1ULL << 31);
@@ -811,10 +842,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 常驻模式: profiling 先收尾再发结果帧——父进程收到帧即解析 PROF 目录,
-    // 若帧先于 finalize 发出, msprof 数据未落盘, device_perf_us 会解析为空。
-    // 幂等(布尔门控), 循环尾的 prof_teardown 不会重复执行。
-    if (ttk_serve_mode) prof_teardown();
+    // 常驻模式末轮: profiling 先收尾再发结果帧——父进程收到帧即解析单会话
+    // PROF 目录, 若帧先于 finalize 发出, msprof 数据未落盘, device_perf_us
+    // 会解析为空。非末轮不收尾(会话跨轮续用)。
+    if (ttk_serve_mode && ttk_last_round) prof_teardown();
 
     int64_t num_outputs = (int64_t)output_tensors.size() + (shape_meta.empty() ? 0 : 1);
     fwrite(&num_outputs, 8, 1, data_out);
@@ -834,7 +865,6 @@ int main(int argc, char* argv[]) {
     fflush(data_out);
 
     delete session;
-    if (ttk_serve_mode) prof_teardown();   // 逐例收尾, 让下一例能 init 到自己的路径
     }  // ---------- 常驻模式循环结束 ----------
 
     finalize_all();

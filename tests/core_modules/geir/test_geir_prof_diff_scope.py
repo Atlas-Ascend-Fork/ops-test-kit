@@ -56,18 +56,23 @@ class TestSnapshotDiff:
 
 
 class TestScopedPerfParse:
-    """_parse_msprof_task_duration 导出/解析均只作用于本轮新建 PROF。"""
+    """_parse_msprof_task_duration 导出/解析均只作用于传入的 PROF 目录。"""
 
     def test_empty_diff_returns_none_without_export(self, tmp_path):
         with mock.patch("ttk.core_modules.geir.perf_parse.export_msprof_summary") as exp:
-            assert _parse_msprof_task_duration([]) is None
+            assert _parse_msprof_task_duration([], 2) is None
             exp.assert_not_called()
+
+    def test_non_positive_rounds_returns_none(self, tmp_path):
+        new_prof = _make_prof_with_summary(tmp_path, "PROF_new", 10.0)
+        with mock.patch("ttk.core_modules.geir.perf_parse.export_msprof_summary"):
+            assert _parse_msprof_task_duration([str(new_prof)], 0) is None
 
     def test_reads_only_new_prof_ignoring_stale_reexport(self, tmp_path):
         _make_prof_with_summary(tmp_path, "PROF_old", 14.885, mtime=2_000_000_000)
         new_prof = _make_prof_with_summary(tmp_path, "PROF_new", 145.001, mtime=1_000_000_000)
         with mock.patch("ttk.core_modules.geir.perf_parse.export_msprof_summary") as exp:
-            result = _parse_msprof_task_duration([str(new_prof)])
+            result = _parse_msprof_task_duration([str(new_prof)], 1)
         exp.assert_called_once_with(str(new_prof), exports=("summary",))
         assert result == pytest.approx(145.001)
 
@@ -76,12 +81,13 @@ class TestScopedPerfParse:
         new_prof.mkdir(parents=True)
         (new_prof / "op_summary_20260101000000.csv").write_text(_OP_SUMMARY_HEADER + "1.0,SDMA\n")
         with mock.patch("ttk.core_modules.geir.perf_parse.export_msprof_summary"):
-            assert _parse_msprof_task_duration([str(new_prof.parent)]) is None
+            assert _parse_msprof_task_duration([str(new_prof.parent)], 1) is None
 
-    def test_multiple_new_profs_merged_median(self, tmp_path):
+    def test_durations_summed_then_averaged_over_rounds(self, tmp_path):
+        """全部 launch 求和后按采集轮数均摊（非 median）。"""
         prof_a = _make_prof_with_summary(tmp_path, "PROF_a", 10.0)
         prof_b = _make_prof_with_summary(tmp_path, "PROF_b", 20.0)
         with mock.patch("ttk.core_modules.geir.perf_parse.export_msprof_summary") as exp:
-            result = _parse_msprof_task_duration([str(prof_a), str(prof_b)])
+            result = _parse_msprof_task_duration([str(prof_a), str(prof_b)], 1)
         assert [call.args[0] for call in exp.call_args_list] == [str(prof_a), str(prof_b)]
-        assert result == pytest.approx(15.0)
+        assert result == pytest.approx(30.0)  # (10+20)/1 —— median 口径会给 15
