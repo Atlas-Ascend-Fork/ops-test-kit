@@ -40,11 +40,15 @@ def run_torch_eager_rounds(
     md5_list = []
     deterministic = ctx.deterministic_level > 0
     total = ctx.warmup_count + ctx.run_count
+    # spec 物化对象的轮前复位（run_eager 挂载；与 mutable_loader 的张量槽复位同理）
+    round_reset = getattr(ctx, "round_reset", None)
     with profiler:
         for i in range(total):
             clear_device_state(ctx.switches)  # 同进程轮前 RTS 清（裸 aclrt 与 torch_npu 共存）
             is_warmup = i < ctx.warmup_count
             mutable_loader(i)
+            if round_reset is not None:
+                round_reset()
             with ctx.backend.device_scope(ctx.dev_id):
                 r = adapter.eager_call(resolved, args, kwargs, ctx.is_tensor_method)
                 if backward_mode:

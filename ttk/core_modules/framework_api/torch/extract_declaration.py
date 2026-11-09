@@ -177,8 +177,10 @@ def _normalize_npu_type(t: str) -> str:
         "Layout?": "int",
         "MemoryFormat": "int",
         "MemoryFormat?": "int",
-        "Generator": "None",
-        "Generator?": "None",
+        # Generator 保留类型（可经声明式 spec 填充，见 object_spec.py），
+        # 不再抹成 None 占位
+        "Generator": "Generator",
+        "Generator?": "Generator",
         "AnyEnumType": "int",
         "Storage": "None",
         "Storage?": "None",

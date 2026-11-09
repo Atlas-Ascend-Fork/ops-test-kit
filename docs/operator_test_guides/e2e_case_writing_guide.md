@@ -52,7 +52,7 @@ onnx仅支持静态 shape（维度 ≥ 0），布局列（`tensor_formats` / `te
 |------|---------|--------|------|
 | `output_tensor_indexes` | 否 | `()` | 输出张量索引。默认为空（输出从 API 返回值收集）；Inplace Tensor 方法（`torch.Tensor.xxx_`）自动填 `(0,)`；带 `out` 参数的 API 需手动指定 |
 | `inplace_input_indexes` | 否 | `()` | 需要比对"被原地改写的输入"的张量索引（框架按此备份输入并参与比对） |
-| `attributes` | 否 | `{}` | 框架 API 关键字参数，如 `{'alpha': 1.0}`。签名中必选的非张量参数**必须**提供。torch 用例可携带保留键 `CubeMathType`（int 0-4，不传入 API）：执行前设置 `torch_npu.npu.matmul/conv` 的立方计算精度模式（0 KEEP_DTYPE / 1 ALLOW_FP32_DOWN_PRECISION / 2 USE_FP16 / 3 USE_HF32 / 4 高精度档），用于 matmul/conv 类算子的精度模式验证；携带该键的用例先复位基线（KEEP_DTYPE + `allow_hf32=False`）再覆盖，仅 NPU + torch 生效。onnx即 ONNX 节点属性（按名传参，必选属性缺失报错） |
+| `attributes` | 否 | `{}` | 框架 API 关键字参数，如 `{'alpha': 1.0}`。签名中必选的非张量参数**必须**提供。torch 用例可携带保留键 `CubeMathType`（int 0-4，不传入 API）：执行前设置 `torch_npu.npu.matmul/conv` 的立方计算精度模式（0 KEEP_DTYPE / 1 ALLOW_FP32_DOWN_PRECISION / 2 USE_FP16 / 3 USE_HF32 / 4 高精度档），用于 matmul/conv 类算子的精度模式验证；携带该键的用例先复位基线（KEEP_DTYPE + `allow_hf32=False`）再覆盖，仅 NPU + torch 生效。torch 随机算子可按 Generator 形参名声明 spec（`{'generator': {'seed':..,'offset':..}}`，详见下节）。onnx即 ONNX 节点属性（按名传参，必选属性缺失报错） |
 | `golden_api` | 否 | `""` | 替代 Golden 计算的 API，如 `torch.nn.functional.conv2d`；设为 `"disable"` 禁用 Golden |
 
 ### onnx 属性类型与 schema 查询
@@ -85,6 +85,23 @@ print('since :', s.since_version)
 ```
 
 `option` 为 `Single`/`Optional`/`Variadic`——对应 CSV 的必选输入、尾部可省略输入（`None` 槽）与嵌套 TensorList；`required` 属性必须在 `attributes` 列按名提供。
+
+### torch 随机算子的 generator 声明（确定性 RNG）
+
+API 形参含 `torch.Generator` 的随机数算子（如 `torch.ops.aten.bernoulli_.float`），可按形参名在 `attributes` 中声明确定性随机流（键名须与 API 的 Generator 形参一致）：
+
+```csv
+testcase_name,api_name,tensor_view_shapes,tensor_dtypes,attributes
+bern_006,torch.ops.aten.bernoulli_.float,"((4,2,),)","('float32','float32')","{""p"":0.674,""generator"":{""seed"":9,""offset"":64}}"
+```
+
+- **写法与校验**：`{'generator': {'seed': <int>, 'offset': <int>}}`（`seed` 必须显式写明，不支持 int 糖）；`offset` 可省（默认 0）；`None`/`"None"` 即不声明。解析期校验，非法值快速失败（`GENERATOR_SPEC_INVALID`）：键白名单 `{seed, offset}`；`seed` 必填 int 且 ∈ [-2^63, 2^64)；`offset` 须为非负且 4 的倍数（NPU generator 约束）
+- **执行语义**（声明 spec 即选择确定性 RNG，NPU 与 golden 两侧由同一 (seed, offset) 驱动）：
+  - eager：执行期物化为 `torch.Generator`（按 seed/offset 播种）显式传入 API；轮循环每轮执行前（含 warmup 与 `--run=x` 每一轮）复位，offset 自增不影响末轮比对
+  - 图模式 `-c`/`-d`：Dynamo 无法 proxy Generator（断图），摘除显式 generator 回落默认 generator，每次 `compiled()` 调用前按 (seed, offset) 重播种（`manual_seed` + rng state 的 offset 字段回写）
+  - aclgraph：捕获期禁读 RNG 状态，快速失败 `GENERATOR_GRAPH_UNSUPPORTED`（改用 eager 或 `-c`/`-d`）
+  - `--backend cpu`：CPU 走 MT19937 流不可复刻，报 `GENERATOR_BACKEND_UNSUPPORTED`
+- **golden**：spec 原样透传给插件（不构造对象），需在插件 golden 中读取 `seed`/`offset` 复刻随机流（如 bernoulli golden 的 numpy Philox 流复刻）；默认 golden 收到未物化 spec 时报 `GENERATOR_SPEC_REQUIRES_CUSTOM_GOLDEN` 并附插件指引
 
 ## 三、参考用例
 

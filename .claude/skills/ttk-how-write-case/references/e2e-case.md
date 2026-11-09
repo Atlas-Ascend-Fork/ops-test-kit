@@ -48,7 +48,7 @@ E2E 用例的参数（张量数量/顺序/dtype、关键字参数等）来自框
 |------|------|------|------|
 | `output_tensor_indexes` | 否 | *(自动)* | 输出张量索引。Inplace Tensor 方法（`torch.Tensor.xxx_`）自动填充 `(0,)`；带 `out` 参数的 API 需手动指定输出位置索引。未设置且 API 无 `out` 参数时，框架自动处理返回值 |
 | `inplace_input_indexes` | 否 | `()` | 原地改写输入张量的索引（图模式捕获前备份、重放后还原这些输入；Inplace Tensor 方法自动填充的是 `output_tensor_indexes=(0,)`，此字段需手动声明） |
-| `attributes` | 否 | `{}` | 框架 API 关键字参数。如 `{'alpha': 1.0}`。API 签名中的必选非张量参数**必须**提供，否则用例校验不通过。torch 用例可携带保留键 `CubeMathType`（int 0-4，不传入 API）：执行前设置 `torch_npu.npu.matmul/conv` 立方计算精度模式（0 KEEP_DTYPE / 1 ALLOW_FP32_DOWN_PRECISION / 2 USE_FP16 / 3 USE_HF32 / 4 高精度档），携带时先复位基线再覆盖，仅 NPU + torch 生效 |
+| `attributes` | 否 | `{}` | 框架 API 关键字参数。如 `{'alpha': 1.0}`。API 签名中的必选非张量参数**必须**提供，否则用例校验不通过。torch 用例可携带保留键 `CubeMathType`（int 0-4，不传入 API）：执行前设置 `torch_npu.npu.matmul/conv` 立方计算精度模式（0 KEEP_DTYPE / 1 ALLOW_FP32_DOWN_PRECISION / 2 USE_FP16 / 3 USE_HF32 / 4 高精度档），携带时先复位基线再覆盖，仅 NPU + torch 生效。torch 随机算子可按 Generator 形参名声明 spec（`{'generator': {'seed':..,'offset':..}}`，详见常见模式「随机算子 generator 声明」） |
 | `golden_api` | 否 | `""` | 替代 Golden 计算的 API（详见常见模式） |
 
 ## 常见模式
@@ -103,6 +103,19 @@ tensor_storage_shapes,"((3,6),)"
 ```csv
 tensor_view_shapes,"(((3,3),(3,2)),(3,5))"
 ```
+
+### 随机算子 generator 声明（torch）
+
+API 形参含 `torch.Generator` 的随机数算子（如 `torch.ops.aten.bernoulli_.float`），在 `attributes` 中按形参名声明确定性 RNG：
+
+```csv
+testcase_name,api_name,tensor_view_shapes,tensor_dtypes,attributes
+bern_006,torch.ops.aten.bernoulli_.float,"((4,2,),)","('float32','float32')","{'p':0.674,'generator':{'seed':9,'offset':64}}"
+```
+
+- 写法：`{'generator': {'seed': <int>, 'offset': <int>}}`（`seed` 必须显式写明，不支持 int 糖；`offset` 可省默认 0）；校验（非法报 `GENERATOR_SPEC_INVALID`）：`seed` 必填 int ∈ [-2^63, 2^64)，`offset` ≥ 0 且为 4 的倍数（NPU generator 约束）
+- 执行语义：eager 物化为 `torch.Generator` 显式传入 API，每轮（含 warmup）执行前复位；图模式 `-c`/`-d` 摘除回落默认 generator、每次 `compiled()` 前重播种；aclgraph 报 `GENERATOR_GRAPH_UNSUPPORTED`；`--backend cpu` 报 `GENERATOR_BACKEND_UNSUPPORTED`
+- golden：spec 原样透传给插件 golden，由插件读 `seed`/`offset` 复刻随机流（默认 golden 报 `GENERATOR_SPEC_REQUIRES_CUSTOM_GOLDEN`）
 
 ## ONNX 约定
 

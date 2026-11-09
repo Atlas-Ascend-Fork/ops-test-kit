@@ -195,6 +195,45 @@ def match_overload(api_name, input_tensor_count, attributes=None, tensor_distrib
     return tied[0][2], tied[0][1]
 
 
+class GeneratorSpec(dict):
+    """generator 参数的 spec（键白名单 {seed, offset}）。
+
+    定义在 common 是依赖方向约束（common 不得 import 通路层）：解析层
+    （_normalize_generator_spec）与求值层（framework_api/object_spec.py 的
+    SPEC_BUILDERS）共用本标记类。
+    """
+
+
+def _normalize_generator_spec(raw):
+    """Generator 参数 spec 解析（只校验归一，构造见 framework_api/object_spec.py）。
+
+    None/"None" → None；dict 键白名单 {seed, offset}：seed 必填 int ∈
+    [-2^63, 2^64)，offset ≥ 0 且 %4==0（NPU generator 强校验）。不支持
+    int 糖——seed 必须显式写明。
+    """
+    if raw is None or (isinstance(raw, str) and raw == "None"):
+        return None
+    if isinstance(raw, dict):
+        unknown = set(raw) - {"seed", "offset"}
+        if unknown:
+            raise ValueError(
+                f"GENERATOR_SPEC_INVALID: unknown keys {sorted(unknown)}; expected {{'seed': int, 'offset': int}}"
+            )
+        seed = raw.get("seed")
+        if not isinstance(seed, int) or isinstance(seed, bool):
+            raise ValueError(f"GENERATOR_SPEC_INVALID: 'seed' is required and must be int, got {seed!r}")
+        if not -(2**63) <= seed < 2**64:
+            raise ValueError(f"GENERATOR_SPEC_INVALID: 'seed' {seed} out of range [-2^63, 2^64)")
+        offset = raw.get("offset", 0)
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset % 4:
+            raise ValueError(
+                "GENERATOR_SPEC_INVALID: 'offset' must be a non-negative int "
+                f"multiple of 4 (NPU generator constraint), got {offset!r}"
+            )
+        return GeneratorSpec(seed=seed, offset=offset)
+    raise ValueError(f"GENERATOR_SPEC_INVALID: expected None/{{'seed','offset'}} dict, got {raw!r}")
+
+
 def _coerce_value(raw, target_type):
     """Coerce a raw value from CSV attributes to the expected Python type.
 
@@ -219,6 +258,8 @@ def _coerce_value(raw, target_type):
         return None
     if isinstance(raw, str) and raw == "None":
         return None
+    if target_type in ("Generator", "torch.Generator"):
+        return _normalize_generator_spec(raw)
     if type(raw).__module__ != "builtins":
         return raw
     if target_type == "bool":

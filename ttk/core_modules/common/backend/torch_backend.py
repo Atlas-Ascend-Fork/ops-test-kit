@@ -21,6 +21,8 @@ device_name override (no ``torch.cpu.get_device_name`` exists).
 
 from __future__ import annotations
 
+import gc
+
 import numpy as np
 import torch
 
@@ -95,6 +97,27 @@ class TorchBackend(Backend):
 
     def synchronize(self, dev_id: int = 0):
         getattr(torch, self.torch_lib).synchronize(dev_id)
+
+    def clear_cache(self, dev_id: int = 0):
+        # torch.<lib>.empty_cache 无参且各 lib 可用性不一（torch.cpu 早期版本缺失），
+        # 缺 API 静默跳过：清理是尽力而为，不得让用例失败。
+        empty = getattr(getattr(torch, self.torch_lib, None), "empty_cache", None)
+        if callable(empty):
+            empty()
+
+    def reset(self, dev_id: int = 0):
+        """用例收尾缓存回收（编排钩子，worker 每 case 后调用）。
+
+        dynamo cache 按代码对象累计且无淘汰：GraphNetwork.forward 为所有通用
+        图模式用例共享（worker 进程跨用例复用），触顶 cache_size_limit（默认
+        8）后新用例静默回退 eager 单算子执行——TTK 每 case 全新 torch.compile，
+        无跨 case 复用诉求，收尾统一 reset。gc 后 clear_cache 顺带回收
+        AclGraph 私有显存池。"""
+        import torch._dynamo
+
+        torch._dynamo.reset()
+        gc.collect()
+        self.clear_cache(dev_id)
 
     def from_numpy(self, arr):
         return numpy_to_torch_tensor(arr)

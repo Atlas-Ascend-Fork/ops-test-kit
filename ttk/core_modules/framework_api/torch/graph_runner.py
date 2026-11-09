@@ -22,6 +22,7 @@ import os
 import shlex
 import subprocess
 from contextlib import contextmanager, nullcontext
+from typing import NamedTuple
 from unittest.mock import patch
 
 import torch
@@ -233,6 +234,61 @@ class _AclGraphCoreLimitModel(torch.nn.Module):
             return self._model(*args, **kwargs)
 
 
+def _restore_after_first_call(args, kwargs, is_inplace, self_mutable, inplace_backups, mutable_kwargs):
+    """首调改写后按 mutable 位复位输入（by_kwargs 走 kwargs 名，否则 args 位）。"""
+    if mutable_kwargs is not None:
+        for idx, key in mutable_kwargs.items():
+            if key in kwargs and kwargs[key] is not None:
+                kwargs[key][:] = inplace_backups[idx]
+        return
+    if is_inplace and self_mutable is not None and args:
+        args[0][:] = self_mutable
+    for idx, bak in (inplace_backups or {}).items():
+        if idx < len(args) and args[idx] is not None:
+            args[idx][:] = bak
+
+
+def _prepare_mutable_rounds(
+    args, kwargs, backend, is_inplace, self_mutable, inplace_backups, mutable_kwargs, clone_count
+):
+    """mutable 位逐轮预置：original_tensors（末轮原始张量）与 inplace_clones（轮克隆）。
+
+    aclgraph 不用克隆（clone_count=0，循环顶 copy_ 复位）。
+    """
+    original_tensors = {}
+    inplace_clones = {}
+    if mutable_kwargs is not None:
+        for idx, key in mutable_kwargs.items():
+            if key in kwargs and kwargs[key] is not None:
+                original_tensors[idx] = (key, kwargs[key])
+                inplace_clones[idx] = (key, [backend.clone(kwargs[key]) for _ in range(clone_count)])
+        return original_tensors, inplace_clones
+    for idx in inplace_backups or {}:
+        if idx < len(args) and args[idx] is not None:
+            original_tensors[idx] = args[idx]
+            inplace_clones[idx] = [backend.clone(args[idx]) for _ in range(clone_count)]
+    if is_inplace and self_mutable is not None and 0 not in original_tensors and args and args[0] is not None:
+        original_tensors[0] = args[0]
+        inplace_clones[0] = [backend.clone(args[0]) for _ in range(clone_count)]
+    return original_tensors, inplace_clones
+
+
+def _round_md5(args, kwargs, backend, r, inplace_backups, mutable_kwargs):
+    """确定性轮的输出 MD5（含 mutable 位回读）。"""
+    run_nps = []
+    if r is not None:
+        run_nps.extend(backend.result_to_numpy(r))
+    if mutable_kwargs is not None:
+        for key in mutable_kwargs.values():
+            if kwargs.get(key) is not None:
+                run_nps.append(backend.to_numpy(kwargs[key], safe=True))
+    else:
+        for idx in sorted(inplace_backups or ()):
+            if idx < len(args) and args[idx] is not None:
+                run_nps.append(backend.to_numpy(args[idx], safe=True))
+    return compute_output_md5(run_nps)
+
+
 def _run_compiled(
     compiled,
     args,
@@ -241,69 +297,45 @@ def _run_compiled(
     dev_id,
     switches,
     is_inplace,
-    inplace_self_backup,
+    self_mutable,
     api_name,
     testcase_name="",
     inplace_backups=None,
-    inplace_kwargs_keys=None,
+    mutable_kwargs=None,
     deterministic_level=None,
     is_aclgraph=False,
+    round_reset=None,
 ):
-    """inplace_self_backup=通用 inplace 路径 args[0] 的单张量克隆；
-    inplace_backups=CSV 声明 mutable 位的 {下标: 克隆}——二者来源不同，勿混用。
-    deterministic_level 由调用方解析传入（execute_graph 经
-    resolve_deterministic_level，含 testcase 属性），本函数不再自带兜底。"""
+    """执行编译图：首调定精度 → warmup + 逐轮计时 → 末轮结果与确定性 MD5。
+
+    mutable 位三来源：self_mutable=通用 inplace 路径 args[0] 的克隆；
+    inplace_backups=CSV 声明位的 {下标: 克隆}；mutable_kwargs=custom 模块的
+    {下标: kwargs 参数名}。round_reset=声明式对象参数的轮前复位（generator
+    spec，见 object_spec.py），每次 compiled() 调用前触发。
+    """
     profiling_enabled = bool(getattr(switches, "task_profiling", True))
     deterministic = bool(deterministic_level)
     run_count = switches.run_time
-    is_kwargs_mode = inplace_kwargs_keys is not None
+    by_kwargs = mutable_kwargs is not None
 
+    if round_reset is not None:
+        round_reset()
     result = compiled(*args, **kwargs)
     backend.synchronize(dev_id)
     result_nps = backend.result_to_numpy(result, copy=is_inplace)
-
-    if is_kwargs_mode:
-        for idx, key in inplace_kwargs_keys.items():
-            if key in kwargs and kwargs[key] is not None:
-                kwargs[key][:] = inplace_backups[idx]
-    else:
-        if is_inplace and inplace_self_backup is not None and args:
-            args[0][:] = inplace_self_backup
-        if inplace_backups:
-            for idx, bak in inplace_backups.items():
-                if idx < len(args) and args[idx] is not None:
-                    args[idx][:] = bak
+    _restore_after_first_call(args, kwargs, is_inplace, self_mutable, inplace_backups, mutable_kwargs)
 
     # 图模式 warmup 与 eager 对齐：在 profiler 窗口内、schedule 的 warmup
     # step 中执行（按 step 语义丢弃）。torchair 图首次 kernel 事件与
     # step-tag 建立存在竞态（首行 StepId=''），由本就要丢弃的 warmup
     # 调用吸收，计时轮全部落在 active step 且归因完整。
     warmup_in_window = switches.warmup and profiling_enabled
-    inplace_clones = {}
-    original_tensors = {}
     # 非 aclgraph 的可变位逐轮克隆多备一份给 warmup（末轮用原始张量）；
     # aclgraph 走循环顶 copy_ 复位，无逐轮克隆。
     clone_count = 0 if is_aclgraph else run_count - 1 + (1 if warmup_in_window else 0)
-    if is_kwargs_mode:
-        for idx, key in inplace_kwargs_keys.items():
-            if key in kwargs and kwargs[key] is not None:
-                original_tensors[idx] = (key, kwargs[key])
-                inplace_clones[idx] = (key, [backend.clone(kwargs[key]) for _ in range(clone_count)])
-    else:
-        if inplace_backups:
-            for idx in inplace_backups:
-                if idx < len(args) and args[idx] is not None:
-                    original_tensors[idx] = args[idx]
-                    inplace_clones[idx] = [backend.clone(args[idx]) for _ in range(clone_count)]
-        if (
-            is_inplace
-            and inplace_self_backup is not None
-            and 0 not in original_tensors
-            and args
-            and args[0] is not None
-        ):
-            original_tensors[0] = args[0]
-            inplace_clones[0] = [backend.clone(args[0]) for _ in range(clone_count)]
+    original_tensors, inplace_clones = _prepare_mutable_rounds(
+        args, kwargs, backend, is_inplace, self_mutable, inplace_backups, mutable_kwargs, clone_count
+    )
 
     profiler = get_profiler(
         api_name,
@@ -321,10 +353,11 @@ def _run_compiled(
     md5_list = []
     with profiler:
         if warmup_in_window:
+            if round_reset is not None:
+                round_reset()
             if is_aclgraph:
-                # 可变位由计时循环顶 copy_ 复位，warmup 直接用当前（复位后的）张量
                 compiled(*args, **kwargs)
-            elif is_kwargs_mode:
+            elif by_kwargs:
                 for _idx, (key, clones) in inplace_clones.items():
                     if clones:
                         kwargs[key] = clones[-1]
@@ -337,20 +370,22 @@ def _run_compiled(
             backend.synchronize(dev_id)
             profiler.step()
         for i in range(run_count):
+            if round_reset is not None:
+                round_reset()
             if is_aclgraph:
                 # Mutated-input address changes force recapture inside the measured loop.
                 for idx, original in original_tensors.items():
-                    target = original[1] if is_kwargs_mode else original
-                    backup = (inplace_backups or {}).get(idx, inplace_self_backup)
+                    target = original[1] if by_kwargs else original
+                    backup = (inplace_backups or {}).get(idx, self_mutable)
                     target.copy_(backup)
             elif i < run_count - 1:
-                if is_kwargs_mode:
+                if by_kwargs:
                     for _idx, (key, clones) in inplace_clones.items():
                         kwargs[key] = clones[i]
                 else:
                     for idx, clones in inplace_clones.items():
                         args[idx] = clones[i]
-            elif is_kwargs_mode:
+            elif by_kwargs:
                 for _idx, (key, orig) in original_tensors.items():
                     kwargs[key] = orig
             else:
@@ -361,19 +396,7 @@ def _run_compiled(
                 result = r
             backend.synchronize(dev_id)
             if deterministic:
-                run_nps = []
-                if r is not None:
-                    run_nps.extend(backend.result_to_numpy(r))
-                if is_kwargs_mode:
-                    # custom module 的 mutable 位按名回读，对齐 args 位的确定性校验
-                    for key in (inplace_kwargs_keys or {}).values():
-                        if kwargs.get(key) is not None:
-                            run_nps.append(backend.to_numpy(kwargs[key], safe=True))
-                elif inplace_backups:
-                    for idx in sorted(inplace_backups):
-                        if idx < len(args) and args[idx] is not None:
-                            run_nps.append(backend.to_numpy(args[idx], safe=True))
-                md5_list.append(compute_output_md5(run_nps))
+                md5_list.append(_round_md5(args, kwargs, backend, r, inplace_backups, mutable_kwargs))
         backend.synchronize(dev_id)
 
     perf = profiler.result(max(run_count, 1))
@@ -384,6 +407,103 @@ def _run_compiled(
     det_status = finalize_det_status(md5_list, testcase_name)
 
     return result_nps, perf, det_status
+
+
+def _resolve_generator_round_reset(args, kwargs, backend, dev_id, testcase, is_aclgraph):
+    """generator spec 的图模式处理，返回默认 generator 轮前复位句柄。
+
+    Dynamo 无法 proxy Generator（断图），图腿摘除显式 generator 回落默认
+    generator、逐 replay 重播种（见 object_spec.py）；aclgraph 捕获期禁读
+    RNG 状态（随机算子本身不支持），快速失败（worker 层收敛为
+    GRAPH_EXEC_FAILURE）。
+    """
+    from ..object_spec import make_default_generator_reset, strip_specs
+
+    gen_specs = strip_specs(args, kwargs)
+    if not gen_specs:
+        return None
+    if is_aclgraph:
+        raise RuntimeError(
+            "GENERATOR_GRAPH_UNSUPPORTED: explicit generator spec is not "
+            "supported in aclgraph mode; use the eager leg or -c/-d"
+        )
+    if len(gen_specs) > 1:
+        logging.warning(
+            "[%s] multiple generator specs in graph mode; reseeding with the first",
+            testcase.testcase_name,
+        )
+    return make_default_generator_reset(gen_specs[0], backend, dev_id)
+
+
+def _snapshot_inplace_backups(args, backend, inplace_input_indexes):
+    """CSV 声明 mutable 位的克隆快照 {下标: 克隆}。"""
+    backups = {}
+    for idx in sorted(inplace_input_indexes or ()):
+        if idx < len(args) and args[idx] is not None:
+            backups[idx] = backend.clone(args[idx])
+    return backups
+
+
+class _GraphModel(NamedTuple):
+    """图模型构建产物（execute_graph 主流程消费）。"""
+
+    model: object
+    fwd_args: list
+    fwd_kwargs: dict
+    is_custom: bool
+    self_mutable: object
+    mutable_kwargs: dict
+
+
+def _build_graph_model(testcase, backend, switches, plan, resolved, args, kwargs, is_tensor_method, is_inplace):
+    """custom torch_graph 模块（TestSpec 注册）优先，缺省回落通用 GraphNetwork。"""
+    inplace_input_indexes = getattr(testcase, "inplace_input_indexes", None) or ()
+    custom_cls = SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_torch_graph()
+    if custom_cls:
+        logging.info(f"Using custom graph module: {custom_cls.__name__}")
+        init_kwargs, fwd_kwargs = _split_params(custom_cls, plan.overload_params, args, kwargs)
+        mutable_kwargs = None
+        if inplace_input_indexes:
+            positional_param_names = [p.name for p in plan.overload_params if not p.is_keyword_only]
+            mutable_kwargs = {}
+            for idx in inplace_input_indexes:
+                if idx < len(positional_param_names) and positional_param_names[idx] in fwd_kwargs:
+                    mutable_kwargs[idx] = positional_param_names[idx]
+        return _GraphModel(custom_cls(**init_kwargs), [], fwd_kwargs, True, None, mutable_kwargs)
+
+    if is_tensor_method:
+
+        def api_caller(*call_args, **call_kwargs):
+            return getattr(call_args[0], resolved)(*call_args[1:], **call_kwargs)
+
+    else:
+        api_caller = resolved
+    self_mutable = backend.clone(args[0]) if is_inplace and args and args[0] is not None else None
+    return _GraphModel(GraphNetwork(api_caller), args, kwargs, False, self_mutable, None)
+
+
+def _compile_graph_model(model, npu_backend, switches, dynamic, is_aclgraph, mode_str, dev_id, testcase):
+    """SuperKernel / ACLGraph core-limit 包装后编译。"""
+    if switches.super_kernel_enabled:
+        logging.info("SuperKernel enabled: mode=%s scope=%s", mode_str, testcase.api_name)
+        model = _SuperKernelScopeModel(model, testcase.api_name, is_aclgraph=is_aclgraph)
+    if is_aclgraph and switches.core_limit:
+        logging.info(
+            "ACLGraph core limit enabled: aicore=%s vectorcore=%s",
+            switches.core_limit[0] or "physical",
+            switches.core_limit[1] or "physical",
+        )
+        model = _AclGraphCoreLimitModel(model, switches.core_limit, dev_id)
+    use_fullgraph = bool(switches.fullgraph)
+    if is_aclgraph:
+        return _compile_model_aclgraph(
+            model,
+            npu_backend,
+            use_fullgraph,
+            switches.super_kernel_enabled,
+            not getattr(switches, "e2e_binary", False),
+        )
+    return _compile_model(model, npu_backend, dynamic, use_fullgraph)
 
 
 def execute_graph(
@@ -430,15 +550,11 @@ def execute_graph(
 
     torch_npu.npu.set_device(dev_id)
 
-    if is_aclgraph:
-        mode_str = "aclgraph"
-    elif dynamic:
-        mode_str = "dynamic"
-    else:
-        mode_str = "static"
+    mode_str = "aclgraph" if is_aclgraph else ("dynamic" if dynamic else "static")
     logging.info(f"Executing graph mode: {mode_str}")
 
     args, kwargs = prepare_device_args(testcase, backend, dev_id, plan, raw_inputs)
+    round_reset = _resolve_generator_round_reset(args, kwargs, backend, dev_id, testcase, is_aclgraph)
     # Companion operators such as metadata run eagerly before ACLGraph capture.
     with _aclgraph_core_limit_context(switches.core_limit if is_aclgraph else None, dev_id):
         result = Invoke.npu_preprocess(
@@ -450,101 +566,47 @@ def execute_graph(
         )
     testcase.absorb_preprocess(result, plan, args, kwargs)
 
-    inplace_self_backup = None
-
     inplace_input_indexes = getattr(testcase, "inplace_input_indexes", None) or ()
-    inplace_backups = {}
-    if inplace_input_indexes:
-        for idx in sorted(inplace_input_indexes):
-            if idx < len(args) and args[idx] is not None:
-                inplace_backups[idx] = backend.clone(args[idx])
+    inplace_backups = _snapshot_inplace_backups(args, backend, inplace_input_indexes)
+    bundle = _build_graph_model(testcase, backend, switches, plan, resolved, args, kwargs, is_tensor_method, is_inplace)
 
-    custom_cls = SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_torch_graph()
-
-    inplace_kwargs_keys = None
-    if custom_cls:
-        logging.info(f"Using custom graph module: {custom_cls.__name__}")
-        init_kwargs, fwd_kwargs = split_params(custom_cls, plan.overload_params, args, kwargs)
-        model = custom_cls(**init_kwargs)
-        run_args, run_kwargs = [], fwd_kwargs
-        run_inplace = is_inplace
-        if inplace_input_indexes:
-            positional_param_names = [p.name for p in plan.overload_params if not p.is_keyword_only]
-            inplace_kwargs_keys = {}
-            for idx in inplace_input_indexes:
-                if idx < len(positional_param_names):
-                    key = positional_param_names[idx]
-                    if key in run_kwargs:
-                        inplace_kwargs_keys[idx] = key
-    else:
-        logging.info("Using generic GraphNetwork")
-        if is_inplace:
-            inplace_self_backup = backend.clone(args[0]) if args and args[0] is not None else None
-
-        if is_tensor_method:
-
-            def api_caller(*call_args, **call_kwargs):
-                return getattr(call_args[0], resolved)(*call_args[1:], **call_kwargs)
-        else:
-            api_caller = resolved
-
-        model = GraphNetwork(api_caller)
-        run_args, run_kwargs, run_inplace = args, kwargs, is_inplace
     try:
         npu_backend = _get_npu_backend_aclgraph() if is_aclgraph else _get_npu_backend()
     except Exception as e:
         logging.error(f"Failed to get TorchAir NPU backend: {e}")
         return [], None, None, f"Failed to get TorchAir NPU backend: {e}"
 
-    use_fullgraph = bool(switches.fullgraph)
     try:
         with _require_kernel_compile(True):
-            if switches.super_kernel_enabled:
-                logging.info("SuperKernel enabled: mode=%s scope=%s", mode_str, testcase.api_name)
-                model = _SuperKernelScopeModel(model, testcase.api_name, is_aclgraph=is_aclgraph)
-            if is_aclgraph and switches.core_limit:
-                logging.info(
-                    "ACLGraph core limit enabled: aicore=%s vectorcore=%s",
-                    switches.core_limit[0] or "physical",
-                    switches.core_limit[1] or "physical",
-                )
-                model = _AclGraphCoreLimitModel(model, switches.core_limit, dev_id)
-            if is_aclgraph:
-                compiled = _compile_model_aclgraph(
-                    model,
-                    npu_backend,
-                    use_fullgraph,
-                    switches.super_kernel_enabled,
-                    not getattr(switches, "e2e_binary", False),
-                )
-            else:
-                compiled = _compile_model(model, npu_backend, dynamic, use_fullgraph)
+            compiled = _compile_graph_model(
+                bundle.model, npu_backend, switches, dynamic, is_aclgraph, mode_str, dev_id, testcase
+            )
             result_nps, perf, det_status = _run_compiled(
                 compiled,
-                run_args,
-                run_kwargs,
+                bundle.fwd_args,
+                bundle.fwd_kwargs,
                 backend,
                 dev_id,
                 switches,
-                run_inplace,
-                inplace_self_backup if run_inplace else None,
+                is_inplace,
+                bundle.self_mutable if is_inplace else None,
                 testcase.api_name,
                 testcase_name=testcase.testcase_name,
                 inplace_backups=inplace_backups if inplace_input_indexes else None,
-                inplace_kwargs_keys=inplace_kwargs_keys,
+                mutable_kwargs=bundle.mutable_kwargs,
                 deterministic_level=deterministic_level,
                 is_aclgraph=is_aclgraph,
+                round_reset=round_reset,
             )
 
     except Exception as e:
         logging.error(f"Graph {mode_str} execution failed: {e}", exc_info=True)
         return [], None, None, f"Graph {mode_str} execution failed: {e}"
 
-    if result_nps and inplace_input_indexes and not custom_cls:
+    if result_nps and inplace_input_indexes and not bundle.is_custom:
         for idx in sorted(inplace_input_indexes):
             if idx < len(args) and args[idx] is not None:
-                inplace_np = backend.to_numpy(args[idx].detach().clone())
-                result_nps.append(inplace_np)
+                result_nps.append(backend.to_numpy(args[idx].detach().clone()))
 
     return result_nps, perf, det_status, None
 
@@ -568,7 +630,7 @@ class GraphNetwork(torch.nn.Module):
         return self.api_func(*args, **kwargs)
 
 
-def split_params(module_cls, overload_params, args, kwargs):
+def _split_params(module_cls, overload_params, args, kwargs):
     """Split args/kwargs into __init__ and forward kwargs based on module signatures.
 
     Uses overload_params (ParamInfo list) to map positional args to parameter names,

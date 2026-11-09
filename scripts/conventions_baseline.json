@@ -220,9 +220,9 @@
       "PLR0913": 2
     },
     "ttk/core_modules/framework_api/torch/graph_runner.py": {
-      "C901": 2,
-      "PLR0913": 2,
-      "PLR0915": 2
+      "C901": 1,
+      "PLR0913": 8,
+      "PLR0915": 1
     },
     "ttk/core_modules/framework_api/torch/multi_device.py": {
       "C901": 2,

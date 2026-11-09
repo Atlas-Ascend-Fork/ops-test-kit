@@ -46,6 +46,9 @@ class RunCtx:
     deterministic_level: int
     run_count: int
     warmup_count: int
+    # spec 物化对象的轮前复位句柄（run_eager 挂载，eager 轮循环逐轮调用；
+    # None = 无声明式对象参数）
+    round_reset: object = None
 
 
 def build_plugin_call(

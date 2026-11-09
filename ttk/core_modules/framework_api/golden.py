@@ -236,6 +236,13 @@ def invoke_golden_api(api_name, matched_oidx, resolved, args, kwargs):
     try:
         return resolved(*args, **kwargs)
     except TypeError as e:
+        from .object_spec import GeneratorSpec
+
+        if any(isinstance(v, GeneratorSpec) for v in list(args) + list(kwargs.values())):
+            e = TypeError(
+                f"{e} [GENERATOR_SPEC_REQUIRES_CUSTOM_GOLDEN: golden 收到未物化的 "
+                "generator spec，默认 API golden 无法消费，需插件 golden 读 spec 复刻随机流]"
+            )
         logging.warning(
             f"golden API call {api_name}(oidx={matched_oidx}) failed with TypeError: {e}. "
             f"args={len(args)}, kwargs={list(kwargs.keys())}"

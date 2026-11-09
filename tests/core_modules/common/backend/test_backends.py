@@ -129,3 +129,44 @@ def test_npu_backend_is_npu_device_type():
     nb = NpuTorchBackend()
     assert nb.is_npu() is True
     assert nb.device_type() == "npu"
+
+
+def test_cache_release_layering(monkeypatch):
+    """clear_cache / reset 分层：Backend 基类 no-op 默认（TF/onnx 家族继承，
+    零 torch 依赖）；TorchBackend 覆写——clear_cache 经 torch.<lib>.empty_cache
+    释放（缺 API 静默跳过），reset 为 dynamo reset → gc → clear_cache 编排钩子。"""
+    import types
+
+    import torch
+
+    for method in ("clear_cache", "reset"):
+        assert method in Backend.__dict__, "基类须提供 no-op 默认（TF/onnx 家族继承）"
+        assert method in TorchBackend.__dict__, "torch 版实现归 TorchBackend"
+    assert "reset" not in NpuTorchBackend.__dict__, "NpuTorch 未覆写 → 继承 TorchBackend"
+
+    backend = TorchBackend.__new__(TorchBackend)
+    backend.torch_lib = "_ttk_fake_lib"
+
+    # clear_cache：调用 torch.<lib>.empty_cache；缺 API / 缺 lib 静默跳过
+    calls = []
+    monkeypatch.setattr(
+        torch, "_ttk_fake_lib", types.SimpleNamespace(empty_cache=lambda: calls.append(1)), raising=False
+    )
+    backend.clear_cache()
+    assert calls, "TorchBackend 须调用 torch.<lib>.empty_cache"
+    monkeypatch.setattr(torch, "_ttk_fake_lib", types.SimpleNamespace(), raising=False)
+    backend.clear_cache()
+    monkeypatch.setattr(torch, "_ttk_fake_lib", None, raising=False)
+    backend.clear_cache()
+
+    # reset：dynamo reset → clear_cache 依序
+    order = []
+    monkeypatch.setattr(torch, "_dynamo", types.SimpleNamespace(reset=lambda: order.append("dynamo")), raising=False)
+    monkeypatch.setattr(
+        torch, "_ttk_fake_lib", types.SimpleNamespace(empty_cache=lambda: order.append("empty")), raising=False
+    )
+    backend.reset()
+    assert order == ["dynamo", "empty"]
+
+    CpuTfBackend().clear_cache()  # TF 家族：基类 no-op，不抛错
+    CpuTfBackend().reset()

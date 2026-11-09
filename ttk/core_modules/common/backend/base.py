@@ -149,6 +149,15 @@ class Backend(ABC):
     def max_memory_allocated(self, dev_id: int = 0):  # noqa: B027
         """Current peak allocated device memory in bytes, or None if unsupported."""
 
+    def clear_cache(self, dev_id: int = 0):  # noqa: B027
+        """Release framework-cached device memory. Default: no-op; TorchBackend overrides."""
+
+    def reset(self, dev_id: int = 0):  # noqa: B027
+        """Per-case teardown: reset compile caches and release allocator caches.
+
+        Default: no-op; TorchBackend overrides (dynamo reset + gc + clear_cache).
+        """
+
     def set_device(self, dev_id: int = 0):  # noqa: B027
         """Set the current device for eager execution. Default: no-op.
 

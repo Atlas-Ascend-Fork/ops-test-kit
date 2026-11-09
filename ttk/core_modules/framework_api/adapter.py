@@ -128,6 +128,12 @@ class FrameworkAdapter(ABC):
         self.configure_eager_compile_mode(backend, switches)
         args, kwargs = prepare_device_args(testcase, backend, dev_id, plan, raw_inputs, adapter=self)
 
+        # 声明式对象参数物化（generator spec → torch.Generator）；
+        # 轮前复位句柄由 eager 轮循环逐轮调用
+        from .object_spec import materialize_specs
+
+        ctx.round_reset = materialize_specs(args, kwargs, backend)
+
         if backend.is_npu():
             result = Invoke.npu_preprocess(
                 testcase,

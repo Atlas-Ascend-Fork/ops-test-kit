@@ -52,7 +52,7 @@ def test_compiled_inplace_restores_values_and_aclgraph_addresses(tmp_path, kind,
         backup if kind == "inplace" else None,
         "torch.add",
         inplace_backups={0: backup} if kind != "inplace" else None,
-        inplace_kwargs_keys={0: "value"} if kind == "kwargs" else None,
+        mutable_kwargs={0: "value"} if kind == "kwargs" else None,
         deterministic_level=1,
         is_aclgraph=aclgraph,
     )

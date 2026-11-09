@@ -290,6 +290,7 @@ def run(testcase, device_grant_events, device_granted_indices, dev_id, is_multi_
     reseed_per_testcase(testcase, switches)
 
     gate_host_memory(switches.no_memory_check, process_ctx)
+    backend = None
     try:
         backend = _get_or_create_backend(switches)
         deterministic_level = resolve_deterministic_level(switches, testcase)
@@ -311,6 +312,13 @@ def run(testcase, device_grant_events, device_granted_indices, dev_id, is_multi_
         return_struct.precision_status = "FAIL"
         _mirror_cst_failure_on_dedup(testcase, switches, return_struct, err_text)
         _profiling_end_print(testcase, return_struct, switches=switches)
+    finally:
+        # 用例收尾缓存回收（见 Backend.reset）：尽力而为，任何失败不得影响结果返回
+        if backend is not None:
+            try:
+                backend.reset(dev_id)
+            except Exception:  # noqa: BLE001
+                logging.debug("case cache release skipped", exc_info=True)
 
     return return_struct
 
