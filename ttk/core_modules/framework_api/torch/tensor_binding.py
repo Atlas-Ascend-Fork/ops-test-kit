@@ -15,17 +15,28 @@ L1 张量构造（np → torch.Tensor，非连续 view 经 as_strided 重建）�
 实现位于 common/backend/torch_backend.np_to_torch_inputs，此处不重复。
 """
 
-from ....utilities import FORMAT_CODES, NZ_FORMATS
+from ....utilities import FORMAT_CODES, NZ_FORMATS, dtype_to_name
 
 
 def apply_format_cast(tensors, formats):
     """Apply NPU format cast to tensors that require non-default formats."""
+    import torch
     import torch_npu
 
-    return [
-        torch_npu.npu_format_cast(t, FORMAT_CODES[fmt]) if fmt and fmt in NZ_FORMATS else t
-        for t, fmt in zip(tensors, formats)
-    ]
+    result = []
+    for tensor, fmt in zip(tensors, formats):
+        if tensor is None or fmt not in NZ_FORMATS:
+            result.append(tensor)
+            continue
+        # E8M0's final axis is a pair of exponents, not a matrix axis.
+        # Materialize its logical order; never restore a tail-pair transpose.
+        if dtype_to_name(tensor.dtype) in ("float8_e8m0", "float8_e8m0fnu"):
+            # Copy exponent bytes: the device transpose kernel may not support E8M0.
+            base = tensor if tensor.is_contiguous() else tensor.view(torch.uint8).contiguous().view(tensor.dtype)
+            result.append(torch_npu.npu_format_cast(base, FORMAT_CODES[fmt]))
+            continue
+        result.append(torch_npu.npu_format_cast(tensor, FORMAT_CODES[fmt]))
+    return result
 
 
 def bind_tensors(testcase, backend, dev_tensors, raw_inputs):  # noqa: ARG001

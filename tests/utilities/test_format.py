@@ -257,3 +257,43 @@ def test_transform_dispatch_roundtrip():
 
 def test_transpose_axes():
     assert transpose_axes(2, [2, 0, 1, 3]) == [0, 1, 4, 2, 3, 5]
+
+
+@pytest.mark.parametrize("shape", [(3, 17, 2), (4, 4, 2), (2, 3, 33, 2), (2, 1, 3, 16, 2), (0, 3, 17, 2)])
+def test_scalenz_layout_matches_element_mapping(shape):
+    en_dtypes = pytest.importorskip("en_dtypes", minversion="0.0.4")
+    dtype = en_dtypes.float8_e8m0
+    # Raw exponent bytes make axis swaps visible, including Kg == N.
+    source = (np.arange(np.prod(shape), dtype=np.uint8) % 120 + 60).reshape(shape).view(dtype)
+    packed = transform(source, "ND", "FRACTAL_NZ")
+    expected_shape = shape[:-3] + ((shape[-2] + 15) // 16, shape[-3], 16, 2)
+    assert nd_shape_to_nz(shape, "float8_e8m0") == expected_shape
+    assert nd_shape_to_nz(shape, "float8_e8m0fnu") == expected_shape
+    assert packed.shape == expected_shape
+    for kg in range(shape[-3]):
+        for n in range(shape[-2]):
+            np.testing.assert_array_equal(
+                packed[..., n // 16, kg, n % 16, :].view(np.uint8), source[..., kg, n, :].view(np.uint8)
+            )
+    restored = transform(packed, "FRACTAL_NZ", "ND", shape)
+    np.testing.assert_array_equal(restored.view(np.uint8), source.view(np.uint8))
+
+
+def test_scalenz_rejects_wrong_pair_and_storage_shapes():
+    en_dtypes = pytest.importorskip("en_dtypes", minversion="0.0.4")
+    dtype = en_dtypes.float8_e8m0
+    with pytest.raises(ValueError, match="Kg, N, 2"):
+        nd_shape_to_nz((3, 17), dtype)
+    data = np.ones((3, 17, 2), dtype=dtype)
+    with pytest.raises(ValueError, match="storage shape"):
+        nd_to_fractal_nz(data, (1, 3, 16, 2))
+    with pytest.raises(ValueError, match="storage shape"):
+        from_fractal_nz(np.ones((1, 3, 16, 2), dtype=dtype), data.shape)
+
+
+def test_uint8_pair_tail_remains_ordinary_weight_nz():
+    # A byte carrier is not E8M0 unless its real dtype is explicitly restored.
+    data = np.arange(3 * 17 * 2, dtype=np.uint8).reshape(3, 17, 2)
+    packed = nd_to_fractal_nz(data)
+    assert packed.shape == (3, 1, 2, 16, 32)
+    np.testing.assert_array_equal(from_fractal_nz(packed, data.shape), data)

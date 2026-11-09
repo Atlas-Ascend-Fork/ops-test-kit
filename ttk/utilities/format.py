@@ -47,6 +47,7 @@ from typing import Tuple, Union
 # Third-Party Packages
 import numpy
 
+from .dtypes import dtype_to_name
 from .math import align, ceil_div, lcm
 
 # NZ-family layouts needing npu_format_cast after H2D (5HD/FRACTAL_Z ... excluded).
@@ -229,13 +230,52 @@ def nd_shape_to_5hd(
 
 
 def nd_shape_to_nz(nd_shape: Union[list, tuple], dtype: str = "float16", nz_shape: Union[list, tuple] = None) -> Tuple:
-    """Shape with tail (M, N) -> (..., N1, M1, M0=16, N0) NZ blocks."""
+    """Infer NZ storage shape from the logical ND shape.
+
+    Ordinary dtypes use matrix axes (M, N); nz_shape is only a block-size
+    hint passed to resolve_c0, not a full storage-shape constraint.
+    E8M0 uses (..., Kg, N, 2) -> (..., ceil(N/16), Kg, 16, 2).
+    Its block size is fixed, so nz_shape is ignored during shape inference.
+    Use nd_to_fractal_nz to convert data and validate a supplied storage shape.
+    """
+    if _is_e8m0(dtype):
+        return _scale_nz_shape(nd_shape)
     m, n = nd_shape[-2:]
     m0 = 16
     n0 = resolve_c0(dtype, nz_shape)
     m1 = ceil_div(m, m0)
     n1 = ceil_div(n, n0)
     return tuple(nd_shape[:-2]) + (n1, m1, m0, n0)
+
+
+def _is_e8m0(dtype):
+    return dtype_to_name(dtype) in ("float8_e8m0", "float8_e8m0fnu")
+
+
+def _scale_nz_shape(shape):
+    """E8M0 pairs: (..., Kg, N, 2) -> (..., ceil(N/16), Kg, 16, 2)."""
+    if len(shape) < 3 or shape[-1] != 2 or any(d < 0 for d in shape):
+        raise ValueError(f"ScaleNZ requires a concrete (..., Kg, N, 2) shape, got {shape}")
+    return tuple(shape[:-3]) + (ceil_div(shape[-2], 16), shape[-3], 16, 2)
+
+
+def _scale_to_nz(data, target_shape):
+    expected = _scale_nz_shape(data.shape)
+    if target_shape is not None and tuple(target_shape) != expected:
+        raise ValueError(f"ScaleNZ storage shape {target_shape} must be {expected}")
+    padding = [(0, 0)] * data.ndim
+    padding[-2] = (0, expected[-4] * 16 - data.shape[-2])
+    padded = numpy.pad(data, padding, "constant")
+    blocked = padded.reshape(data.shape[:-3] + (data.shape[-3], expected[-4], 16, 2))
+    return numpy.ascontiguousarray(blocked.swapaxes(-4, -3))
+
+
+def _scale_from_nz(data, target_shape):
+    expected = _scale_nz_shape(target_shape)
+    if data.shape != expected:
+        raise ValueError(f"ScaleNZ storage shape {data.shape} must be {expected}")
+    padded = data.swapaxes(-4, -3).reshape(tuple(target_shape[:-3]) + (target_shape[-3], expected[-4] * 16, 2))
+    return numpy.ascontiguousarray(padded[..., : target_shape[-2], :])
 
 
 def from_nc1hwc0(data, target_shape, target_format: str = "NCHW"):
@@ -299,6 +339,11 @@ def from_ndc1hwc0(data, target_shape, target_format: str = "NDCHW"):
 
 def from_fractal_nz(data, target_shape):
     """
+    For E8M0, target_shape is the required logical ND shape (..., Kg, N, 2).
+    The input storage shape must equal (..., ceil(N/16), Kg, 16, 2);
+    a mismatch raises ValueError. N padding is removed from the result.
+
+    For ordinary dtypes:
     FRACTAL_NZ -> ND, tail M/N padding stripped:
     (A0, A1, A2, ..., An, N1, M1, M0, N0) -> (A, N1, M1, M0, N0) -> (A, M1, M0, N1, N0)
     (A, M1, M0, N1, N0) -> (A, [0, M1-2], M0, [0, N1-2], N0) == (A, (M1-1), M0, (N1-1), N0)
@@ -316,6 +361,8 @@ def from_fractal_nz(data, target_shape):
     (A, M, (N1-1) *N0) + (A, M, pad_n) -> (A, M, (N1-1) *N0 + pad_n) -> (A, M, N)
     (A, M, N) -> (A0, A1, A2, ..., An, M, N)
     """
+    if _is_e8m0(data.dtype):
+        return _scale_from_nz(data, target_shape)
     if data.size == 0 and 0 in target_shape:
         # 空张量（零元素、逻辑 shape 含零维）无块可拼、无数据需转置
         return numpy.empty(target_shape, dtype=data.dtype)
@@ -543,7 +590,17 @@ def to_ndc1hwc0(data: numpy.ndarray, ori_format: str, target_shape: Union[list, 
 
 
 def nd_to_fractal_nz(data: numpy.ndarray, target_shape: Union[list, tuple] = None):
-    """Generic ND matrix (tail M, N) -> FRACTAL_NZ with zero padding."""
+    """Convert ND data to FRACTAL_NZ with zero padding.
+
+    For ordinary dtypes, target_shape is only a block-size hint passed to
+    resolve_c0; the complete requested shape is not validated.
+    For E8M0, data must have logical shape (..., Kg, N, 2). target_shape
+    may be None (infer storage shape), or the complete storage shape
+    (..., ceil(N/16), Kg, 16, 2); a mismatch raises ValueError.
+    For example, E8M0 data of shape (3, 17, 2) requires (2, 3, 16, 2).
+    """
+    if _is_e8m0(data.dtype):
+        return _scale_to_nz(data, target_shape)
     ori_shape = data.shape
     m_ori, n_ori = ori_shape[-2:]
     batch_ori = ori_shape[:-2]
@@ -582,7 +639,15 @@ def is_transformable(ori_format, target_format):
 
 
 def transform(data, ori_format, target_format, target_shape: Union[list, tuple] = None, groups=None):
-    """Dispatch ND <-> private-format transforms via FORMAT_TRANSFORMS; None if unsupported."""
+    """Dispatch ND <-> private-format transforms; return None if unsupported.
+
+    target_shape is forwarded unchanged to the selected conversion function.
+    For E8M0 ND -> FRACTAL_NZ, omit it or supply the complete storage shape
+    (..., ceil(N/16), Kg, 16, 2). For the reverse conversion, supply the
+    logical ND shape (..., Kg, N, 2). See nd_to_fractal_nz/from_fractal_nz
+    for validation rules; ordinary NZ retains its block-size hint semantics
+    on the ND -> FRACTAL_NZ path.
+    """
     if not is_transformable(ori_format, target_format):
         return None
     transform_func = FORMAT_TRANSFORMS[ori_format][target_format]
