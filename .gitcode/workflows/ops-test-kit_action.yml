@@ -25,6 +25,7 @@ env:
   TARGET_BRANCH: ${{ atomgit.base_ref }}
   SOURCE_BRANCH: ${{ atomgit.head_ref }}
   obs_path: "${{ env.org_name }}/${{ env.repo_name }}/ci/package/${{ env.MERGE_ID }}"
+  obs_smoke_path: "${{ env.obs_path }}/presmoke/2"
   online: ${{ vars.APPLY_LABEL }}
 
 stages:
@@ -101,7 +102,87 @@ stages:
     pre:
     - type: auto
     fail-fast: false
-
+  stage3:
+    name: PreSmoke
+    jobs:
+      PreSmoke_A5:
+        name: PreSmoke_A5
+        steps:
+          -
+            name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              allow-unsafe-pr-checkout: true
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+          -
+            name: download
+            uses: obs-download
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              key: |
+                ${{ env.obs_path }}/pr_filelist.txt
+                ${{ env.obs_path }}/pr_filelist_mod.txt
+              path: ${{ steps.process_checkout.outputs.path }}
+          -
+            name: smoke executor
+            timeout-minutes: 60
+            run: |
+              export repo_name=${{env.repo_name}}
+              export pr_id=${{ env.MERGE_ID }}
+              export obs_smoke_path=${{env.obs_smoke_path}}
+              export AK=${{secrets.AK}}
+              export SK=${{secrets.SK}}
+              export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+              # ---- 依赖保障(幂等,镜像已含则秒过):按通路解释器补装缺失依赖 ----
+              # python39(kernel/GEIR/ACLNN/onnx 解释器,与 CANN cp39 匹配):tbe 链 + en-dtypes + onnx
+              /opt/conda/envs/python39/bin/python3 -m pip install -q \
+                  psutil==7.2.2 decorator==5.3.1 attrs==26.1.0 \
+                  scipy==1.13.1 PyYAML==6.0.3 en-dtypes==0.0.4 onnx==1.13.1
+              # python312(e2e torch 的 PYENV_CI 解释器栈):en-dtypes(pad_fp8_e8m0)
+              /opt/conda/envs/python312/bin/python3 -m pip install -q en-dtypes==0.0.4
+              # ---- ABI 修复:替换镜像 /usr/local/include 中的 Python 3.9 头文件为 3.12 ----
+              # 镜像残留 py3.9.11 头文件在 gcc 默认搜索路径中,ninja JIT 编译 C++ 扩展时
+              # 拾取错误 ABI(causal_conv1d 等 op 报 version mismatch);用 conda python312
+              # 的头文件替换后,e2e torch 24/24 全部通过(容器临时,每次重建无副作用)
+              rm -rf /usr/local/include && cp -rf /opt/conda/envs/python312/include/python3.12 /usr/local/include
+              # ---- tf 独立环境(运行时构建;版本组合实测通过:numpy 1.19.5 + scipy 1.10.1 与 tf 2.6.5 兼容,
+              #      scipy 不可升级否则拉动 numpy 2.x 损坏 tf;npu-device wheel 取自 TF Adapter 官方发行版) ----
+              TF_VENV=/opt/tf39env
+              TF_WHL=npu_device-2.6.5-py3-none-manylinux2014_x86_64.whl
+              /opt/conda/envs/python39/bin/python3 -m venv "$TF_VENV"
+              "$TF_VENV/bin/pip" install -q tensorflow==2.6.5 \
+                  "numpy==1.19.5" "scipy==1.10.1" \
+                  PyYAML sympy psutil decorator attrs
+              wget -q "https://gitcode.com/cann/tensorflow/releases/download/tfa_v0.0.50_9.2.0/$TF_WHL" -O "/tmp/$TF_WHL"
+              "$TF_VENV/bin/pip" install -q "/tmp/$TF_WHL"
+              export TF_ENV="$TF_VENV"
+              # ---- 通路解释器显式指定(优先于 pre_smoke.sh 自动定位) ----
+              export TTK_PYTHON=/opt/conda/envs/python39/bin/python3
+              export TORCHNPU_ENV=/opt/conda/envs/python39
+              export PYENV_CI=/opt/conda/envs/python312/lib/python3.12/site-packages
+              # 直接执行仓库内 pre_smoke.sh（随 PR 版本化、推送即生效）；
+              # 此前优先执行 OBS 下载副本，其未随推送更新导致修复不生效
+              bash "${WORKSPACE}/.gitcode/scripts/pre_smoke.sh"
+          - name: upload
+            uses: obs-upload
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              artifact-path: "${{ steps.process_checkout.outputs.path }}/*.tar.gz"
+              object-prefix: ${obs_smoke_path}/plog/
+        if: env.TARGET_BRANCH == 'master'
+        runs-on: ['self-hosted','npu=2','smoke=501']
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/pre_smoke/${{ jobs.JOB_image.outputs.PreSmoke_A5 }}
+    pre:
+    - type: auto
+    fail-fast: true
 
 post:
   jobs:
