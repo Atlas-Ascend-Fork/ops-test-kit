@@ -23,7 +23,7 @@ All options:
         --port 9090          # 监听端口（默认：配置或 9090）
         --bind 127.0.0.1     # 绑定地址（默认：127.0.0.1）
         --config xpu_server.yaml  # 配置文件路径
-        --devices 0,1        # 设备 ID 列表（默认：0）
+        --devices 0,1        # 设备 ID 列表（默认：自动探测）
         --dry-run            # 空跑模式（返回随机数据）
 """
 
