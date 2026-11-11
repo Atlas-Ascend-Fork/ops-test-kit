@@ -109,7 +109,9 @@ class RandomData:
         fp_dtype = f"float{bits // 2}"
         real = self._random(fp_dtype, self._shape, distribution=distribution)
         imag = self._random(fp_dtype, self._shape, distribution=distribution, is_complex_imag=True)
-        return numpy.array(real + imag * 1j)
+        # 0-d float32 components + python complex scalar promote to complex128
+        # under numpy value-based casting; force the declared complex dtype.
+        return (real + imag * 1j).astype(self._dtype, copy=False)
 
     def _generate_e8m0(self):
         """float8_e8m0 only represents positive scale powers; generate a positive range."""
