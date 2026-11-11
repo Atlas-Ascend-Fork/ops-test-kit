@@ -30,6 +30,32 @@ from ....utilities import get, numpy_to_torch_tensor, torch_to_numpy_tensor
 from .base import Backend
 
 
+def _resolve_base_shape(shape, strides, offset, storage_numel):
+    """Recover the storage (base) shape backing a possibly non-contiguous view.
+
+    NPU 的 ``NPUStorageDesc.base_sizes_`` 在分配时确定，view 算子（as_strided）
+    不会刷新它。把 storage 压成 1 维搬到设备再 as_strided，会让依赖 base_sizes_
+    的转置判定（``get_tensor_desc_base_sizes``，如 op-plugin 的
+    ``is_transpose_last_two_dims``）失效。
+
+    仅当视图按 stride 链完全稠密地铺满整个 storage（无空洞、无广播、offset=0）
+    时才能唯一还原基底形状；其余情况返回 None，调用方保持 1 维基底的原行为。
+    """
+    if not shape or storage_numel <= 0 or len(shape) != len(strides):
+        return None
+    if any(s <= 0 for s in strides):
+        return None
+    order = sorted(range(len(shape)), key=lambda d: strides[d])
+    expected = 1
+    for d in order:
+        if shape[d] > 1 and strides[d] != expected:
+            return None
+        expected *= max(shape[d], 1)
+    if expected != storage_numel or offset != 0:
+        return None
+    return tuple(shape[d] for d in reversed(order))
+
+
 def np_to_torch_inputs(testcase, raw_inputs):
     """Convert to torch tensors preserving non-contiguous views via torch.as_strided.
 
@@ -142,12 +168,21 @@ class TorchBackend(Backend):
 
         To fix this we clone the *entire* underlying storage (gaps included)
         and rebuild the non-contiguous view via ``as_strided``.
+
+        基底按视图隐含的 storage 形状分配（``_resolve_base_shape``），使设备侧
+        ``NPUStorageDesc.base_sizes_`` 与源端一致：view 算子不刷新 desc，若基底
+        退化成 1 维，依赖 base_sizes_ 的转置判定会把转置视图误判为非转置。
+        推导不出（带洞/广播/offset）时回退 1 维基底，行为与原先一致。
         """
         src_storage = tensor.untyped_storage()
         elem_size = tensor.element_size()
         storage_numel = src_storage.size() // elem_size
         src_flat = torch.empty(0, dtype=tensor.dtype, device=tensor.device).set_(src_storage, 0, (storage_numel,), (1,))
-        new_flat = src_flat.to(dst_device) if dst_device else src_flat.clone()
+        base_shape = _resolve_base_shape(
+            tuple(tensor.shape), tuple(tensor.stride()), tensor.storage_offset(), storage_numel
+        ) or (storage_numel,)
+        src_shaped = src_flat.reshape(base_shape)
+        new_flat = src_shaped.to(dst_device) if dst_device else src_shaped.clone()
         result = torch.as_strided(new_flat, tensor.shape, tensor.stride(), tensor.storage_offset())
         # set_ 只恢复物理存储；共轭和取负标记决定视图的逻辑数值。
         if tensor.is_conj():
