@@ -304,7 +304,8 @@ static vector<int64_t> JsonToIntArray(const JsonValue& v) {
 }
 
 static int LoadInputFromFile(const string& path, DataType dt,
-                              const vector<int64_t>& data_shape, Tensor& tensor) {
+                              const vector<int64_t>& data_shape,
+                              const vector<int64_t>& desc_shape, Tensor& tensor) {
     ifstream file(path, ios::binary);
     if (!file.is_open()) {
         fprintf(stderr, "[TTK-GEIR] Cannot open input file: %s\n", path.c_str());
@@ -351,6 +352,15 @@ static int LoadInputFromFile(const string& path, DataType dt,
     file.close();
 
     TensorDesc tdesc(Shape(data_shape), FORMAT_ND, dt);
+    // desc_shape 含 -2（unknown rank）时运行时 desc 需显式置为 unknown-rank：
+    // dynamic 模式下 GE 在 RunGraph 以运行时 Tensor 的 desc 驱动 InferShape，
+    // 只带具体 data_shape 会让 -2 声明静默失效；文件读取与长度校验仍按 data_shape。
+    for (int64_t d : desc_shape) {
+        if (d == UNKNOWN_DIM_NUM) {
+            tdesc.SetUnknownDimNumShape();
+            break;
+        }
+    }
     tdesc.SetPlacement(kPlacementHost);
     tensor.SetTensorDesc(tdesc);
     tensor.SetData(buf, expected);
@@ -626,7 +636,7 @@ int main(int argc, char* argv[]) {
                 }
                 Tensor tensor;
                 string path = string(input_prefix) + "_" + to_string(data_idx) + ".bin";
-                if (LoadInputFromFile(path, dt, data_shape, tensor) != SUCCESS) {
+                if (LoadInputFromFile(path, dt, data_shape, desc_shape, tensor) != SUCCESS) {
                     finalize_all();
                     return FAILED;
                 }
@@ -660,7 +670,7 @@ int main(int argc, char* argv[]) {
             Tensor tensor;
             if (input_prefix) {
                 string path = string(input_prefix) + "_" + to_string(data_idx) + ".bin";
-                if (LoadInputFromFile(path, dt, data_shape, tensor) != SUCCESS) {
+                if (LoadInputFromFile(path, dt, data_shape, desc_shape, tensor) != SUCCESS) {
                     finalize_all();
                     return FAILED;
                 }
