@@ -47,6 +47,7 @@ _DTYPE_TO_GE_ENUM = {
     "float4_e2m1": "DT_FLOAT4_E2M1",
     "float4_e1m2": "DT_FLOAT4_E1M2",
     "hifloat4": "DT_HIFLOAT4",
+    "hifloat4_scale": "DT_HIFLOAT4_SCALE",
     "complex32": "DT_COMPLEX32",
     "complex64": "DT_COMPLEX64",
     "complex128": "DT_COMPLEX128",
@@ -74,6 +75,8 @@ _DTYPE_SIZE_BY_ENUM = {
     "DT_COMPLEX32": 4,
     "DT_COMPLEX64": 8,
     "DT_COMPLEX128": 16,
+    # hifloat4_scale is 4 bytes per element (NOT packed 4-bit).
+    "DT_HIFLOAT4_SCALE": 4,
 }
 
 _PACKED_FLOAT4_ENUMS = ("DT_FLOAT4_E2M1", "DT_FLOAT4_E1M2", "DT_HIFLOAT4", "DT_INT4")

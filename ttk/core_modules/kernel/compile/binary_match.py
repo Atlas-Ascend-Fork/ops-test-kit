@@ -40,7 +40,7 @@ DTYPE_MODE_BIT = "bit"
 DTYPE_MODE_BOOL = "bool"
 # bit mode equivalent set
 DTYPE_MODE_64_SET = ("int64", "uint64", "float64", "double", "complex64")
-DTYPE_MODE_32_SET = ("int32", "uint32", "float32", "float", "complex32")
+DTYPE_MODE_32_SET = ("int32", "uint32", "float32", "float", "complex32", "hifloat4_scale")
 DTYPE_MODE_16_SET = ("int16", "uint16", "float16", "bfloat16")
 DTYPE_MODE_8_SET = ("int8", "uint8", "bool", "float8_e8m0", "hifloat8", "float8_e5m2", "float8_e4m3fn")
 DTYPE_MODE_6_SET = ("float6_e3m2", "float6_e2m3")

@@ -111,6 +111,7 @@ DTYPE_WIDTH_MAP = {
     "float8_e4m3fn": 1,
     "hifloat8": 1,
     "hifloat4": 0.5,
+    "hifloat4_scale": 4,
 }
 
 DTYPE_MAP = {
@@ -182,6 +183,8 @@ DTYPE_MAP = {
     "hifp8": "hifloat8",
     "hifloat8": "hifloat8",
     "hifloat4": "hifloat4",
+    "hif4_scale": "hifloat4_scale",
+    "hifloat4_scale": "hifloat4_scale",
     None: None,
 }
 
@@ -225,6 +228,7 @@ ACL_DTYPE_TO_ID = {
     "float4_e2m1": 40,
     "float4_e1m2": 41,
     "hifloat4": 42,
+    "hifloat4_scale": 43,
 }
 
 ACL_ID_TO_DTYPE = {
@@ -263,6 +267,7 @@ ACL_ID_TO_DTYPE = {
     40: "float4_e2m1",
     41: "float4_e1m2",
     42: "hifloat4",
+    43: "hifloat4_scale",
 }
 
 # Custom numpy dtypes (not provided by numpy itself) -> provider package:
@@ -329,6 +334,8 @@ _DTYPE_RANGE_OVERRIDES = {
     "float8_e5m2": (-float.fromhex("0x1.Cp15"), float.fromhex("0x1.Cp15")),
     "float8_e4m3fn": (-float.fromhex("0x1.Cp8"), float.fromhex("0x1.Cp8")),
     "hifloat8": (-float.fromhex("0x1.p15"), float.fromhex("0x1.p15")),
+    # 无取值语义，按载体 float32 取值域
+    "hifloat4_scale": (-float.fromhex("0x1.fffffep127"), float.fromhex("0x1.fffffep127")),
 }
 
 
@@ -413,10 +420,12 @@ def is_4bit_dtype(dtype) -> bool:
     True if dtype is a packed 4-bit type (int4 / float4_e2m1 / float4_e1m2 / hifloat4).
 
     Accepts str, numpy.dtype, torch.dtype, or any object whose str() contains
-    the dtype name.
+    the dtype name.  fp4_* aliases included; hifloat4_scale (4-byte) excluded.
     """
     s = str(dtype)
-    return "int4" in s or "float4" in s
+    if "hifloat4_scale" in s:
+        return False
+    return "int4" in s or "float4" in s or "fp4" in s
 
 
 def get_dtype_width(dt: str) -> Union[int, float]:
@@ -539,6 +548,12 @@ def resolve_numpy_dtypes(container):
             return name
         if name in TF_QUANTIZED_DTYPE_NUMPY_STORAGE:
             return TF_QUANTIZED_DTYPE_NUMPY_STORAGE[name]
+        if name == "hifloat4_scale":
+            # 4-byte element type with no numpy counterpart and no published
+            # bit layout. Model one element as float32 so the byte count
+            # matches; the device dtype identity is carried by the ACL/GE enum
+            # (43), not by the host array dtype.
+            return numpy.float32
         if name in NUMPY_DTYPE_SOURCES:
             return resolve_numpy_dtype(name)
         return name

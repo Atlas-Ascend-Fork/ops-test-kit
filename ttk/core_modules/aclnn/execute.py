@@ -54,7 +54,7 @@ from ...utilities import (
     nest_by_distribution,
     render_frameless_table,
 )
-from ...utilities.dtypes import is_4bit_dtype
+from ...utilities.dtypes import ACL_DTYPE_TO_ID, DTYPE_MAP, is_4bit_dtype
 from ..common.process import process_context
 from ..common.profiler import MsProfiler, TtkMsProfType
 from ..common.testcase.batch import resolve_deterministic_level
@@ -73,6 +73,22 @@ def get_aclnn_device(dev_id: int) -> AclInterface:
         device.set_device(dev_id)
         device.set_float_overflow_mode(switches.overflow_mode)
     return device
+
+
+def _acl_overrides(declared_dtype, csv_view_shape):
+    """声明 dtype -> (view_shape_override, acl_dtype_override)。
+
+    名字先经 DTYPE_MAP 归一。4bit 打包类型返回未打包 view + 打包枚举；
+    hifloat4_scale（4 字节元素）仅覆盖 dtype；其余不覆盖。
+    """
+    csv_dt_name = str(declared_dtype) if declared_dtype else ""
+    dt_norm = DTYPE_MAP.get(csv_dt_name, csv_dt_name)
+    if dt_norm == "hifloat4_scale":
+        return None, ACL_DTYPE_TO_ID["hifloat4_scale"]
+    if is_4bit_dtype(dt_norm) and dt_norm in ACL_DTYPE_TO_ID:
+        view_override = tuple(csv_view_shape) if csv_view_shape else None
+        return view_override, ACL_DTYPE_TO_ID[dt_norm]
+    return None, None
 
 
 class Phase1ParamBuilder:
@@ -193,7 +209,6 @@ class Phase1ParamBuilder:
         # view_shape plus the sub-byte dtype.
         csv_view_shapes = self._ctx.flat_tensor_view_shapes
         csv_dtypes = self._ctx.flat_tensor_dtypes
-        from ttk.utilities.dtypes import ACL_DTYPE_TO_ID
 
         dynamic_slots = set(self._ctx.dyn_input_slot_indexes)
         dynamic_tensors = getattr(self._ctx, "_aclnn_dynamic_tensors", {}) or {}
@@ -206,18 +221,7 @@ class Phase1ParamBuilder:
             else:
                 fmt = get(self._ctx.flat_tensor_formats, idx)
                 ss = tuple(tt.shape) if idx in dynamic_slots else self._ctx.flat_storage_shape(idx)
-                view_override = None
-                dtype_override = None
-                csv_dt = get(csv_dtypes, idx)
-                csv_dt_name = str(csv_dt) if csv_dt else ""
-                if "float4" in csv_dt_name or "fp4" in csv_dt_name:
-                    csv_vs = get(csv_view_shapes, idx)
-                    if csv_vs:
-                        view_override = tuple(csv_vs)
-                    dt_key = csv_dt_name.split(".")[-1] if "." in csv_dt_name else csv_dt_name
-                    dt_norm = "float4_e2m1" if "e2m1" in dt_key else ("float4_e1m2" if "e1m2" in dt_key else dt_key)
-                    if dt_norm in ACL_DTYPE_TO_ID:
-                        dtype_override = ACL_DTYPE_TO_ID[dt_norm]
+                view_override, dtype_override = _acl_overrides(get(csv_dtypes, idx), get(csv_view_shapes, idx))
                 ptr_lst.append(
                     self._dvc.create_acl_tensor(
                         tt, fmt, ss, view_shape_override=view_override, acl_dtype_override=dtype_override

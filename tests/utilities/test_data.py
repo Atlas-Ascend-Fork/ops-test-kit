@@ -28,6 +28,13 @@ def _missing_en_dtypes():
         return True
 
 
+def test_hifloat4_scale_generates_float32_storage():
+    """hifloat4_scale 无 numpy 对应类型，宿主用等宽 float32 承载（4 字节/元素）。"""
+    arr = RandomData("hifloat4_scale", (2, 3), (1, 8)).generate()
+    assert arr.dtype == np.float32
+    assert arr.shape == (2, 3)
+
+
 @pytest.mark.parametrize(
     ("dtype", "shape", "data_range", "distribution"),
     [

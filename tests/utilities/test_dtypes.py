@@ -89,6 +89,9 @@ def test_acl_dtype_tables_round_trip():
     assert ACL_DTYPE_TO_ID["bf16"] == ACL_DTYPE_TO_ID["bfloat16"] == 27
     assert ACL_DTYPE_TO_ID["double"] == ACL_DTYPE_TO_ID["float64"] == 11
     assert ACL_DTYPE_TO_ID["float8_e8m0"] == ACL_DTYPE_TO_ID["float8_e8m0fnu"] == 37
+    # 43 与 aclDataType.ACL_HIFLOAT4_SCALE / C_DT_HIFLOAT4_SCALE 对应
+    assert ACL_DTYPE_TO_ID["hifloat4_scale"] == 43
+    assert ACL_ID_TO_DTYPE[43] == "hifloat4_scale"
 
 
 def test_dtype_promote_map_widens():
@@ -97,11 +100,25 @@ def test_dtype_promote_map_widens():
         assert DTYPE_WIDTH_MAP[src] < DTYPE_WIDTH_MAP[dst], (src, dst)
 
 
+def test_hifloat4_scale_not_in_promote_map():
+    """位容器不做值转换升精度：hifloat4_scale 及别名不得进 DTYPE_PROMOTE_MAP。"""
+    assert "hifloat4_scale" not in DTYPE_PROMOTE_MAP
+    for alias in ("hifloat4_scale", "hif4_scale"):
+        assert DTYPE_PROMOTE_MAP.get(alias) is None
+
+
 # ── 名字归一 / 分类 ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    ("alias", "canonical"), [("fp16", "float16"), ("bf16", "bfloat16"), ("f8_e4m3fn", "float8_e4m3fn"), (None, None)]
+    ("alias", "canonical"),
+    [
+        ("fp16", "float16"),
+        ("bf16", "bfloat16"),
+        ("f8_e4m3fn", "float8_e4m3fn"),
+        ("hif4_scale", "hifloat4_scale"),
+        (None, None),
+    ],
 )
 def test_normalize_dtype(alias, canonical):
     assert normalize_dtype(alias) is canonical or normalize_dtype(alias) == canonical
@@ -160,7 +177,15 @@ def test_dtype_to_name_robust():
 
 @pytest.mark.parametrize(
     ("name", "expected"),
-    [("int4", True), ("float4_e2m1", True), ("hifloat4", True), ("int8", False), ("float16", False)],
+    [
+        ("int4", True),
+        ("float4_e2m1", True),
+        ("hifloat4", True),
+        ("fp4_e2m1", True),
+        ("hifloat4_scale", False),
+        ("int8", False),
+        ("float16", False),
+    ],
 )
 def test_is_4bit_dtype(name, expected):
     assert is_4bit_dtype(name) is expected
@@ -188,6 +213,7 @@ def test_map_dtypes_preserves_nesting_as_tuples():
         ("int8", 1),
         ("int4", 0.5),
         ("hifloat4", 0.5),
+        ("hifloat4_scale", 4),
         (None, 0),
     ],
 )
@@ -255,6 +281,41 @@ def test_resolve_numpy_dtypes_resolves_and_tuples():
     assert isinstance(inner, tuple)
     assert dtype_to_name(inner[0]) == "bfloat16"
     assert dtype_to_name(inner[1]) == "int4"
+
+
+def test_hifloat4_scale_is_a_four_byte_type_not_packed_4bit():
+    """hifloat4_scale（ACL 43 / AscendC hif4_scale）按 4 字节元素建模。
+
+    与 hifloat4 不同，它不是子字节打包类型；名称为 "hifloat4_scale" 时
+    is_4bit_dtype 的子串匹配（"float4"）必须被显式排除，否则会被当 4bit
+    生成/传输，字节数减半。
+    """
+    assert normalize_dtype("hifloat4_scale") == "hifloat4_scale"
+    assert normalize_dtype("hif4_scale") == "hifloat4_scale"
+    assert DTYPE_WIDTH_MAP["hifloat4_scale"] == 4
+    assert get_dtype_width("hifloat4_scale") == 4
+    assert is_4bit_dtype("hifloat4_scale") is False
+    assert is_4bit_dtype("hifloat4") is True
+    assert ACL_DTYPE_TO_ID["hifloat4_scale"] == 43
+    assert ACL_ID_TO_DTYPE[43] == "hifloat4_scale"
+    assert resolve_numpy_dtypes(["hifloat4_scale"])[0] is np.float32
+
+
+def test_hifloat4_scale_carrier_bit_preservation():
+    """载体链不做值转换：NaN payload/denormal 等任意位模式 numpy↔torch 往返逐位一致。"""
+    src = (
+        np.array(
+            [0x00000001, 0x00400000, 0x3F800000, 0x7F7FFFFF, 0x7F800000, 0xFFC00000, 0x80000000, 0xDEADBEEF],
+            dtype=np.uint32,
+        )
+        .view(np.float32)
+        .reshape(4, 2)
+    )
+    t = numpy_to_torch_tensor(src)
+    assert t.dtype == torch.float32
+    back = torch_to_numpy_tensor(t)
+    assert back.dtype == src.dtype
+    assert back.tobytes() == src.tobytes()
 
 
 # ── 4bit 打包 / 解包 ────────────────────────────────────────────────────────
