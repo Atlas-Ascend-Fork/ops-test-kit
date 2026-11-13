@@ -275,10 +275,19 @@ def _cleanup_old_logs():
 
 
 def _ensure_log_dirs():
-    os.makedirs(os.path.expanduser("~/ascend/log"), exist_ok=True)
+    log_root = os.environ.get("ASCEND_PROCESS_LOG_PATH") or (
+        os.path.join(os.environ["ASCEND_WORK_PATH"], "log")
+        if os.environ.get("ASCEND_WORK_PATH")
+        else os.path.expanduser("~/ascend/log")
+    )
+    log_root = os.path.abspath(os.path.expanduser(log_root))
+    try:
+        os.makedirs(log_root, exist_ok=True)
+    except OSError as e:
+        logging.warning("Cannot create log dir %s: %s. Continue without it.", log_root, e)
 
     cutoff = time.time() - 15 * 86400
-    for d in [os.path.expanduser("~/ascend/log/plog"), os.path.expanduser("~/ascend/log/debug/plog")]:
+    for d in [os.path.join(log_root, "plog"), os.path.join(log_root, "debug/plog")]:
         if os.path.isdir(d):
             for f in os.listdir(d):
                 fp = os.path.join(d, f)
