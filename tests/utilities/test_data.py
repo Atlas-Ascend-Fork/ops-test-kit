@@ -494,3 +494,9 @@ def test_unsigned_range_entirely_below_domain(dtype, data_range):
     arr = RandomData(dtype, (16,), data_range).generate()
     assert arr.dtype == np.dtype(dtype)
     assert np.all(arr == 0)
+
+
+def test_e8m0_constant_range():
+    pytest.importorskip("en_dtypes")
+    result = RandomData("float8_e8m0", (16,), (4, 4)).generate()
+    assert np.all(result.astype("float32") == 4)

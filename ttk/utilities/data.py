@@ -117,6 +117,8 @@ class RandomData:
         """float8_e8m0 only represents positive scale powers; generate a positive range."""
         low = float(self._data_range[0])
         high = float(self._data_range[1])
+        if numpy.isfinite(low) and low > 0 and low == high:
+            return numpy.full(self._shape, low, dtype="float32").astype(resolve_numpy_dtype("float8_e8m0"))
         if not numpy.isfinite(low) or low <= 0:
             low = 2**-3
         if not numpy.isfinite(high) or high <= low:
