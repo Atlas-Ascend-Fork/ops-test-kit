@@ -47,6 +47,9 @@ stages:
         container:
           image: swr.cn-north-4.myhuaweicloud.com/ci_cann/ubuntu20.04.05_x86:k8s_v1.1006
       JOB_pre:
+        permissions:
+          repository: read
+          id-token: write
         name: Test_PreBuild
         uses: cann/.gitcode/.gitcode/workflows/pre_action.yml@master
     pre:
@@ -56,12 +59,18 @@ stages:
     name: CodeCheck
     jobs:
       JOB_codecheck:
+        permissions:
+          repository: read
+          id-token: write
         name: CodeCheck
         uses: cann/.gitcode/.gitcode/workflows/codecheck_action.yml@master
         with:
           precommit_image_version: ${{ jobs.JOB_image.outputs.precommit }}
           codecheck_image_version: ${{ jobs.JOB_image.outputs.codecheck }}
       JOB_ut:
+        permissions:
+          repository: read
+          id-token: write
         name: UT_Test
         steps:
           -
@@ -72,13 +81,20 @@ stages:
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
               allow-unsafe-pr-checkout: true
           -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
+          -
             name: download
             uses: obs-download
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               key: |
                 ${{ env.obs_path }}/pr_filelist.txt
                 ${{ env.obs_path }}/pr_filelist_mod.txt
