@@ -96,9 +96,9 @@ python3 -m ttk kernel -i cases.csv --compare mixed
 ### 公式
 
 ```
-rel_err = |a - g| / (|g| + 1e-7)
-mere = mean(rel_err)       # 平均相对误差
-mare = max(rel_err)        # 最大相对误差
+rel_err = |a - g| / (|g| + noise_floor)
+mere = mean(rel_err[finite_mask])   # 有限元素的平均相对误差
+mare = max(rel_err[finite_mask])    # 有限元素的最大相对误差
 passed = mere < threshold AND mare < 10 * threshold
 ```
 
@@ -108,20 +108,26 @@ passed = mere < threshold AND mare < 10 * threshold
 
 ### 默认容差
 
-| dtype | threshold | 说明 |
-|-------|-----------|------|
-| `float16` | 2^-10 (≈0.000977) | 半精度 |
-| `bfloat16` | 2^-7 (≈0.007812) | BF16 精度较低，阈值放宽 |
-| `float32` | 2^-13 (≈0.000122) | 单精度 |
-| `float8_e4m3fn` | 2^-3 (≈0.125) | FP8 E4M3 |
-| `float8_e5m2` | 2^-2 (≈0.25) | FP8 E5M2 |
-| 其他 | 2^-13 | 回退到 float32 级 |
+| dtype | threshold | noise_floor | 说明 |
+|-------|-----------|-------------|------|
+| `float16` | 2^-10 (≈0.000977) | 2^-11 | 半精度 |
+| `bfloat16` | 2^-7 (≈0.007812) | 2^-8 | BF16 精度较低，阈值放宽 |
+| `float32` | 2^-13 (≈0.000122) | 2^-23 | 单精度 |
+| `float8_e4m3fn` | 2^-3 (≈0.125) | 1e-7 | FP8 E4M3 |
+| `float8_e5m2` | 2^-2 (≈0.25) | 1e-7 | FP8 E5M2 |
+| 其他 | 2^-13 | 1e-7 | 回退到 float32 级阈值 |
+
+`noise_floor` 按输出 dtype 选择，用于抑制 Golden 接近零时的相消噪声；
+它是算法常量，不是可覆盖的容差参数。`threshold` 的配置方式不变。
 
 ### INF/NaN 值处理
 
 - NaN/Inf 位置不一致 → 直接 FAIL（不计算 mere/mare）
 - 双方同位置均为 NaN → 视为一致
 - 双方同位置均为 Inf 且同号 → 视为一致
+
+上述匹配的非有限元素不参与 mere/mare 统计；所有元素均为匹配的 NaN/Inf 时，
+结果为 PASS，mere/mare 为 `None`。
 
 ### 使用方式
 
