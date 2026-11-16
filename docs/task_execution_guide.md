@@ -84,7 +84,7 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2     # 预览 Excel（指定工�
 | `--task-prof` | | 开启 | 任务级 Profiling 开关 | `--task-prof=false` |
 | `--warmup` | | 开启 | Profiling 前预热 | `--warmup=false` |
 | `--npu-timeout` | | 无限制 | NPU 执行超时（ms），仅 kernel 通路 | `--npu-timeout 60000` |
-| `--no-prof` | | 关闭 | 只生成输入和 Golden，不执行目标 API | `--no-prof` |
+| `--no-prof` | | 关闭 | 跳过本地 device 执行与 Profiling；`--dump xpu/full`、`--xpu-perf` 等仍可触发远端三方采集 | `--no-prof` |
 | `--validate` | | 关闭 | 仅校验输入用例格式，不执行编译、输入生成、Golden 等流程 | `--validate` |
 
 ### 4. 精度控制

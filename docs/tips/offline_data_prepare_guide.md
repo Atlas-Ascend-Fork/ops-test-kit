@@ -86,7 +86,7 @@ python3 -m ttk e2e -i cases.csv --config ttk.conf.yaml --dump full
 ```
 
 ```bash
-# 无卡环境：--no-prof 不执行算子，输入与 Golden 走纯 numpy/torch 实现
+# 无卡环境：--no-prof 跳过本地 device 执行，仍采集远端三方输出
 python3 -m ttk e2e -i cases.csv --plugin /path/to/spec.py \
   --config ttk.conf.yaml --no-prof --dump in,golden,xpu \
   --manual-data-dirs /data/manual -o result.csv

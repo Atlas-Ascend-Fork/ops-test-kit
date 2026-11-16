@@ -110,7 +110,7 @@ python3 -m ttk aclnn -i cases.csv --run=5          # 执行次数（默认板端
 | `--run` | | 执行次数 | 板端 3 次 |
 | `--warmup` | | Profiling 前预热 | 开启 |
 | `--task-prof` | | 任务级 Profiling 采集开关 | 开启 |
-| `--no-prof` | | dry-run：不执行被测算子，仅生成输入/Golden 并落盘（离线数据准备） | 关闭 |
+| `--no-prof` | | 跳过本地 device 执行与 Profiling；生成输入/Golden 并落盘，按配置保留远端三方采集（离线数据准备） | 关闭 |
 
 ACLNN 无模式专属选项，其余参数（用例筛选/设备并行/精度控制/结果输出）见[任务执行](../task_execution_guide.md)。
 

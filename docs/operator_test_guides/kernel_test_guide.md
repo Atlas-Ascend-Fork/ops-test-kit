@@ -113,7 +113,7 @@ python3 -m ttk kernel -i add.csv --co
 | `--const` | `-c` | 静态 shape 编译 | 关闭 |
 | `--binary` | `-b` | 二进制模式；`-b release` 使用发布内核 | 关闭 |
 | `--compile-only` | `--co` | 仅编译不执行 | 关闭 |
-| `--no-prof` | | dry-run：不执行被测通路，仅生成输入与 Golden；与 `--dump in,golden` 组合用于离线数据准备 | 关闭 |
+| `--no-prof` | | 跳过本地 device 执行与 Profiling，按配置保留远端三方采集；与 `--dump in,golden` 组合用于离线数据准备 | 关闭 |
 | `--compile-opts` | | 编译选项（KEY=VALUE 格式，可多次指定），详解见 [Kernel 编译选项使用技巧](../tips/kernel_compile_options.md) | 无 |
 | `--tiling-run` | `--tr` | Tiling 运行次数 | 3 |
 | `--reuse-hbm` | | 重复执行间复用同一块 HBM（配合默认 3 次执行使能 L2 Cache） | 关闭 |
@@ -165,7 +165,7 @@ python3 -m ttk kernel -i add.csv --run=5         # 执行次数（默认板端 3
 | `--npu-timeout` | NPU 执行超时（ms） | 无限制 |
 
 > [!IMPORTANT]
-> `--no-prof` 不是性能参数：只生成输入和 Golden、不执行被测通路，适用于离线数据准备，详见[离线数据准备与导入](../tips/offline_data_prepare_guide.md)。
+> `--no-prof` 跳过本地 device 执行与 Profiling，适用于离线数据准备；`--dump xpu/full`、`--xpu-perf` 等仍可触发远端三方采集，详见[离线数据准备与导入](../tips/offline_data_prepare_guide.md)。
 
 ## 四、多卡并行
 

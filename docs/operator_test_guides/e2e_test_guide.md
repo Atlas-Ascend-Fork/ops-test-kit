@@ -141,7 +141,7 @@ python3 -m ttk e2e -i torch_cases.csv --run=5            # 执行次数（默认
 | `--run` | | 通用 | 执行次数 | 板端 3 次 |
 | `--warmup` | | 通用 | Profiling 前预热 | 开启 |
 | `--task-prof` | | 通用 | 任务级 Profiling 采集开关 | 开启 |
-| `--no-prof` | | 通用 | dry-run：不执行被测算子，仅生成输入/Golden 并落盘（离线数据准备） | 关闭 |
+| `--no-prof` | | 通用 | 跳过本地 device 执行与 Profiling；生成输入/Golden 并落盘，按配置保留远端三方采集（离线数据准备） | 关闭 |
 
 编译类组合参数（需与其他开关搭配使用）：
 
@@ -161,7 +161,7 @@ python3 -m ttk e2e -i torch_cases.csv --aclgraph -b=false # 恢复算子在线�
 ```
 
 > [!IMPORTANT]
-> `--no-prof` 不是性能参数：只生成输入和 Golden、不执行被测通路，适用于离线数据准备，详见[离线数据准备与导入](../tips/offline_data_prepare_guide.md)。
+> `--no-prof` 跳过本地 device 执行与 Profiling，适用于离线数据准备；`--dump xpu/full`、`--xpu-perf` 等仍可触发远端三方采集，详见[离线数据准备与导入](../tips/offline_data_prepare_guide.md)。
 
 ## 四、多卡并行
 
