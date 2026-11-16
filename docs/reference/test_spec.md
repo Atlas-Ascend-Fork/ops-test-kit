@@ -174,6 +174,7 @@ tolerance = {
 ### torch_graph（仅 E2E）
 
 ```python
+import torch
 import torch.nn as nn
 
 
