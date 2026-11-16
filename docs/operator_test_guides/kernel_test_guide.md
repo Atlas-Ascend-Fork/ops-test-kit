@@ -201,6 +201,9 @@ python3 -m ttk kernel -i examples/case_store/kernel/cases.csv -t concat_d_tensor
 # 重跑精度失败的用例
 python3 -m ttk kernel -i add.csv --rerun=precision_status
 
+# 复检：精度失败用例重跑 10 轮（每轮一行 __rc0..__rc9；带 --seed 时各轮为确定性互异输入、跨运行可复现）
+python3 -m ttk kernel -i add.csv --rerun=precision_status:10 --seed=42 -o recheck.csv
+
 # 使用自定义 Golden 插件
 python3 -m ttk kernel -i add.csv --plugin /path/to/my_golden.py
 

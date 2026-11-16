@@ -104,6 +104,7 @@ class SWITCHES:
         "excluded_operators",
         "priorities",
         "rerun_targets",
+        "rerun_rounds",
         "random_seed",
         # 设备与执行：设备选择/进程模型/Kernel 编译执行主链
         "device_count",
@@ -285,6 +286,7 @@ class SWITCHES:
         self.excluded_operators = None
         self.priorities: Optional[tuple] = None
         self.rerun_targets = None
+        self.rerun_rounds = 1
         self.random_seed = None
 
     def _init_execution(self):

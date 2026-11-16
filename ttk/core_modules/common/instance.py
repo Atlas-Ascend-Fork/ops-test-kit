@@ -26,10 +26,12 @@
 __all__ = ["InstanceBase", "register_instance", "get_instance_by_name"]
 
 # Standard Packages
+import copy
 import csv
 import logging
 import multiprocessing
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -44,6 +46,7 @@ from ttk.switches import get_global_storage
 
 from ...utilities import VERSION, cpu_count, render_table
 from .comparison import compare_batch_consistency
+from .comparison.recheck import RecheckCollector
 from .device import DSMI_HEALTH_STATE, DSMIInterface
 from .process import ProcessGroup, SimpleCommandProcess, Task, TaskKeeper
 from .testcase import TestcaseBase
@@ -181,6 +184,16 @@ class InstanceBase(metaclass=ABCMeta):
         self._batch_relation_warned: set = set()
         # -t/--ti 圈选时的传入序 key（None = 未圈选，按 CSV 行序）
         self._selection_order_key = None
+        # 统计复检（--rerun 多轮）：明细恒直写，逐轮 metrics 采样，组到齐后
+        # 终判行写 {原始文件名}_rc_summary.csv。仅 cross_check 比对产物含三比值
+        # （--compare 与 Spec tolerance 路由均可），无样本时判 SKIP 不产终判行。
+        # isinstance 守卫对齐 CLI 契约（int），跳过 MagicMock 自动属性
+        _rerun_rounds = getattr(self.switches, "rerun_rounds", 1)
+        self._rerun_groups: Dict[str, dict] = {}
+        self._recheck_summary_file = None
+        self._recheck_summary_writer = None
+        self._recheck_summary_path = ""
+        self._rerun_stat_mode = bool(isinstance(_rerun_rounds, int) and _rerun_rounds > 1)
 
     @staticmethod
     def _read_existing_header(path: str):
@@ -297,6 +310,7 @@ class InstanceBase(metaclass=ABCMeta):
         self._check_duplicate_case()
         logging.info("Validating testcases ...")
         self._validate_testcases()
+        self._expand_recheck_cases()
         self.total_case_count = len(self.flatten_testcases)
         logging.info(f"Case number: {self.total_case_count}")
 
@@ -307,6 +321,37 @@ class InstanceBase(metaclass=ABCMeta):
         for testcase in self.flatten_testcases:
             set_thread_name(testcase.testcase_name)
             testcase.validate()
+
+    def _expand_recheck_cases(self):
+        """复检展开：每条存活用例复制成 rounds 份，全部带 __rc{k} 后缀（k=0..N-1）。
+
+        命名：轮 0 原地改名、轮 1..N-1 deepcopy；行名全局唯一（seen 断言兜底
+        重名原件，正常由 _check_duplicate_case 前置拦截），case log / dump
+        目录按名分轮互不覆盖。
+        种子：reseed 按 testcase_name 全名派生，后缀进哈希——带 --seed 时各轮
+        输入确定且互异（轮 0 亦为新采样，种子与原名不同），不带 --seed 各轮
+        真随机（input_data.py 无需改动）。
+        执行序：[__rc0, __rc1, ...] 逐例交错；_csv_row_index 继承原值。
+        rounds=1 直通：不改名，与不带轮数的历史写法行为一致。
+        """
+        rounds = getattr(self.switches, "rerun_rounds", 1) or 1
+        if rounds <= 1:
+            return
+        seed_mode = "deterministic-per-round" if self.switches.random_seed else "random-per-round"
+        logging.info("Recheck rounds=%d, seed mode: %s", rounds, seed_mode)
+        expanded, seen = [], set()
+        for tc in self.flatten_testcases:
+            base_name = tc.testcase_name
+            for k in range(rounds):
+                row = tc if k == 0 else copy.deepcopy(tc)
+                row.testcase_name = f"{base_name}__rc{k}"
+                if row.testcase_name in seen:
+                    raise RuntimeError(f"recheck copy name collision: {row.testcase_name}")
+                seen.add(row.testcase_name)
+                expanded.append(row)
+        before = len(self.flatten_testcases)
+        self.flatten_testcases = expanded
+        logging.info(f"Recheck expanded: {before} cases x {rounds} rounds = {len(expanded)} tasks")
 
     def prepare_workers(self):
         """建 ProcessGroup。基类默认单池（pool="profile"，每卡一组）；
@@ -426,10 +471,13 @@ class InstanceBase(metaclass=ABCMeta):
     def cleanup(self):
         """关池 + dl=3 batch 一致性组装比对 + 按需停止心跳 + teardown + 进度落盘 + CSV 关闭 + 最终摘要。"""
         self.close_subprocesses()
+        self._log_incomplete_rerun_groups()
         self._compare_batch_summaries()
         self.teardown()
         if self.switches.progress_output:
             self._output_progress()
+        if self._recheck_summary_file:
+            self._recheck_summary_file.close()
         if self.result_csv_file:
             self.result_csv_file.close()
         self._print_final_summary()
@@ -625,6 +673,104 @@ class InstanceBase(metaclass=ABCMeta):
             self._precision_status_idx = self._resolve_precision_status_idx(row)
             return
         self._update_summary(row)
+
+    # ═══ 统计复检（--rerun 多轮）：明细恒直写，终判行写 {原始文件名}_rc_summary.csv ═══
+
+    def _dispatch_result_row(self, task: Task, row: tuple, metrics=None) -> None:
+        """结果行统一出口：明细行恒直写；--rerun 多轮时按用例采样，组到齐后
+        由 _finalize_rerun_group 写终判行。
+
+        getattr 门控兼容不经 __init__ 的调度桩（_DispatchHarness 直接绑定基类方法）。"""
+        self.write_row(row)
+        if not getattr(self, "_rerun_stat_mode", False):
+            return
+        match = _RC_ROUND_RE.match(getattr(task.testcase, "testcase_name", "") or "")
+        if match is None:
+            return
+        group = self._rerun_groups.setdefault(match.group("base"), {"count": 0, "collector": RecheckCollector()})
+        group["count"] += 1
+        if metrics is not None:
+            group["collector"].add_run(metrics)
+        else:
+            group["collector"].add_failed_run(self._row_status_marker(row))
+        if group["count"] >= (getattr(self.switches, "rerun_rounds", 1) or 1):
+            self._finalize_rerun_group(match.group("base"))
+
+    def _finalize_rerun_group(self, base: str) -> None:
+        """全轮到齐 → bootstrap 终判行写 {原始文件名}_rc_summary.csv。无样本
+        （标准不符/三方不可用/全轮失败）判 SKIP：不产终判行，只记 debug 日志。"""
+        group = self._rerun_groups.pop(base)
+        verdict = group["collector"].finish(getattr(self.switches, "random_seed", None), base)
+        if verdict.status == "SKIP":
+            logging.debug("[%s] rerun recheck no samples: %s", base, verdict.reason)
+            return
+        self._write_recheck_summary_row(
+            (
+                base,
+                verdict.status,
+                verdict.reason or "",
+                verdict.total_rounds,
+                verdict.valid_rounds,
+                verdict.failed_rounds,
+                verdict.fail_markers or "",
+                verdict.metrics_payload(),
+            )
+        )
+        if verdict.status == "FAIL":
+            # 终判计入退出码（bridge 按 fail_count 收口）：逐轮行全 PASS
+            # 但 CI 下限 > 1.0 时仍算失败
+            self.fail_count += 1
+        logging.info("[%s] rerun recheck verdict: %s", base, verdict.summary_line())
+
+    def _write_recheck_summary_row(self, row: tuple) -> None:
+        """终判行落 {原始文件名}_rc_summary.csv（首个终判到达时惰性建文件）。"""
+        if self._recheck_summary_file is None:
+            self._open_recheck_summary()
+        self._recheck_summary_writer.writerow(row)
+        self._recheck_summary_file.flush()
+
+    def _open_recheck_summary(self) -> None:
+        """summary 文件打开：文件名 = 输入文件名 + `_rc_summary`（同 result 默认
+        名 {输入}_result.csv 的拼接规则，含 sheet 标签转义）；append 模式表头
+        对账，不一致降级覆盖（同 open_output 行为）。"""
+        root, _ = os.path.splitext(self.switches.input_files[0])
+        sheet = self._resolved_output_sheet()
+        tag = ""
+        if sheet:
+            # Escape the escape marker too, so distinct legal sheet names cannot collapse to one path.
+            tag = "_" + sheet.translate(str.maketrans({char: f"%{ord(char):02X}" for char in '\\/:*?"<>| %'}))
+        self._recheck_summary_path = root + tag + "_rc_summary.csv"
+        file_exists = os.path.exists(self._recheck_summary_path) and os.path.getsize(self._recheck_summary_path) > 0
+        if self.switches.append_mode and file_exists:
+            existing_header = self._read_existing_header(self._recheck_summary_path)
+            if existing_header is not None and tuple(existing_header) == _RECHECK_SUMMARY_TITLES:
+                self._recheck_summary_file = open(self._recheck_summary_path, newline="", mode="a+")  # noqa: SIM115
+                self._recheck_summary_writer = csv.writer(self._recheck_summary_file)
+                logging.info(f"Append mode: appending to existing {self._recheck_summary_path}")
+                return
+            logging.warning(
+                f"Append mode: existing file header does not match. Overwriting {self._recheck_summary_path}"
+            )
+        self._recheck_summary_file = open(self._recheck_summary_path, newline="", mode="w+")  # noqa: SIM115
+        self._recheck_summary_writer = csv.writer(self._recheck_summary_file)
+        self._recheck_summary_writer.writerow(_RECHECK_SUMMARY_TITLES)
+
+    def _row_status_marker(self, row: tuple) -> str:
+        """错误行的失败标记（复检失败计数直方图）：取 precision_status 单元格。"""
+        idx = self._precision_status_idx
+        if idx is not None and idx < len(row):
+            return str(row[idx]) or "RUN_FAILURE"
+        return "RUN_FAILURE"
+
+    def _log_incomplete_rerun_groups(self) -> None:
+        """cleanup 提示：轮数不齐的组无统计终判（明细行已正常落盘）。"""
+        for base in list(self._rerun_groups):
+            group = self._rerun_groups.pop(base)
+            logging.warning(
+                "rerun recheck group %s incomplete (%d rounds done) — no statistical verdict",
+                base,
+                group["count"],
+            )
 
     def close_subprocesses(self):
         self._stop_heartbeat_process()
@@ -993,7 +1139,7 @@ class InstanceBase(metaclass=ABCMeta):
         logging.error(f"Task {task.label} failed at dispatch: {message}")
         output = self.handle_error(task, "fail", (0, RuntimeError(message)))
         if output:
-            self.write_row(output)
+            self._dispatch_result_row(task, output)
         self.task_keeper.done(task.task_id)
         self.testcase_complete()
 
@@ -1340,6 +1486,7 @@ class InstanceBase(metaclass=ABCMeta):
     def _handle_task_result(self, task: Task, proc: SimpleCommandProcess):
         result = proc.get_result()
         pid = proc.get_pid()
+        metrics = None
         if result is None:
             output_data = self.handle_error(task, "none", None)
         elif isinstance(result, SystemError):
@@ -1352,15 +1499,17 @@ class InstanceBase(metaclass=ABCMeta):
         else:
             self._collect_batch_summary(task, result)
             output_data = self._assemble_result_row(task, self.handle_result(task, result))
+            metrics = getattr(result, "precision_metrics", None)
             if self.switches.proc_no_reuse or self.recycle_worker(task, result):
                 proc.close()
                 proc.resurrect()
         if output_data:
-            self.write_row(output_data)
+            self._dispatch_result_row(task, output_data, metrics)
 
     def _handle_multi_device_task_result(self, task: Task, proc: SimpleCommandProcess):
         result = proc.get_result()
         pid = proc.get_pid()
+        metrics = None
         if isinstance(result, (SystemError, RuntimeError)):
             proc.recycle()
             if isinstance(result, SystemError):
@@ -1370,13 +1519,14 @@ class InstanceBase(metaclass=ABCMeta):
         elif result is not None:
             self._collect_batch_summary(task, result)
             output_data = self._assemble_result_row(task, self.handle_result(task, result))
+            metrics = getattr(result, "precision_metrics", None)
             # 多卡 worker 不复用（跨卡资源随进程退出统一回收）
             proc.close()
             proc.resurrect()
         else:
             output_data = self.handle_error(task, "none", None)
         if output_data:
-            self.write_row(output_data)
+            self._dispatch_result_row(task, output_data, metrics)
         self.testcase_complete()
 
     def _assemble_result_row(self, task: Task, results: Optional[tuple]) -> Optional[tuple]:
@@ -1410,6 +1560,21 @@ class InstanceBase(metaclass=ABCMeta):
 
 
 # ── 聚合层选择器（parse_cases 侧消费）──
+
+
+_RC_ROUND_RE = re.compile(r"^(?P<base>.+)__rc(?P<k>\d+)$")
+
+# rc_summary.csv 固定统计列（统计口径自洽，不借用 result schema）
+_RECHECK_SUMMARY_TITLES = (
+    "testcase_name",
+    "precision_status",
+    "reason",
+    "total_rounds",
+    "valid_rounds",
+    "failed_rounds",
+    "fail_markers",
+    "recheck_metrics",
+)
 
 
 def execution_sorted(selection_order_key, testcases):

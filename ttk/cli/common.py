@@ -183,7 +183,15 @@ def _add_run_args(parser):
         "Test filter — narrows dispatch, does NOT override remote config. "
         "If not set, uses the first available key from spec's third_party.",
     )
-    group.add_argument("--rerun", metavar="COLUMNS", help="Rerun failed cases, e.g. --rerun=precision_status")
+    group.add_argument(
+        "--rerun",
+        metavar="COLUMNS[:N]",
+        nargs="?",
+        const="",
+        default=None,
+        help="Rerun failed cases, e.g. --rerun=precision_status:10 (10 rounds); "
+        "count-only (--rerun=10) reruns all cases N rounds without column filtering",
+    )
     group.add_argument(
         "--print",
         dest="summary_print",

@@ -60,7 +60,7 @@ python3 -m ttk list -i cases.xlsx --sheet Sheet2     # 预览 Excel（指定工�
 | `--exclude-operator` | `--no-op` | 无 | 排除算子名 | `--no-op concat_d` |
 | `--priority` | | 无 | 按优先级筛选（单值/闭区间/开放上界） | `--priority=1-3` |
 | `--provider` | | 无 | 三方 provider 过滤（如 torch/tf） | `--provider torch` |
-| `--rerun` | | 无 | 重跑失败项（仅 Kernel/GEIR 支持） | `--rerun=precision_status` |
+| `--rerun` | | 无 | 重跑失败项（四通路支持）。值语法 `COLUMNS[:N]`：`N` 为复检轮数（默认 1，上限 1000——超出时告警并按 1000 执行）；只给轮数（`--rerun=10`）为全量复检——不按列圈选，全部用例 × N 轮（可直接用普通用例 CSV）。多轮时每轮一行（`__rc0`..`__rc{N-1}` 名字后缀，保留命名），复检全 PASS 才算通过 | `--rerun=precision_status:10` |
 | `--config` | | 无 | ttk 配置 YAML 路径 | `--config ttk.conf.yaml` |
 
 ### 2. 设备与并行

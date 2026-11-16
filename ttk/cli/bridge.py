@@ -31,6 +31,42 @@ def _split_csv(value: str) -> list:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+DEFAULT_RERUN_TARGETS = ("precision_status",)
+DEFAULT_RERUN_ROUNDS = 1
+MAX_RERUN_ROUNDS = 1000
+
+_ROUND_TOKEN = re.compile(r"\d+")
+
+
+def _parse_rerun_value(value: str):
+    """--rerun VALUE 解析 → (targets, rounds)。
+
+    冒号/逗号均作分隔符；纯整数 token = 轮数（最多一次，>=1，超上限
+    MAX_RERUN_ROUNDS 告警并钳到上限——防超大轮数在展开期无限 deepcopy
+    挂死/OOM），其余 token = 列名（小写化）。无列名时：显式给了轮数 →
+    全量复检（targets=None，不按列圈选，全部用例 × N）；裸参数 → 默认列 × 1。
+    """
+    tokens = [t.strip() for t in value.replace(":", ",").split(",") if t.strip()]
+    targets, rounds = [], None
+    for tok in tokens:
+        if _ROUND_TOKEN.fullmatch(tok):
+            if rounds is not None:
+                raise ValueError(f"--rerun accepts at most one round count, got: {value!r}")
+            rounds = int(tok)
+            if rounds < 1:
+                raise ValueError(f"--rerun rounds must be >= 1, got: {rounds}")
+            if rounds > MAX_RERUN_ROUNDS:
+                logging.warning(
+                    f"--rerun rounds {rounds} exceeds upper bound {MAX_RERUN_ROUNDS}; clamping to {MAX_RERUN_ROUNDS}"
+                )
+                rounds = MAX_RERUN_ROUNDS
+        else:
+            targets.append(tok.lower())
+    if not targets:
+        targets = None if rounds is not None else list(DEFAULT_RERUN_TARGETS)
+    return targets, (rounds if rounds is not None else DEFAULT_RERUN_ROUNDS)
+
+
 _FALSY_FLAG_TOKENS = ("false", "0", "no", "off")
 
 
@@ -146,8 +182,11 @@ def _apply_compare_dump_args(sw, args):
 def _apply_plugin_rerun_args(sw, args):
     if hasattr(args, "plugin") and args.plugin:
         sw.plugin_path = tuple(pathlib.Path(p.strip()).resolve() for p in args.plugin.split(",") if p.strip())
-    if hasattr(args, "rerun") and args.rerun:
-        sw.rerun_targets = [t.lower() for t in _split_csv(args.rerun)]
+    # is not None：裸 --rerun（const=""）与 --rerun="" 都生效（默认列 × 1 轮）
+    if hasattr(args, "rerun") and args.rerun is not None:
+        targets, rounds = _parse_rerun_value(args.rerun)
+        sw.rerun_targets = targets
+        sw.rerun_rounds = rounds
 
 
 def _apply_signature_args(sw, args):

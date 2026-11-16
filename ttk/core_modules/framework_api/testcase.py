@@ -122,6 +122,13 @@ class TestcaseE2e(ApiTestcaseBase):
         **option_headers,
     }
 
+    @staticmethod
+    def supported_rerun_title() -> tuple:
+        # eager/graph_*_precision 为精度值列（"100.0%"、GRAPH_EXEC_FAILURE 等）
+        # 而非状态列：_check_testcase_rerun 只认非数值且 ≠PASS 的原值，纳入会
+        # 误圈成功行
+        return "precision_status", "deterministic_status"
+
     def __init__(self):
         super().__init__()
         self.attributes = {}

@@ -81,6 +81,9 @@ python3 -m ttk aclnn -i cases.csv --compare cosine
 
 # 输出结果
 python3 -m ttk aclnn -i cases.csv -o results.csv
+
+# 重跑失败项 / 复检（可用列：precision_status/perf_status/deterministic_status）
+python3 -m ttk aclnn -i results.csv --rerun=precision_status:10 -o recheck.csv
 ```
 
 执行流程：

@@ -112,6 +112,9 @@ python3 -m ttk e2e -i torch_cases.csv -t add_f32_alpha --backend cpu
 
 # onnx（atc 编译 .om + aclmdl 执行）
 python3 -m ttk e2e -i onnx_cases.csv
+
+# 重跑失败项 / 复检（可用列：precision_status/deterministic_status）
+python3 -m ttk e2e -i torch_cases_result.csv --rerun=precision_status:10 -o recheck.csv
 ```
 
 执行流程：

@@ -95,7 +95,7 @@ python3 -m ttk geir -i add.csv -o results.csv
 | `--dynamic` | `-d` | 动态 shape 编译；`dyn_input_shapes` 仅在本模式生效 | 关闭 |
 | `--binary` | `-b` | 二进制模式：复用预编译的发布内核 | 关闭 |
 | `--xpu-perf` | | 采集 XPU 远程性能（需远端 XPU 配置） | 关闭 |
-| `--rerun` | | 重跑失败项（可用列：`dyn_perf_us`/`cst_perf_us`/`precision_status`） | 无 |
+| `--rerun` | | 重跑失败项（可用列：`dyn_perf_us`/`cst_perf_us`/`precision_status`）；带轮数语法如 `--rerun=precision_status:10` 见[任务执行](../task_execution_guide.md) | 无 |
 
 > [!IMPORTANT]
 > GEIR 默认开启静态编译（`-c`），与 Kernel 默认开启动态编译（`-d`）相反。`dyn_input_shapes` 仅在 `-d` 下生效，需显式指定。

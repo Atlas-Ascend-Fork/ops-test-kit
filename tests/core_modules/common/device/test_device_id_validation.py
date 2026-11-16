@@ -60,6 +60,7 @@ class _DispatchHarness:
         self.flushed.append(row)
 
     _fail_task_without_worker = InstanceBase._fail_task_without_worker
+    _dispatch_result_row = InstanceBase._dispatch_result_row
     _try_push_multi_device_task = InstanceBase._try_push_multi_device_task
     _most_idle_group_in_pool = InstanceBase._most_idle_group_in_pool
     _grantable_devices = InstanceBase._grantable_devices

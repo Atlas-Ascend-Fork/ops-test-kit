@@ -171,6 +171,12 @@ class TestcaseAclnn(ApiTestcaseBase):
         **batch_consistency_headers,
     }
 
+    @staticmethod
+    def supported_rerun_title() -> tuple:
+        # 仅状态列：数值列（api_perf_us 等）在 _check_testcase_rerun 中视为
+        # 有效结果，不触发重跑
+        return "precision_status", "perf_status", "deterministic_status"
+
     def __init__(self):
         super().__init__()
         # output properties
