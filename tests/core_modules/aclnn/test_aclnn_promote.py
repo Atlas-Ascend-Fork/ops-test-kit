@@ -10,6 +10,7 @@
 """Tests for ACLNN golden promote dtype context."""
 
 from collections import OrderedDict
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ import torch
 from ttk.core_modules.aclnn.golden import GoldenGenerator
 from ttk.core_modules.aclnn.info_keeper import OpApiInfo
 from ttk.core_modules.aclnn.testcase import TestcaseAclnn
+from ttk.core_modules.aclnn.worker import _resolve_tolerance as _aclnn_resolve_tolerance
 
 
 def _mock_switches(golden_mode="Promote"):
@@ -84,3 +86,28 @@ class TestAclnnPromote:
         GoldenGenerator(case)._generate_golden()
         assert _RecordDtype.received.get("dtype") == "torch.float32"
         assert str(case.tensors[0].dtype) == "torch.float16"
+
+
+def test_resolve_tolerance_promote_exemptions():
+    """mix_tolerance 判据下：Enable 挂 golden_mode_override，XPU/Disable/NPU 不挂。"""
+
+    def _resolve(golden_mode):
+        case = SimpleNamespace(
+            api_name="Add",
+            flat_output_dtypes=("float32",),
+            flat_precision_tolerances=None,
+            flat_absolute_precision=None,
+        )
+        sw = MagicMock()
+        sw.compare_method = None
+        sw.plugin_path = None
+        sw.golden_mode = golden_mode
+        spec = MagicMock()
+        spec.resolve_tolerance.return_value = None
+        with patch("ttk.core_modules.aclnn.worker.SpecResolver", return_value=spec):
+            _aclnn_resolve_tolerance(case, sw)
+        return case
+
+    for mode in ("XPU", "Disable", "NPU"):
+        assert not hasattr(_resolve(mode), "golden_mode_override")
+    assert _resolve("Enable").golden_mode_override == "Promote"

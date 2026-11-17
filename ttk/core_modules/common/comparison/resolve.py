@@ -303,3 +303,11 @@ def resolve_tolerance(
 def needs_promote_golden(standards) -> bool:
     """任一输出判据属于 PROMOTE_GOLDEN_TOKENS 时返回 True（golden 须升精度生成）。"""
     return any(s.token in PROMOTE_GOLDEN_TOKENS for s in standards)
+
+
+def should_promote_golden(standards, golden_mode) -> bool:
+    """判据命中升精度且 golden_mode 未被豁免时返回 True。
+
+    XPU（三方产出）/ NPU（设备原生执行）/ Disable（不生成 golden）与 Promote 互斥。
+    """
+    return needs_promote_golden(standards) and golden_mode not in ("XPU", "Disable", "NPU")

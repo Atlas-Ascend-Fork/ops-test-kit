@@ -18,9 +18,11 @@ Covers the three functions of the E2E golden Promote mechanism:
   * `worker._generate_golden`                - set / restore the override
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from ttk.core_modules.framework_api import worker as _worker
 from ttk.core_modules.framework_api.golden import (
@@ -127,41 +129,92 @@ def test_promote_applies_to_mutable_apis():
 # ----------------------------------------------------------------------------
 # _needs_golden_promote
 # ----------------------------------------------------------------------------
-def test_needs_promote_true_for_cross_check():
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        pytest.param("cross_check", True, id="cross_check"),
+        pytest.param("mix_tolerance", True, id="mix_tolerance"),
+        pytest.param("mixed", True, id="mixed"),
+        pytest.param("stat_rel_err", False, id="stat_rel_err"),
+        pytest.param("binary_equal", False, id="binary_equal"),
+        pytest.param("isclose", False, id="isclose"),
+    ],
+)
+def test_needs_promote_routes_by_standard_token(token, expected):
+    """声明输出 dtype 时，升档由判据 token 是否属 PROMOTE_GOLDEN_TOKENS 决定
+    （mix_tolerance 为默认单标杆判据，mixed 为其 CLI 简写）。"""
     with patch.object(_worker, "SpecResolver") as _sr, patch.object(
-        _worker, "resolve_tolerance", return_value=[_standard("cross_check")]
+        _worker, "resolve_tolerance", return_value=[_standard(token)]
     ):
         _sr.return_value.resolve_tolerance.return_value = None
-        assert needs_golden_promote(_Testcase(), _Switches()) is True
+        assert needs_golden_promote(_Testcase(), _Switches()) is expected
 
 
-def test_needs_promote_true_for_mix_tolerance():
-    """mix_tolerance（默认单标杆判据）与 CLI 简写 mixed 同样要求 golden 升精度。"""
-    for token in ("mix_tolerance", "mixed"):
-        with patch.object(_worker, "SpecResolver") as _sr, patch.object(
-            _worker, "resolve_tolerance", return_value=[_standard(token)]
-        ):
-            _sr.return_value.resolve_tolerance.return_value = None
-            assert needs_golden_promote(_Testcase(), _Switches()) is True
+@pytest.mark.parametrize(
+    ("spec_tolerance", "std_token", "expected"),
+    [
+        pytest.param(None, None, False, id="no_spec_tolerance"),
+        pytest.param({"float32": {"standard": "close"}}, "close", False, id="spec_close"),
+        pytest.param(
+            {"float32": {"standard": "cross_check", "level": "L1"}}, "cross_check", True, id="spec_cross_check"
+        ),
+    ],
+)
+def test_needs_promote_undeclared_output_dtypes(spec_tolerance, std_token, expected):
+    """CSV 未声明输出 dtype：按 Spec 容差档回退做锚点（与 _cross_check_token 同口径），
+    容差缺档（None/非 dict）时不升精度。"""
+    seen = {}
+
+    def _capture(tolerance, precisions, absolutes, dtypes, method):
+        seen["dtypes"] = tuple(str(d) for d in dtypes)
+        return [_standard(std_token)]
+
+    with patch.object(_worker, "SpecResolver") as _sr, patch.object(_worker, "resolve_tolerance", side_effect=_capture):
+        _sr.return_value.resolve_tolerance.return_value = spec_tolerance
+        assert needs_golden_promote(_Testcase(flat_output_dtypes=None), _Switches()) is expected
+    if spec_tolerance:
+        assert seen["dtypes"] == ("float32",)
 
 
-def test_needs_promote_false_for_non_promote_standards():
-    """stat_rel_err/binary_equal/isclose 判据不强制 golden 升精度。"""
-    for token in ("stat_rel_err", "binary_equal", "isclose"):
-        with patch.object(_worker, "SpecResolver") as _sr, patch.object(
-            _worker, "resolve_tolerance", return_value=[_standard(token)]
-        ):
-            _sr.return_value.resolve_tolerance.return_value = None
-            assert needs_golden_promote(_Testcase(), _Switches()) is False
-
-
-def test_needs_promote_false_without_declared_output_dtypes():
-    """CSV 未声明输出 dtype 时无法解析判据，不升精度（锚点=声明 dtype，不依赖执行结果）。"""
-    with patch.object(_worker, "SpecResolver") as _sr, patch.object(
-        _worker, "resolve_tolerance", return_value=[_standard("mix_tolerance")]
-    ):
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        pytest.param("cross_check", True, id="cli_cross_check"),
+        pytest.param("mixed", True, id="cli_mixed"),
+        pytest.param("mix_tolerance", True, id="cli_mix_tolerance"),
+        pytest.param("close", False, id="cli_close"),
+        pytest.param("binary", False, id="cli_binary"),
+        pytest.param("cosine", False, id="cli_cosine"),
+        pytest.param(None, False, id="cli_none"),
+    ],
+)
+def test_needs_promote_cli_fallback_when_outputs_undeclared(method, expected):
+    """未声明输出档且无 Spec 容差时，升档由 CLI --compare 是否属 promote 档决定。"""
+    with patch.object(_worker, "SpecResolver") as _sr:
         _sr.return_value.resolve_tolerance.return_value = None
-        assert needs_golden_promote(_Testcase(flat_output_dtypes=None), _Switches()) is False
+        switches = _Switches()
+        switches.compare_method = method
+        assert needs_golden_promote(_Testcase(flat_output_dtypes=None), switches) is expected
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        pytest.param("cross_check", True, id="cli_cross_check"),
+        pytest.param("close", False, id="cli_close"),
+        pytest.param("mixed", False, id="cli_mixed"),
+        pytest.param(None, False, id="cli_none"),
+    ],
+)
+def test_cross_check_token_cli_fallback_when_outputs_undeclared(method, expected):
+    """未声明输出档且无 Spec 容差时，仅 --compare cross_check 预派发（其余老行为不变）。"""
+    ctx = SimpleNamespace(
+        testcase=SimpleNamespace(api_name="tf.raw_ops.Add", flat_output_dtypes=()),
+        switches=SimpleNamespace(plugin_path=None, compare_method=method),
+    )
+    with patch.object(_worker, "SpecResolver") as _sr:
+        _sr.return_value.resolve_tolerance.return_value = None
+        assert _worker._cross_check_token(ctx) is expected
 
 
 def test_needs_promote_anchor_is_csv_declared_dtype():
@@ -178,14 +231,10 @@ def test_needs_promote_anchor_is_csv_declared_dtype():
     assert tuple(str(d) for d in seen["dtypes"]) == ("float32", "float16")
 
 
-def test_needs_promote_false_under_xpu():
-    """golden_mode=XPU 与 Promote 互斥：golden 由三方产出，不做 CPU 抬精度。"""
-    assert needs_golden_promote(object(), _Switches(golden_mode="XPU")) is False
-
-
-def test_needs_promote_false_under_npu():
-    """golden_mode=NPU 与 Promote 互斥：golden 在 NPU 原生 dtype 上执行，无 CPU 抬精度语义。"""
-    assert needs_golden_promote(object(), _Switches(golden_mode="NPU")) is False
+@pytest.mark.parametrize("mode", ["XPU", "NPU"])
+def test_needs_promote_false_under_device_golden_modes(mode):
+    """golden_mode=XPU/NPU 与 Promote 互斥：golden 由三方/NPU 原生产出，无 CPU 抬精度语义。"""
+    assert needs_golden_promote(object(), _Switches(golden_mode=mode)) is False
 
 
 def _onnx_none_shape_slot_case(out_dtype, in_dtype="float16"):

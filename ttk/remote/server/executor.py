@@ -1077,6 +1077,10 @@ def execute_request(
 
         device_str = format_device(provider, profile, "cpu" if not use_device else device_id)
         named = _load_named_inputs(input_schema, tmp_in_path, input_count, provider, device_str)
+        # index:null 槽（无张量占位）还原成 None 命名输入；同名 attrs 不能被
+        # None 覆盖，否则 tf.raw_ops 的 strides/rates 等被清成 None。
+        for phantom in [k for k, v in named.items() if v is None and k in (attrs or {})]:
+            named.pop(phantom)
 
         callable_fn, api_label = _resolve_callable(exec_type, provider, api, op_name, op_type, spec_module, spec_class)
         compose_kwargs = _compose_kwargs(attrs, input_schema, callable_fn)

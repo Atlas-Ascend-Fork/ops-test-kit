@@ -39,7 +39,7 @@ from ...utilities import (
 )
 from ...utilities.dtypes import DTYPE_MAP
 from ..common.comparison.batch_consistency import assemble_batch_summary
-from ..common.comparison.resolve import needs_promote_golden, resolve_tolerance
+from ..common.comparison.resolve import resolve_tolerance, should_promote_golden
 from ..common.dump import (
     DataDumper,
     dump_manual_dataset,
@@ -326,9 +326,7 @@ def _resolve_tolerance(context, switches):
         switches.compare_method,
     )
     need_3party = any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为精度标准类型名，非凭据
-    if needs_promote_golden(standards) and switches.golden_mode not in ("XPU", "NPU"):
-        # cross_check 三方 / mixed·mix_tolerance 单标杆均升精度；XPU golden
-        # 三方产出与 NPU golden（设备原生 dtype 执行）皆与 Promote 互斥。
+    if should_promote_golden(standards, switches.golden_mode):
         context.golden_mode_override = "Promote"
     return SimpleNamespace(standards=standards, need_3party=need_3party)
 

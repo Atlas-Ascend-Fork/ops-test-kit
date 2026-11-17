@@ -30,7 +30,7 @@ from ttk.switches import get_global_storage
 from ttk.utilities import is_4bit_dtype, render_table
 
 from ..common.comparison.batch_consistency import assemble_batch_summary
-from ..common.comparison.resolve import needs_promote_golden, resolve_tolerance
+from ..common.comparison.resolve import resolve_tolerance, should_promote_golden
 from ..common.dump import (
     dump_manual_dataset,
     load_manual_goldens,
@@ -493,14 +493,7 @@ def _resolve_tolerance(testcase, switches) -> SimpleNamespace:
     golden_is_xpu = switches.golden_mode == "XPU"
     # golden-mode NPU：golden 在设备上执行（torch 载体 + 采集窗）——与 Promote 互斥。
     golden_is_npu = switches.golden_mode == "NPU"
-    # cross_check 三方 / mixed·mix_tolerance 单标杆均升精度；Disable 是显式
-    # 豁免（golden 不生成），升精度无从谈起，不得覆盖（与 kernel/worker.py 对齐）
-    if (
-        needs_promote_golden(standards)
-        and not golden_is_xpu
-        and not golden_is_npu
-        and switches.golden_mode != "Disable"
-    ):
+    if should_promote_golden(standards, switches.golden_mode):
         testcase.golden_mode_override = "Promote"
     return SimpleNamespace(
         standards=standards,

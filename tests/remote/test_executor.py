@@ -154,6 +154,40 @@ class TestSpecData:
         assert env["ok"]
         np.testing.assert_array_equal(np.load(env["output_path"])["a0"], expected)
 
+    def test_schema_none_slot_does_not_mask_attrs(self, tmp_path):
+        """index:null 占位槽不得掩盖同名算子属性（tf.raw_ops attr 覆盖参数场景）。"""
+        from ttk.remote import DATA
+        from ttk.remote.server import executor
+
+        self._write(
+            tmp_path / "scaleop.py",
+            "class ScaleImpl:\n"
+            "    def __init__(self, x, scale, **kw):\n"
+            "        self.x, self.scale = x, scale\n"
+            "    def __call__(self):\n"
+            "        return [self.x * self.scale]\n"
+            "class ScaleTestSpec:\n"
+            "    third_party = {'numpy': ScaleImpl}\n",
+        )
+        inp = _npz(tmp_path / "in.npz", x=np.array([2.0]))
+        env = executor.execute_request(
+            **_kw(
+                exec_type="spec",
+                spec_module="scaleop",
+                spec_class="ScaleTestSpec",
+                mode=DATA,
+                provider="numpy",
+                attrs={"scale": 3.0},
+                input_schema=[{"name": "x", "index": 0}, {"name": "scale", "index": None}],
+                tmp_in_path=inp,
+                input_count=1,
+                tenant_sync_dir=str(tmp_path),
+                output_dir=str(tmp_path),
+            )
+        )
+        assert env["ok"], env
+        np.testing.assert_array_equal(np.load(env["output_path"])["a0"], np.array([6.0]))
+
     @pytest.mark.parametrize(
         "scenario",
         [

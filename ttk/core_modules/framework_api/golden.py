@@ -31,6 +31,8 @@ with profiling.py — same plan, same (*args, **kwargs) layout.
 import functools
 import logging
 
+import numpy as np
+
 from ttk.core_modules.framework_api.api_param import build_positional_args
 from ttk.utilities import DTYPE_PROMOTE_MAP
 from ttk.utilities.container import nest_by_distribution
@@ -77,33 +79,68 @@ def _promote_raw_inputs(testcase, raw_inputs, switches=None):
     return promoted
 
 
-def _promote_tensor_value(value, target, source_dtype):
-    """单张量升精度副本：torch .to() / numpy astype，载体类型不变。
-
-    转换失败（含 torch 缺席、dtype 无法解析）告警后原样返回。"""
-    import numpy
-
-    if isinstance(value, numpy.ndarray):
-        try:
-            return value.astype(numpy.dtype(target))
-        except (TypeError, ValueError):
-            logging.warning(f"[golden] promote tensor {source_dtype}->{target} failed, keep original")
-            return value
-    if not hasattr(value, "dtype"):
+def _promote_numpy_tensor(value, target, source_dtype):
+    """numpy 载体：astype 升精度副本。"""
+    try:
+        return value.astype(np.dtype(target))
+    except (TypeError, ValueError):
+        # 只兜 numpy astype 实际会抛的两类:目标 dtype 非法(TypeError)、值无法转换(ValueError)。
+        # 其余异常(如 array 非 ndarray)属调用方传参错误,不在此吞掉。
+        logging.warning(f"[golden] promote tensor {source_dtype}->{target} failed, keep original")
         return value
+
+
+def _promote_tf_tensor(value, target, source_dtype):
+    """tf 载体：tf.cast 升精度副本。"""
+    import tensorflow as tf
+
+    from ttk.utilities.dtypes import str_to_tf_dtype
+
+    tgt = str_to_tf_dtype(target)
+    if tgt is None or value.dtype == tgt:
+        return value
+    try:
+        casted = tf.cast(value, tgt)
+        # 载体类型不变：mutable/ref 位保持 Variable（handle 转换/回读均按 isinstance 定位）
+        return tf.Variable(casted) if isinstance(value, tf.Variable) else casted
+    except (tf.errors.OpError, RuntimeError, TypeError, ValueError, AttributeError):
+        # OpError 兜 resource/variant 等不可 cast 的 dtype（UnimplementedError）
+        logging.warning(f"[golden] promote tensor {source_dtype}->{target} failed, keep original")
+        return value
+
+
+def _promote_torch_tensor(value, target, source_dtype):
+    """torch 载体：.to() 升精度副本。"""
     try:
         from ttk.utilities import str_to_torch_dtype
 
         tgt = str_to_torch_dtype(target)
     except ImportError:
         return value
-    if tgt is None or getattr(value, "dtype", None) == tgt:
+    if tgt is None or value.dtype == tgt:
         return value
     try:
         return value.to(tgt)
-    except (RuntimeError, TypeError, ValueError):
+    except (RuntimeError, TypeError, ValueError, AttributeError):
         logging.warning(f"[golden] promote tensor {source_dtype}->{target} failed, keep original")
         return value
+
+
+def _promote_tensor_value(value, target, source_dtype):
+    """单张量升精度副本：按载体分派 numpy / tf / torch，载体类型不变。
+
+    tf 判型查类级 as_numpy_dtype 属性，不 import tensorflow（torch 进程触达
+    TF C 扩展会段错误）；实例级访问在 resource/variant 上会抛 KeyError。
+    转换失败告警后原样返回。
+    """
+    if isinstance(value, np.ndarray):
+        return _promote_numpy_tensor(value, target, source_dtype)
+    if not hasattr(value, "dtype"):
+        return value
+    # 查类不查实例：resource/variant 的 as_numpy_dtype getter 抛 KeyError，hasattr 会往外冒。
+    if hasattr(type(value.dtype), "as_numpy_dtype"):
+        return _promote_tf_tensor(value, target, source_dtype)
+    return _promote_torch_tensor(value, target, source_dtype)
 
 
 def _promoted_golden_inputs(testcase, switches):

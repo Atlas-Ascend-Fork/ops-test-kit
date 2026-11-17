@@ -195,6 +195,8 @@ def test_tf_param_flags_filled_from_opdef():
             "readback_relu": adapter.mutable_readback("tf.nn.relu", [v], {}),
             "acc_nv2_types": types("tf.raw_ops.AccumulateNV2"),
             "relu_types": types("tf.nn.relu"),
+            "d2d_types": types("tf.raw_ops.Dilation2DBackpropFilter"),
+            "approx_types": types("tf.raw_ops.ApproximateEqual"),
             "inplaceadd": flags("tf.raw_ops.InplaceAdd"),
             "mutable_ia": adapter.is_mutable_api("tf.raw_ops.InplaceAdd"),
             "flat_ia": list(mutable_flat_indexes("tf.raw_ops.InplaceAdd")),
@@ -233,11 +235,27 @@ def test_tf_param_flags_filled_from_opdef():
     # OpDef N*T 列表输入（AccumulateNV2 inputs）：tf_inspect 补列表位（Python 签名表不出列表）
     assert out["acc_nv2_types"] == [
         ["inputs", "list of Tensors", True],
-        ["shape", "Tensor", False],  # shape 属性维持 raw_ops 惯例的 Tensor 归类（attr raw 透传）
+        ["shape", "tuple of ints", False],  # shape 为 OpDef shape 型 attr，CSV 经 attributes 传值
         ["name", "Number", False],
     ]
     # 控制组：无列表输入的普通 API 不误标
     assert out["relu_types"] == [["features", "Tensor", False], ["name", "Number", False]]
+    # OpDef 判型：input_arg 张量、attr 非张量，类型取 OpDef attr.type
+    assert out["d2d_types"] == [
+        ["input", "Tensor", False],
+        ["filter", "Tensor", False],
+        ["out_backprop", "Tensor", False],
+        ["strides", "list of Numbers", False],
+        ["rates", "list of Numbers", False],
+        ["padding", "str", False],
+        ["name", "Number", False],
+    ]
+    assert out["approx_types"] == [
+        ["x", "Tensor", False],
+        ["y", "Tensor", False],
+        ["tolerance", "float", False],
+        ["name", "Number", False],
+    ]
     # kernel 别名写注册表：InplaceAdd 的 x 在 OpDef 里 is_ref=False，注册表补 mutable
     assert out["inplaceadd"] == [
         ["x", True, False],

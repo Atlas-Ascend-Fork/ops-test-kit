@@ -46,7 +46,7 @@ from ttk.utilities.dtypes import resolve_numpy_dtypes
 
 from ..common.backend import get_backend
 from ..common.comparison.batch_consistency import assemble_batch_summary
-from ..common.comparison.resolve import needs_promote_golden, resolve_tolerance
+from ..common.comparison.resolve import PROMOTE_GOLDEN_TOKENS, resolve_tolerance, should_promote_golden
 from ..common.invoke import golden_mode
 from ..common.logging import build_single_log_dir, default_logging_config
 from ..common.plugin import SpecResolver
@@ -656,17 +656,24 @@ def _needs_golden_promote(testcase, switches):
     if switches.golden_mode in ("XPU", "NPU"):
         return False
     output_dtypes = resolve_numpy_dtypes(getattr(testcase, "flat_output_dtypes", ()) or ())
-    if not output_dtypes:
-        return False
     try:
+        tol = SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_tolerance()
+        if not output_dtypes:
+            # e2e CSV 常不声明输出槽（flat_output_dtypes 为空）：与 _cross_check_token 同口径，
+            # 以 Spec 容差声明的 dtype 档为锚点；无档可锚时回落 CLI --compare。
+            # golden 不升档时三方与 golden 同为 fp32，cross_check 的 rmse 分母恒 0。
+            if isinstance(tol, dict) and tol:
+                output_dtypes = tuple(str(k) for k in tol)
+            else:
+                return str(getattr(switches, "compare_method", None) or "").lower() in PROMOTE_GOLDEN_TOKENS
         standards = resolve_tolerance(
-            SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_tolerance(),
+            tol,
             testcase.flat_precision_tolerances,
             testcase.flat_absolute_precision,
             output_dtypes,
             switches.compare_method,
         )
-        return needs_promote_golden(standards)
+        return should_promote_golden(standards, switches.golden_mode)
     except (KeyError, TypeError, ValueError):
         # 只兜 tolerance spec 配置类错误(字段缺失/类型不对/取值非法)。
         # 用 warning 而非 debug:此处静默跳过 Promote 正是本函数要修的症状
@@ -1153,11 +1160,14 @@ def _cross_check_token(ctx) -> bool:
         # 任一 dtype 声明 cross_check 即预派发取数（多输出无害，漏传恒 GOLDEN_FAILURE)。
         try:
             tol = SpecResolver(ctx.testcase.api_name, "e2e", ctx.switches.plugin_path).resolve_tolerance()
-        except Exception:  # noqa: BLE001 容差解析失败（无插件/配置错）回退 False
-            return False
-        return any(
+        except Exception:  # noqa: BLE001 容差解析失败（无插件/配置错）视为未声明
+            tol = None
+        if any(
             isinstance(v, dict) and str(v.get("standard", "")).lower() == "cross_check" for v in (tol or {}).values()
-        )
+        ):
+            return True
+        # 无档可锚时回落 CLI --compare：判据由 CLI 路由，漏派三方则恒 GOLDEN_FAILURE。
+        return str(getattr(ctx.switches, "compare_method", None) or "").lower() == "cross_check"
     try:
         standards = resolve_tolerance(
             SpecResolver(ctx.testcase.api_name, "e2e", ctx.switches.plugin_path).resolve_tolerance(),

@@ -301,8 +301,8 @@ def _generate_input(context: TestcaseKernel, switches, process_ctx, manual_case,
 
 
 def _resolve_tolerance(context: TestcaseKernel):
-    from ..common.comparison.resolve import needs_promote_golden as _needs_promote_golden
     from ..common.comparison.resolve import resolve_tolerance as _resolve_tolerance
+    from ..common.comparison.resolve import should_promote_golden
 
     switches = get_global_storage()
     try:
@@ -324,11 +324,8 @@ def _resolve_tolerance(context: TestcaseKernel):
             input_dtypes=input_dtypes,
         )
         need_3party = any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为比对标准名，非口令
-        # cross_check（三方）与 mixed/mix_tolerance（单标杆，2.3 更高精度标杆）均要求 golden
-        # 升精度；golden_mode=XPU 与 Promote 互斥（golden 由三方执行产出）；
-        # NPU 同样互斥（golden 在 NPU 原生 dtype 上执行，无 CPU 抬精度语义）；
-        # Disable 是显式豁免（golden 不生成），升精度无从谈起，不得覆盖
-        if _needs_promote_golden(standards) and switches.golden_mode not in ("XPU", "Disable", "NPU"):
+        # cross_check（三方）与 mixed/mix_tolerance（单标杆，2.3 更高精度标杆）均要求 golden 升精度
+        if should_promote_golden(standards, switches.golden_mode):
             context.golden_mode_override = "Promote"
         return SimpleNamespace(
             tolerance=tolerance,

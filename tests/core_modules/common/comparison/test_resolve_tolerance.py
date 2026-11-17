@@ -190,6 +190,20 @@ def test_needs_promote_golden_routes():
     assert needs_promote_golden(resolve_tolerance(None, None, None, ["int32", "float32"], None)) is True
 
 
+# —— should_promote_golden（判据与 golden_mode 豁免的联合判定，各通路共用）——
+def test_should_promote_golden_exempt_modes():
+    """XPU/Disable/NPU 与 Promote 互斥；Enable/Promote 正常升精度。"""
+    from ttk.core_modules.common.comparison.resolve import should_promote_golden
+
+    promote_standards = resolve_tolerance(None, None, None, ["float32"], None)  # 默认 mix_tolerance
+    plain_standards = resolve_tolerance(None, None, None, ["int32"], None)  # binary_equal
+    for mode in ("XPU", "Disable", "NPU"):
+        assert should_promote_golden(promote_standards, mode) is False
+    for mode in ("Enable", "Promote"):
+        assert should_promote_golden(promote_standards, mode) is True
+    assert should_promote_golden(plain_standards, "Enable") is False
+
+
 def test_unknown_token_fails_at_resolve():
     """Spec standard 拼写错误在 resolve 期报错（早于 NPU 执行/golden 生成），非比对期。"""
     import pytest

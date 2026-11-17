@@ -69,12 +69,13 @@ def _is_tf_api(api_name) -> bool:
 
 
 def _is_tensor_param(p: inspect.Parameter, api_name: str) -> bool:
-    """判 TF 参数是否张量，按注解/名字/raw_ops 约定/位置序判定：
+    """判 TF 参数是否张量，按注解/名字/OpDef 元数据/位置序判定：
 
     1. 注解是 tf.Tensor/tf.Variable（含子类）→ 张量；
     2. 注解是标量 dtype 名（int/float/bool/str/dtype）→ 非张量；
     3. 参数名在已知非张量名单（name 等）→ 非张量；
-    4. tf.raw_ops.* 约定：除 name 外全部按张量；
+    4. tf.raw_ops.*：按 OpDef 判型（_opdef_param_role），OpDef 缺档时回落
+       全判张量的旧约定；
     5. 剩余（无注解/其他注解）：位置或关键字参数按张量。
     """
     import tensorflow as tf
@@ -92,6 +93,9 @@ def _is_tensor_param(p: inspect.Parameter, api_name: str) -> bool:
         return False
     if p.name in _TF_NON_TENSOR_PARAM_NAMES:
         return False
+    role, attr_type = _opdef_param_role(api_name, p.name)
+    if role is not None:
+        return role == "input_arg" or attr_type in ("tensor", "list(tensor)")
     if api_name.startswith(("tf.raw_ops.", "tensorflow.raw_ops.")):
         return True
     return p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY)
@@ -101,6 +105,9 @@ def _infer_param_type(p: inspect.Parameter, api_name: str) -> str:
     """Infer type string for a TF op parameter."""
     if _is_tensor_param(p, api_name):
         return "Tensor"
+    opdef_type = _opdef_attr_type(api_name, p.name)
+    if opdef_type is not None:
+        return opdef_type
     ann = p.annotation
     if ann is inspect.Parameter.empty:
         return "Number"
@@ -203,6 +210,56 @@ def _lookup_op_def(api_name):
     except Exception:
         return None
     return op_def
+
+
+def _opdef_param_role(api_name, param_name):
+    """raw_ops 参数在 OpDef 中的归类，判型与类型推断共用（标量 attr
+    误判张量会以 index:null 槽进入三方 schema）。
+
+    Returns:
+        ("input_arg", None)         — 输入张量位
+        ("attr", <OpDef attr.type>) — 属性位
+        (None, None)                — 非 raw_ops / OpDef 缺档 / 未命中（如 name）
+    """
+    if not api_name.startswith(("tf.raw_ops.", "tensorflow.raw_ops.")):
+        return None, None
+    op_def = _lookup_op_def(api_name)
+    if op_def is None:
+        return None, None
+    if any(a.name == param_name for a in op_def.input_arg):
+        return "input_arg", None
+    attr = next((a for a in op_def.attr if a.name == param_name), None)
+    return ("attr", attr.type) if attr is not None else (None, None)
+
+
+# OpDef attr.type → ParamInfo.type。raw_ops 签名无注解，attr 类型取自 OpDef，
+# 供 CSV 属性值按型转换（_coerce_value）：str/float/int 直接转，含 list/tuple
+# 的类型名对序列值透传。tensor/list(tensor) 不在此表（判型归张量）。
+_TF_OPDEF_ATTR_TYPE_MAP = {
+    "float": "float",
+    "int": "int",
+    "num": "int",
+    "bool": "bool",
+    "string": "str",
+    "type": "str",
+    "shape": "tuple of ints",
+    "func": "str",
+    "list(int)": "list of Numbers",
+    "list(float)": "list of Numbers",
+    "list(bool)": "list of Numbers",
+    "list(string)": "list of strs",
+    "list(type)": "list of strs",
+    "list(shape)": "list of tuples",
+    "list(func)": "list of strs",
+}
+
+
+def _opdef_attr_type(api_name, param_name):
+    """raw_ops attr 参数的类型名；非 attr 位/OpDef 缺档返回 None（调用方回落注解推断）。"""
+    role, attr_type = _opdef_param_role(api_name, param_name)
+    if role != "attr":
+        return None
+    return _TF_OPDEF_ATTR_TYPE_MAP.get(attr_type, "str")
 
 
 def _is_mutable_input_arg(arg):

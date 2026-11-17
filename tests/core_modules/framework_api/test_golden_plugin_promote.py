@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------
-"""e2e 插件 golden Promote 升精度单测（numpy 载体；torch 分支在 CI 环境经
+"""e2e 插件 golden Promote 升精度单测（numpy/tf 载体；torch 分支在 CI 环境经
 test_golden_generation 的集成用例覆盖）。
 """
 
@@ -92,3 +92,43 @@ class TestPromotedGoldenInputs:
         tensors = [np.array([1, 2], dtype=np.int32)]
         case = _make_testcase(tensors, ["int32"])
         assert _promoted_golden_inputs(case, SimpleNamespace(golden_mode="Promote")) is None
+
+
+class TestTfTensorPromote:
+    """tf EagerTensor 载体：tf.cast 升精度、失败原样回落。"""
+
+    def test_tf_eager_tensor_promoted_by_cast(self):
+        import tensorflow as tf
+
+        from ttk.core_modules.framework_api.golden import _promote_tensor_value
+
+        t = tf.constant([1.5, 2.5], dtype=tf.float32)
+        promoted = _promote_tensor_value(t, "float64", "float32")
+        assert promoted.dtype == tf.float64
+        np.testing.assert_allclose(promoted.numpy(), [1.5, 2.5])
+        assert t.dtype == tf.float32
+
+    def test_tf_variable_promote_keeps_carrier(self):
+        """tf.Variable 升精度须保持 Variable 载体：handle 转换/回读按 isinstance 定位，
+        cast 产物降级为普通 Tensor 会使 mutable 位静默失效。"""
+        import tensorflow as tf
+
+        from ttk.core_modules.framework_api.golden import _promote_tensor_value
+
+        v = tf.Variable([1.5, 2.5], dtype=tf.float32)
+        promoted = _promote_tensor_value(v, "float64", "float32")
+        assert isinstance(promoted, tf.Variable)
+        assert promoted.dtype == tf.float64
+        np.testing.assert_allclose(promoted.numpy(), [1.5, 2.5])
+
+    def test_tf_degrade_paths_keep_original(self):
+        """目标 dtype 不可解析、resource/variant 不可 cast（getter 抛 KeyError、
+        cast 抛 OpError）均告警后原样回落。"""
+        import tensorflow as tf
+
+        from ttk.core_modules.framework_api.golden import _promote_tensor_value
+
+        t = tf.constant([1.5], dtype=tf.float32)
+        assert _promote_tensor_value(t, "no_such_dtype_xyz", "float32") is t
+        handle = tf.raw_ops.VarHandleOp(dtype=tf.float32, shape=[])
+        assert _promote_tensor_value(handle, "float64", "resource") is handle
