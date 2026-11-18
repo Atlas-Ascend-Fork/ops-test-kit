@@ -371,6 +371,8 @@ NPU 与 third_party 或 golden 任一方一致即通过（NaN/±Inf 同值亦算
 
 > [!NOTE]
 > `cross_check` 仅支持 `float16` / `bfloat16` / `float32`。
+>
+> 逐槽路由：Spec 把不支持的 dtype 声明为 `cross_check` 在解析期报错（声明错误不静默掩盖）；`--compare cross_check` 只覆盖受支持的浮点槽，其余槽（FP8/`float64`/整型等）保留 Spec 声明或 dtype 默认判据——混合输出可实现"FP8 常规判据 + FP32 scale 三方"。判据不适用某槽时会输出 WARNING 并回落该槽判据（每槽实际判据见 compare metrics 的 standard）。
 
 ### 使用方式
 
@@ -403,14 +405,14 @@ python3 -m ttk kernel -i cases.csv --compare cross_check --config ttk.conf.yaml 
 每个输出的比对方法按以下优先级决定：
 
 ```
-1. CLI --compare 参数（最高优先级）
+1. CLI --compare 参数（最高优先级；仅覆盖判据适用的 dtype 槽）
 2. Spec.tolerance[dtype].standard（需 --plugin）
 3. dtype 自动切换规则
 4. mixed（默认）
 ```
 
 > [!IMPORTANT]
-> dtype 限制：整型/布尔、`float4`/`float8_e8m0` 强制 `binary`；complex 只接受 `binary`/`close`；`hifloat8` 只接受 `binary`/`requant`。`--compare` 仅对浮点类型无条件生效。
+> dtype 限制：整型/布尔、`float4`/`float8_e8m0` 强制 `binary`；complex 只接受 `binary`/`close`；`hifloat8` 只接受 `binary`/`requant`。`--compare` 对浮点类型逐槽生效：`cross_check` 仅覆盖 `float16`/`bfloat16`/`float32` 槽，其余浮点槽（FP8/`float64` 等）保留 Spec 声明或 dtype 默认判据。
 
 `quant` 只能经 Spec 声明；声明后 `--compare binary`/`requant` 可覆盖，其余浮点判据不覆盖。
 

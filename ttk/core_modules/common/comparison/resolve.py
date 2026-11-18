@@ -7,11 +7,14 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
 from ....utilities.dtypes import dtype_to_name, is_float_dtype
 from .registry import _TOKEN_MODULES, ComparisonRegister
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -83,6 +86,14 @@ _QUANT_OUT_DTYPES = {"int4", "int8", "uint8"}
 # 其余取值均为浮点判据，对量化整型无意义，不参与覆盖。
 _INT_APPLICABLE_TOKENS = {"bin", "binary", "binary_equal", "requant", "quant"}
 
+# CLI 判据的适用 dtype 集，键为 --compare 取值；未登记的判据不限制 dtype。
+# 只约束 CLI 来源（_choice_from_sources）：判据不适用当前 dtype 的输出槽时，
+# 该槽视同 CLI 未指定，回落 Spec 声明或 dtype 默认。Spec 声明不查这张表，
+# dtype 不合法由参数解析器报错。cross_check 的适用集与 SMALL_VALUE 键一致。
+_CLI_APPLICABLE_DTYPES = {
+    "cross_check": frozenset(SMALL_VALUE),  # 三方比对仅支持 fp16/bf16/fp32
+}
+
 
 def _spec_standard(tolerance, dtype_str):
     """取 Spec.tolerance 为该 dtype 显式声明的标准名；未声明返回 None。"""
@@ -122,9 +133,23 @@ def _check_quant_applicable(dtype_str, input_dtypes):
 
 
 def _choice_from_sources(tolerance: Optional[dict], dtype_str: str, compare_method: Optional[str]) -> Optional[str]:
-    """来源轴：CLI > Spec.tolerance.standard，均未声明返回 None（不掺默认——默认属 dtype 轴）。"""
+    """来源轴：CLI > Spec.tolerance.standard，均未声明返回 None（不掺默认——默认属 dtype 轴）。
+
+    CLI 判据不适用当前 dtype（_CLI_APPLICABLE_DTYPES 登记且不含该 dtype）时，
+    该槽视同 CLI 未指定，回落 Spec 声明或 dtype 默认；未登记的判据不限制。"""
     if compare_method:  # a) CLI 显式指定
-        return compare_method.lower()
+        cli = compare_method.lower()
+        applicable = _CLI_APPLICABLE_DTYPES.get(cli)
+        if applicable is not None and dtype_str not in applicable:
+            _log.warning(
+                "--compare [%s] does not apply to output dtype [%s]: slot treated as "
+                "CLI-unspecified, falling back to the Spec declaration or the dtype default",
+                cli,
+                dtype_str,
+            )
+            cli = None  # 本槽不适用：视同 CLI 未指定，回落 Spec → dtype 默认
+        if cli:
+            return cli
     if tolerance and dtype_str in tolerance:  # b) Spec 配了该 dtype
         std = tolerance[dtype_str].get("standard")
         if std:
@@ -156,7 +181,10 @@ def _route(dtype_str, spec_std, tolerance, compare_method, input_dtypes) -> str:
     升格例外：Spec 显式声明 quant——量化语义声明突破整数类别强制（算子作者
     最清楚输出是量化值），经 _check_quant_applicable 校验前提后生效；CLI 仅
     【整数适用】取值（bin/binary/binary_equal/requant/quant）可覆盖，其余浮点
-    判据对量化整型无意义、不连带覆盖。"""
+    判据对量化整型无意义、不连带覆盖。
+
+    CLI 判据的逐槽适用性在 _choice_from_sources 中过滤，不适用时该槽回落
+    Spec 声明或 dtype 默认。"""
     if spec_std == "quant":
         _check_quant_applicable(dtype_str, input_dtypes)
         cli = (compare_method or "").lower()

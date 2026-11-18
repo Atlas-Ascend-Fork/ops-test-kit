@@ -302,9 +302,85 @@ def test_requant_spec_ptol_passthrough():
     from ttk.core_modules.common.comparison.resolve import resolve_tolerance
 
     stds = resolve_tolerance({"hifloat8": {"standard": "requant", "ptol": 0.05}}, None, None, ["hifloat8"], None)
-    assert stds[0].token == "requant"  # noqa: S105 token 为比对标准名，非口令
+    assert stds[0].token == "requant"  # noqa: S105 token 为精度标准名，非凭据
     assert stds[0].params["ptol"] == 0.05
 
     # 不配置时无 ptol 键 → 判据侧按 dtype 分档默认（fp8 家族 0.001）
     stds = resolve_tolerance({"hifloat8": {"standard": "requant"}}, None, None, ["hifloat8"], None)
     assert "ptol" not in stds[0].params
+
+
+# —— CLI 逐槽适用性：--compare 只覆盖判据适用的 dtype 槽（FP8/float64 回落 Spec/默认）——
+def test_cli_cross_check_fp8_falls_back_to_dtype_default():
+    """CLI cross_check 不适用 FP8 槽：回落 dtype 默认 mix_tolerance，不再解析期报错。"""
+    assert _tokens(resolve_tolerance(None, None, None, ["float8_e5m2"], "cross_check")) == ["mix_tolerance"]
+    assert _tokens(resolve_tolerance(None, None, None, ["float8_e4m3fn"], "cross_check")) == ["mix_tolerance"]
+
+
+def test_cli_cross_check_float64_falls_back_to_dtype_default():
+    """float64 与 FP8 同缺口：CLI cross_check 同样回落（表外浮点默认 mix_tolerance）。"""
+    assert _tokens(resolve_tolerance(None, None, None, ["float64"], "cross_check")) == ["mix_tolerance"]
+
+
+def test_cli_cross_check_fp8_falls_back_to_spec_declaration():
+    """CLI 不适用时优先回落 Spec 声明：合法 Spec 判据保留。"""
+    spec = {"float8_e5m2": {"standard": "stat_rel_err"}}
+    assert _tokens(resolve_tolerance(spec, None, None, ["float8_e5m2"], "cross_check")) == ["stat_rel_err"]
+
+
+def test_cli_cross_check_mixed_outputs_per_slot_routing():
+    """混合输出逐槽路由（moe_init_routing_v3 场景）：FP8 常规判据、整数 binary、
+    FP32 scale 三方——Spec 声明的 cross_check 参数（level=L2）保留。"""
+    spec = {"float32": {"standard": "stat_rel_err", "level": "L2"}}
+    rs = resolve_tolerance(spec, None, None, ["float8_e5m2", "int32", "int64", "float32"], "cross_check")
+    assert _tokens(rs) == ["mix_tolerance", "binary_equal", "binary_equal", "cross_check"]
+    assert rs[3].params["level"] == "L2"
+
+
+def test_cli_cross_check_pure_supported_floats_all_slots():
+    """纯受支持浮点输出：CLI cross_check 全槽生效（原行为不变）。"""
+    rs = resolve_tolerance(None, None, None, ["float16", "bfloat16", "float32"], "cross_check")
+    assert _tokens(rs) == ["cross_check"] * 3
+
+
+def test_cli_cross_check_int_and_quant_slots_unchanged():
+    """整数/量化槽不受 CLI cross_check 连带（沿用整数适用保护语义）。"""
+    rs = resolve_tolerance(
+        {"int8": {"standard": "quant"}}, None, None, ["int8", "int32"], "cross_check", input_dtypes=["float16"]
+    )
+    assert _tokens(rs) == ["quant", "binary_equal"]
+
+
+def test_cli_cross_check_mapped_category_falls_back_to_spec_declaration():
+    """complex 槽 CLI cross_check 不适用时回落 Spec 声明（binary → binary_equal）。"""
+    spec = {"complex64": {"standard": "binary"}}
+    assert _tokens(resolve_tolerance(spec, None, None, ["complex64"], "cross_check")) == ["binary_equal"]
+
+
+def test_spec_cross_check_on_fp8_still_raises():
+    """Spec 显式把 FP8 声明为 cross_check：声明错误仍硬校验报错（不静默掩盖）。"""
+    import pytest
+
+    with pytest.raises(ValueError, match="unsupported dtype"):
+        resolve_tolerance({"float8_e5m2": {"standard": "cross_check"}}, None, None, ["float8_e5m2"], None)
+
+
+def test_cli_cross_check_inapplicable_slot_warns(caplog):
+    """CLI 判据不适用的槽逐槽 WARNING，标出哪个输出槽回落了。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="ttk.core_modules.common.comparison.resolve"):
+        rs = resolve_tolerance(None, None, None, ["float8_e5m2", "int32"], "cross_check")
+    assert _tokens(rs) == ["mix_tolerance", "binary_equal"]
+    assert "float8_e5m2" in caplog.text
+    assert "int32" in caplog.text
+
+
+def test_cli_cross_check_applicable_slot_no_warn(caplog):
+    """适用槽（float32 落 cross_check）不告警，不适用槽（float8_e5m2）告警。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="ttk.core_modules.common.comparison.resolve"):
+        resolve_tolerance(None, None, None, ["float8_e5m2", "float32"], "cross_check")
+    assert "float8_e5m2" in caplog.text
+    assert "float32" not in caplog.text
