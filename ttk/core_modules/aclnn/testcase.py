@@ -101,6 +101,7 @@ class TestcaseAclnn(ApiTestcaseBase):
         "_scalar_data_ranges",
         "_output_dtypes",
         "_output_view_shapes",
+        "_flat_output_tensor_indexes",
         "_output_view_offsets",
         "_output_view_strides",
         "_output_storage_shapes",
@@ -214,6 +215,7 @@ class TestcaseAclnn(ApiTestcaseBase):
         self._scalar_data_ranges = None
         self._output_dtypes: Optional[tuple] = None
         self._output_view_shapes: Optional[tuple] = None
+        self._flat_output_tensor_indexes: Optional[tuple] = None
         self._output_view_offsets: Optional[tuple] = None
         self._output_view_strides: Optional[tuple] = None
         self._output_storage_shapes: Optional[tuple] = None
@@ -379,6 +381,20 @@ class TestcaseAclnn(ApiTestcaseBase):
             return self.output_storage_shapes
         odist = self.output_dist
         return flatten_by_distribution(self.output_storage_shapes, odist) if odist else self.output_storage_shapes
+
+    @property
+    def flat_output_tensor_indexes(self) -> tuple:
+        """输出槽展开为逐 tensor 的 flat 索引（TensorList 槽随 tensor_list_dist 前缀和展开）。"""
+        if self._flat_output_tensor_indexes is None:
+            dist = self.tensor_list_dist
+            result = []
+            for idx in self.output_tensor_indexes:
+                flat_idx = self.flat_index_of(idx)
+                num = dist[idx] if idx < len(dist) and dist[idx] > 0 else 0
+                count = max(num, 1)
+                result.extend(range(flat_idx, flat_idx + count))
+            self._flat_output_tensor_indexes = tuple(result)
+        return self._flat_output_tensor_indexes
 
     @property
     def actual_scalar_data_ranges(self):

@@ -123,21 +123,26 @@ class GoldenGenerator:
     def gen(self, dev_id=None):
         if golden_mode(self._ctx, self._switch) == "Disable":
             golden_arrays = ("SUPPRESSED",)
+            count = len(self._ctx.flat_output_tensor_indexes)
         elif self._ctx.manual_golden_binaries:
             golden_arrays = self._load_golden_from_file()
+            # 手动 golden 整槽单文件声明，保持槽位语义
+            count = len(self._ctx.output_tensor_indexes)
         elif golden_mode(self._ctx, self._switch) == "NPU":
             if dev_id is None:
                 # 无锁上下文（延迟形态）：golden_tensors 留空，由调用方后续回填
                 golden_arrays = []
+                count = len(self._ctx.output_tensor_indexes)
             else:
                 self.gen_npu(dev_id)
                 return
         else:
             golden_arrays = self._generate_golden()
+            count = len(self._ctx.flat_output_tensor_indexes)
 
         # golden_arrays now is flatten.
         # maybe torch or numpy arrays.
-        self._ctx.golden_tensors = golden_arrays[: len(self._ctx.output_tensor_indexes)]
+        self._ctx.golden_tensors = golden_arrays[:count]
 
     def _load_golden_from_file(self):
         """manual_golden_binaries：按 CSV 声明的文件路径装载 golden。

@@ -151,8 +151,7 @@ class Phase1ParamBuilder:
 
     def copy_output_from_hbm(self) -> list:
         output_byte_arrays = []
-        for nested_idx in self._ctx.output_tensor_indexes:
-            flat_idx = self._ctx.flat_index_of(nested_idx)
+        for flat_idx in self._ctx.flat_output_tensor_indexes:
             acl_tensor: ctypes.c_void_p = self._flatten_acl_tensor[flat_idx]
             tensor = self._ctx.flat_tensors[flat_idx]
             if acl_tensor is None:
@@ -190,8 +189,7 @@ class Phase1ParamBuilder:
 
     def collect_output_view_shapes(self) -> list:
         output_view_shapes = []
-        for nested_idx in self._ctx.output_tensor_indexes:
-            flat_idx = self._ctx.flat_index_of(nested_idx)
+        for flat_idx in self._ctx.flat_output_tensor_indexes:
             acl_tensor: ctypes.c_void_p = self._flatten_acl_tensor[flat_idx]
             if acl_tensor is None:
                 output_view_shapes.append(None)
@@ -366,8 +364,8 @@ class AclOpExecutor:
         return results
 
     def _acl_sequence(self, stream: Optional[ctypes.c_void_p] = None, skip_profiler: bool = False):
-        output_byte_arrays = ["NO_OUTPUT"] * len(self._ctx.output_tensor_indexes)
-        output_view_shapes = ["NO_OUTPUT"] * len(self._ctx.output_tensor_indexes)
+        output_byte_arrays = ["NO_OUTPUT"] * len(self._ctx.flat_output_tensor_indexes)
+        output_view_shapes = ["NO_OUTPUT"] * len(self._ctx.flat_output_tensor_indexes)
         status = "NOK"
         deterministic = self._deterministic_level > 0
         md5_list = []
