@@ -151,29 +151,54 @@ def test_needs_promote_routes_by_standard_token(token, expected):
 
 
 @pytest.mark.parametrize(
-    ("spec_tolerance", "std_token", "expected"),
+    ("spec_tolerance", "method", "expected", "anchor_dtypes"),
     [
-        pytest.param(None, None, False, id="no_spec_tolerance"),
-        pytest.param({"float32": {"standard": "close"}}, "close", False, id="spec_close"),
+        pytest.param(None, None, False, None, id="no_spec_tolerance"),
         pytest.param(
-            {"float32": {"standard": "cross_check", "level": "L1"}}, "cross_check", True, id="spec_cross_check"
+            {
+                "float16": {"rtol": 0.005, "ptol": 0.005, "atol": 2.5e-05},
+                "bfloat16": {"rtol": 0.0078125, "ptol": 0.005, "atol": 0.0001},
+            },
+            None,
+            False,
+            None,
+            id="bare_thresholds",
         ),
+        pytest.param({"float32": {"standard": "stat_rel_err"}}, None, False, None, id="spec_stat_rel_err"),
+        pytest.param({"float32": {"standard": "close"}}, None, False, None, id="spec_close"),
+        pytest.param(
+            {"float32": {"standard": "cross_check", "level": "L1"}},
+            None,
+            True,
+            ("float32",),
+            id="spec_cross_check",
+        ),
+        pytest.param({"bfloat16": {"standard": "mix_tolerance"}}, None, True, ("bfloat16",), id="spec_mix_tolerance"),
+        pytest.param(
+            {"float16": {"rtol": 0.005}, "float32": {"standard": "cross_check"}},
+            None,
+            True,
+            ("float32",),
+            id="anchor_skips_bare_threshold",
+        ),
+        pytest.param({"float32": {"standard": "cross_check"}}, "mixed", True, None, id="cli_mixed_wins"),
     ],
 )
-def test_needs_promote_undeclared_output_dtypes(spec_tolerance, std_token, expected):
-    """CSV 未声明输出 dtype：按 Spec 容差档回退做锚点（与 _cross_check_token 同口径），
-    容差缺档（None/非 dict）时不升精度。"""
+def test_needs_promote_undeclared_output_dtypes(spec_tolerance, method, expected, anchor_dtypes):
+    """未声明输出 dtype：Spec 显式判据档为锚点；裸阈值档与非 promote 族不升档。"""
     seen = {}
 
     def _capture(tolerance, precisions, absolutes, dtypes, method):
         seen["dtypes"] = tuple(str(d) for d in dtypes)
-        return [_standard(std_token)]
+        return [_standard("cross_check")]
 
     with patch.object(_worker, "SpecResolver") as _sr, patch.object(_worker, "resolve_tolerance", side_effect=_capture):
         _sr.return_value.resolve_tolerance.return_value = spec_tolerance
-        assert needs_golden_promote(_Testcase(flat_output_dtypes=None), _Switches()) is expected
-    if spec_tolerance:
-        assert seen["dtypes"] == ("float32",)
+        switches = _Switches()
+        switches.compare_method = method
+        assert needs_golden_promote(_Testcase(flat_output_dtypes=None), switches) is expected
+    if anchor_dtypes is not None:
+        assert seen["dtypes"] == anchor_dtypes
 
 
 @pytest.mark.parametrize(
@@ -189,7 +214,7 @@ def test_needs_promote_undeclared_output_dtypes(spec_tolerance, std_token, expec
     ],
 )
 def test_needs_promote_cli_fallback_when_outputs_undeclared(method, expected):
-    """未声明输出档且无 Spec 容差时，升档由 CLI --compare 是否属 promote 档决定。"""
+    """未声明输出档时，升档由 CLI --compare 是否属 promote 档决定。"""
     with patch.object(_worker, "SpecResolver") as _sr:
         _sr.return_value.resolve_tolerance.return_value = None
         switches = _Switches()

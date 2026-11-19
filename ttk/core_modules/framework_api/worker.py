@@ -649,23 +649,33 @@ def _run_profile_multi_device(
         _read_worker_results(testcase, switches, tmp_dir, result_path, return_struct)
 
 
+def _explicit_promote_slots(tol):
+    """Spec.tolerance 中显式声明升档判据（standard ∈ PROMOTE_GOLDEN_TOKENS）的 dtype 档。"""
+    return tuple(
+        str(k)
+        for k, v in (tol or {}).items()
+        if isinstance(v, dict) and str(v.get("standard") or "").lower() in PROMOTE_GOLDEN_TOKENS
+    )
+
+
 def _needs_golden_promote(testcase, switches):
     """cross_check/mix_tolerance 判据要求 golden 升精度（标杆须高于被测 dtype）。
 
-    锚点 = CSV 声明输出 dtype；golden_mode=XPU/NPU 与升精度互斥。"""
+    锚点 = CSV 声明输出 dtype；未声明时回退 CLI --compare 显式取值与 Spec 显式
+    判据档，纯阈值档不触发；golden_mode=XPU/NPU 与升精度互斥。"""
     if switches.golden_mode in ("XPU", "NPU"):
         return False
     output_dtypes = resolve_numpy_dtypes(getattr(testcase, "flat_output_dtypes", ()) or ())
     try:
         tol = SpecResolver(testcase.api_name, "e2e", switches.plugin_path).resolve_tolerance()
         if not output_dtypes:
-            # e2e CSV 常不声明输出槽（flat_output_dtypes 为空）：与 _cross_check_token 同口径，
-            # 以 Spec 容差声明的 dtype 档为锚点；无档可锚时回落 CLI --compare。
-            # golden 不升档时三方与 golden 同为 fp32，cross_check 的 rmse 分母恒 0。
-            if isinstance(tol, dict) and tol:
-                output_dtypes = tuple(str(k) for k in tol)
-            else:
-                return str(getattr(switches, "compare_method", None) or "").lower() in PROMOTE_GOLDEN_TOKENS
+            # 未声明输出槽：CLI --compare 命中 promote 档即升档；否则以 Spec 显式
+            # 声明升档判据的 dtype 档为锚点，无显式判据档不升档。
+            if str(getattr(switches, "compare_method", None) or "").lower() in PROMOTE_GOLDEN_TOKENS:
+                return True
+            output_dtypes = _explicit_promote_slots(tol)
+            if not output_dtypes:
+                return False
         standards = resolve_tolerance(
             tol,
             testcase.flat_precision_tolerances,
