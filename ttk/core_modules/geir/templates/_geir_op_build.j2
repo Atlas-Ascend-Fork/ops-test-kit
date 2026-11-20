@@ -1,0 +1,173 @@
+{# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+   This program is free software, you can redistribute it and/or modify it under
+   the terms and conditions of CANN Open Software License Agreement Version 2.0
+   (the "License"). Please refer to the License for details. You may not use this
+   file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON AN
+   "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR
+   A PARTICULAR PURPOSE. See LICENSE in the root of the software repository for the
+   full text of the License. #}
+    // ---------- operator ----------
+    auto op_inst = op::{{ op_class }}("op1");
+
+{% set attr_cfg = "attrs_cfg" %}
+{% set attr_recv = "op_inst" %}
+{% include "_geir_attr_setters.j2" %}
+
+    // ---------- data nodes + connect inputs (setter names baked in, data from config) ----------
+    size_t input_index = 0;
+{% for inp_name in input_names %}
+    {
+        int idx = {{ loop.index0 }};
+{% if inp_name in dynamic_input_names %}
+        if (idx < (int)inputs_cfg.size() && !inputs_cfg.at(idx).isNull()) {
+            // DYNAMIC_INPUT(TensorList)变参口:create_dynamic_input_byindex_X(n, input_index) + 逐槽 set_dynamic_input_X(i, data)
+            // index 参数是展平端口起始位置,必须累积前序输入的端口数,而非 IR 声明序号。
+            // 用 loop.index0(IR 序号)会导致第二个变参口的起始端口与前一个重叠。
+            const JsonValue& inp = inputs_cfg.at(idx);
+            int dyn_n = (int)inp.at("count").getInt();
+            op_inst.create_dynamic_input_byindex_{{ inp_name }}(dyn_n, input_index);
+            input_index += (size_t)dyn_n;
+            for (int ei = 0; ei < dyn_n; ++ei) {
+                const JsonValue& el = inp.at("elements").at(ei);
+                int data_idx = (int)el.at("data_idx").getInt();
+                vector<int64_t> data_shape = JsonToIntArray(el.at("data_shape"));
+                vector<int64_t> desc_shape = JsonToIntArray(el.at("desc_shape"));
+                DataType dt  = StringToDataType(el.at("dtype").getString());
+                Format   fmt = StringToFormat(el.at("format").getString());
+                Format   ori_fmt = StringToFormat(el.at("ori_format").getString());
+                TensorDesc desc(Shape(desc_shape), fmt, dt);
+                desc.SetOriginFormat(ori_fmt);
+                if (el.at("ori_shape").type == JsonValue::Array) {
+                    desc.SetOriginShape(Shape(JsonToIntArray(el.at("ori_shape"))));
+                }
+                Tensor tensor;
+                string path = string(input_prefix) + "_" + to_string(data_idx) + ".bin";
+                if (LoadInputFromFile(path, dt, data_shape, tensor) != SUCCESS) {
+                    finalize_all();
+                    return FAILED;
+                }
+                auto data = op::Data("placeholder_dyn" + to_string(idx) + "_" + to_string(ei)).set_attr_index(0);
+                data.update_input_desc_x(desc);
+                data.update_output_desc_y(desc);
+                graph.AddOp(data);
+                data_ops.push_back(data);
+                input_tensors.push_back(tensor);
+                op_inst.set_dynamic_input_{{ inp_name }}(ei, data_ops.back());
+            }
+        }
+{% else %}
+        if (idx < (int)inputs_cfg.size() && !inputs_cfg.at(idx).isNull()) {
+            const JsonValue& inp = inputs_cfg.at(idx);
+
+            bool is_const     = inp.at("is_const").getBool();
+            int data_idx      = (int)inp.at("data_idx").getInt();
+            vector<int64_t> data_shape = JsonToIntArray(inp.at("data_shape"));
+            vector<int64_t> desc_shape = JsonToIntArray(inp.at("desc_shape"));
+            DataType   dt     = StringToDataType(inp.at("dtype").getString());
+            Format     fmt    = StringToFormat(inp.at("format").getString());
+            Format     ori_fmt = StringToFormat(inp.at("ori_format").getString());
+
+            TensorDesc desc(Shape(desc_shape), fmt, dt);
+            desc.SetOriginFormat(ori_fmt);
+            if (inp.at("ori_shape").type == JsonValue::Array) {
+                desc.SetOriginShape(Shape(JsonToIntArray(inp.at("ori_shape"))));
+            }
+
+            Tensor tensor;
+            if (input_prefix) {
+                string path = string(input_prefix) + "_" + to_string(data_idx) + ".bin";
+                if (LoadInputFromFile(path, dt, data_shape, tensor) != SUCCESS) {
+                    finalize_all();
+                    return FAILED;
+                }
+            } else {
+                fprintf(stderr, "[TTK-GEIR] No input file prefix provided\n");
+                finalize_all();
+                return FAILED;
+            }
+
+            if (is_const) {
+                auto data = op::Const("placeholder" + to_string(idx));
+                desc.SetPlacement(kPlacementHost);
+                data.SetAttr("value", tensor);
+                data.update_output_desc_y(desc);
+                graph.AddOp(data);
+                data_ops.push_back(data);
+            } else {
+                auto data = op::Data("placeholder" + to_string(idx)).set_attr_index(0);
+                data.update_input_desc_x(desc);
+                data.update_output_desc_y(desc);
+                graph.AddOp(data);
+                data_ops.push_back(data);
+                input_tensors.push_back(tensor);
+            }
+
+            op_inst.update_input_desc_{{ inp_name }}(desc);
+            op_inst.set_input_{{ inp_name }}(data_ops.back());
+        }
+        input_index += 1;
+{% endif %}
+    }
+{% endfor %}
+
+    // ---------- output descs (setter names baked in, data from config) ----------
+{% for out_name in output_names %}
+    {
+        int idx = {{ loop.index0 }};
+        if (idx < (int)outputs_cfg.size() && !outputs_cfg.at(idx).isNull()) {
+{% if out_name in dynamic_output_names %}
+            const JsonValue& out = outputs_cfg.at(idx);
+            int dyn_n = (int)out.at("count").getInt();
+            op_inst.create_dynamic_output_{{ out_name }}(dyn_n);
+            for (int ei = 0; ei < dyn_n; ++ei) {
+                const JsonValue& el = out.at("elements").at(ei);
+                vector<int64_t> desc_shape = JsonToIntArray(el.at("desc_shape"));
+                DataType   dt     = StringToDataType(el.at("dtype").getString());
+                Format     fmt    = StringToFormat(el.at("format").getString());
+                Format     ori_fmt = StringToFormat(el.at("ori_format").getString());
+
+                TensorDesc desc(Shape(desc_shape), fmt, dt);
+                desc.SetOriginFormat(ori_fmt);
+                if (el.at("ori_shape").type == JsonValue::Array) {
+                    desc.SetOriginShape(Shape(JsonToIntArray(el.at("ori_shape"))));
+                }
+                op_inst.update_dynamic_output_desc_{{ out_name }}(ei, desc);
+            }
+{% else %}
+            const JsonValue& out = outputs_cfg.at(idx);
+
+            vector<int64_t> desc_shape = JsonToIntArray(out.at("desc_shape"));
+            DataType   dt     = StringToDataType(out.at("dtype").getString());
+            Format     fmt    = StringToFormat(out.at("format").getString());
+            Format     ori_fmt = StringToFormat(out.at("ori_format").getString());
+
+            TensorDesc desc(Shape(desc_shape), fmt, dt);
+            desc.SetOriginFormat(ori_fmt);
+            if (out.at("ori_shape").type == JsonValue::Array) {
+                desc.SetOriginShape(Shape(JsonToIntArray(out.at("ori_shape"))));
+            }
+            op_inst.update_output_desc_{{ out_name }}(desc);
+{% endif %}
+        }
+    }
+{% endfor %}
+
+    // ---------- graph outputs ----------
+{% if output_names %}
+    output_ops.push_back(op_inst);
+{% endif %}
+    if (output_ops.empty()) {
+        output_ops.push_back(op_inst);
+    }
+    if (data_ops.empty()) {
+        graph.SetInputs({op_inst}).SetOutputs(output_ops);
+    } else {
+        graph.SetInputs(data_ops).SetOutputs(output_ops);
+    }
+
+{# eol padding: renders to nothing. Keeps exactly one trailing newline (end-of-file-fixer
+   contract) while preserving the blank line this partial contributes before the base
+   template's session section -- jinja's keep_trailing_newline=False strips only the
+   final newline, so the literal blank line above survives. Byte-identity gate:
+   tests/core_modules/geir/test_geir_templates.py. #}

@@ -100,12 +100,18 @@ def _transform_single_to_ori(context, arr, nested_ori, group_idx, sub_idx):
 def _override_inputs_from_attributes(context: TestcaseKernel):
     if not context.attributes:
         return
-    op_info = OpInfoKeeper().info_of(context.op_name)
-    if not op_info:
-        return
-    input_names = [inp["name"] for inp in op_info["inputs"]]
-    attr_inputs = adapt_pickup_by_names(context.spec_tensors, tuple(input_names))
     dist = context.input_distribution or ()
+    if getattr(context, "_resolved_graph", None):
+        # 图模式复用单算子覆盖链：图输入名即 dN 槽（spec_tensors 中的 dN 同名
+        # 定值由校验期解析并入），锚点 op_info 不适用
+        input_names = tuple(f"d{i}" for i in range(len(context.input_arrays or ())))
+        attr_inputs = context.spec_tensors
+    else:
+        op_info = OpInfoKeeper().info_of(context.op_name)
+        if not op_info:
+            return
+        input_names = tuple(inp["name"] for inp in op_info["inputs"])
+        attr_inputs = adapt_pickup_by_names(context.spec_tensors, input_names)
 
     nested_arrays = list(context.input_arrays)
     nested_ori_arrays = list(context.original_input_arrays) if context.original_input_arrays else None

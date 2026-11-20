@@ -1,0 +1,223 @@
+{# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+   This program is free software, you can redistribute it and/or modify it under
+   the terms and conditions of CANN Open Software License Agreement Version 2.0
+   (the "License"). Please refer to the License for details. You may not use this
+   file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON AN
+   "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR
+   A PARTICULAR PURPOSE. See LICENSE in the root of the software repository for the
+   full text of the License. #}
+{# ----------------------------------------------------------------------------
+ Graph-mode build section (design 9.1/9.2): the only newly authored part of
+ the GEIR graph template. Everything else comes from the shared skeleton.
+
+ Consumed base context: nodes (render-time: per-node op_class / port names /
+ attr_entries) + main() locals (config / inputs_cfg / outputs_cfg / graph /
+ input_tensors / output_tensors / data_ops / output_ops / input_prefix /
+ finalize_all).
+
+ Structure:
+   1. N heterogeneous operator instances (op_class baked per node) + ops
+   2. per-node: dynamic port expansion (create_dynamic_input_byindex /
+      create_dynamic_output, setter names baked per combo) + attr setter
+      block (shared _geir_attr_setters partial, per-node node_attrs / op_i)
+   3. dN input nodes (Data/Const by const_slots; flat slot table)
+   4. runtime edge wiring (dst-key -> src; setter args chosen at runtime:
+      Data/Const handles, upstream operator output port names, dynamic-port
+      element flat indices -- the SetInput family is the same underlying
+      channel the generated setters delegate to, see operator_reg.h macros)
+   5. graph outputs by refs (SetOutputs with flat indices; out_idx is
+      precomputed in Python by declaration-order expansion)
+---------------------------------------------------------------------------- #}
+    // ---------- graph mode: N operators (op_class baked per node) ----------
+    // op_<i>: typed instances (derived-class methods: create_dynamic_input_byindex_x /
+    // set_attr_x etc., setter names baked per combo); ops: base-class handle vector
+    // for generic wiring (Operator::SetInput / UpdateXxxDesc -- the same underlying
+    // channel the generated setters delegate to).
+    const JsonValue& nodes_cfg = config.at("nodes");
+    const JsonValue& edges_cfg = config.at("edges");
+    vector<Operator> ops;
+{% for node in nodes %}
+    auto op_{{ node.idx }} = op::{{ node.op_class }}("o{{ node.idx }}");
+    ops.push_back(op_{{ node.idx }});
+{% endfor %}
+
+    // ---------- per-node: dynamic port expansion + attr setters ----------
+{% for node in nodes %}
+    {
+        const JsonValue& node_cfg = nodes_cfg.at({{ node.idx }});
+        const JsonValue& node_attrs = node_cfg.at("attrs");
+        const JsonValue& node_dyn_in = node_cfg.at("dyn_in_counts");
+        const JsonValue& node_dyn_out = node_cfg.at("dyn_out_counts");
+        int in_flat = 0;  // 展平输入端口游标（create_dynamic_input_byindex 起始位）
+{% for inp_name in node.input_names %}
+{% if inp_name in node.dynamic_input_names %}
+        {
+            // DYNAMIC_INPUT {{ inp_name }}: element count from config (indices contiguous from 0)
+            int dyn_n = (int)node_dyn_in.at("{{ inp_name }}").getInt();
+            op_{{ node.idx }}.create_dynamic_input_byindex_{{ inp_name }}(dyn_n, in_flat);
+            in_flat += dyn_n;
+        }
+{% else %}
+        in_flat += 1;
+{% endif %}
+{% endfor %}
+{% for out_name in node.output_names %}
+{% if out_name in node.dynamic_output_names %}
+        {
+            // DYNAMIC_OUTPUT {{ out_name }}: count from config (referenced + contiguous)
+            int dyn_out_n = (int)node_dyn_out.at("{{ out_name }}").getInt();
+            op_{{ node.idx }}.create_dynamic_output_{{ out_name }}(dyn_out_n);
+        }
+{% endif %}
+{% endfor %}
+{% set attr_entries = node.attr_entries %}
+{% set attr_cfg = "node_attrs" %}
+{% set attr_recv = "op_" ~ node.idx %}
+{% include "_geir_attr_setters.j2" %}
+    }
+{% endfor %}
+
+    // ---------- dN input nodes (Data/Const by const_slots; flat slot table) ----------
+    for (size_t di = 0; di < inputs_cfg.size(); ++di) {
+        const JsonValue& inp = inputs_cfg.at(di);
+        if (inp.isNull()) continue;
+        int data_idx = (int)inp.at("data_idx").getInt();
+        vector<int64_t> data_shape = JsonToIntArray(inp.at("data_shape"));
+        vector<int64_t> desc_shape = JsonToIntArray(inp.at("desc_shape"));
+        DataType   dt     = StringToDataType(inp.at("dtype").getString());
+        Format     fmt    = StringToFormat(inp.at("format").getString());
+        Format     ori_fmt = StringToFormat(inp.at("ori_format").getString());
+
+        TensorDesc desc(Shape(desc_shape), fmt, dt);
+        desc.SetOriginFormat(ori_fmt);
+        if (inp.at("ori_shape").type == JsonValue::Array) {
+            desc.SetOriginShape(Shape(JsonToIntArray(inp.at("ori_shape"))));
+        }
+
+        Tensor tensor;
+        string path = string(input_prefix) + "_" + to_string(data_idx) + ".bin";
+        if (LoadInputFromFile(path, dt, data_shape, tensor) != SUCCESS) {
+            finalize_all();
+            return FAILED;
+        }
+
+        if (inp.at("is_const").getBool()) {
+            auto cdata = op::Const("d" + to_string(data_idx));
+            desc.SetPlacement(kPlacementHost);
+            cdata.SetAttr("value", tensor);
+            cdata.update_output_desc_y(desc);
+            graph.AddOp(cdata);
+            data_ops.push_back(cdata);
+        } else {
+            auto data = op::Data("d" + to_string(data_idx)).set_attr_index(0);
+            data.update_input_desc_x(desc);
+            data.update_output_desc_y(desc);
+            graph.AddOp(data);
+            data_ops.push_back(data);
+            input_tensors.push_back(tensor);
+        }
+    }
+
+    // ---------- runtime edge wiring (dst-key -> src; setter args chosen at runtime) ----------
+    // dst-slot uniqueness and full required-port coverage are validated up front: an
+    // unmatched dst can only be an OPTIONAL_INPUT default (legal, not wired).
+    // Intermediate node output descs stay undeclared: dtype/shape are derived by
+    // GE via InferShape/InferDataType callbacks (design sec.6 -- the fusion
+    // pass infershape joins the real chain). SetInput/UpdateXxxDesc use the
+    // public const char_t* forms (std::string twins are protected/deprecated).
+    for (size_t ei = 0; ei < edges_cfg.size(); ++ei) {
+        const JsonValue& e = edges_cfg.at(ei);
+        const JsonValue& src = e.at("src");
+        const JsonValue& dst = e.at("dst");
+        Operator& dst_op = ops[(size_t)dst.at("idx").getInt()];
+        const string dst_port = dst.at("port").getString();
+        bool dst_dyn = (dst.at("elem").type == JsonValue::Int);
+        if (src.at("kind").getString() == "d") {
+            // Data/Const 源（dN 唯一输出）
+            const JsonValue& slot = inputs_cfg.at((size_t)src.at("idx").getInt());
+            TensorDesc desc(Shape(JsonToIntArray(slot.at("desc_shape"))),
+                            StringToFormat(slot.at("format").getString()),
+                            StringToDataType(slot.at("dtype").getString()));
+            desc.SetOriginFormat(StringToFormat(slot.at("ori_format").getString()));
+            if (slot.at("ori_shape").type == JsonValue::Array) {
+                desc.SetOriginShape(Shape(JsonToIntArray(slot.at("ori_shape"))));
+            }
+            Operator& src_op = data_ops[(size_t)src.at("idx").getInt()];
+            if (dst_dyn) {
+                uint32_t dst_elem = (uint32_t)dst.at("elem").getInt();
+                dst_op.SetInput(dst_port.c_str(), dst_elem, src_op);
+                dst_op.UpdateDynamicInputDesc(dst_port.c_str(), dst_elem, desc);
+            } else {
+                dst_op.SetInput(dst_port.c_str(), src_op);
+                dst_op.UpdateInputDesc(dst_port.c_str(), desc);
+            }
+        } else if (src.at("elem").type == JsonValue::Int) {
+            // 动态输出口元素源：平铺输出序（out_idx 由 Python 按声明序展开预计算）
+            Operator& src_op = ops[(size_t)src.at("idx").getInt()];
+            uint32_t src_out_idx = (uint32_t)src.at("out_idx").getInt();
+            if (dst_dyn) {
+                dst_op.SetInput((uint32_t)dst.at("in_idx").getInt(), src_op, src_out_idx);
+            } else {
+                dst_op.SetInput(dst_port.c_str(), src_op, src_out_idx);
+            }
+        } else {
+            // 固定输出口源：端口名字符串形态（零索引歧义）
+            Operator& src_op = ops[(size_t)src.at("idx").getInt()];
+            const string& src_port = src.at("port").getString();
+            if (dst_dyn) {
+                dst_op.SetInput(dst_port.c_str(), (uint32_t)dst.at("elem").getInt(), src_op, src_port.c_str());
+            } else {
+                dst_op.SetInput(dst_port.c_str(), src_op, src_port.c_str());
+            }
+        }
+    }
+
+    // ---------- graph wiring: SetInputs BEFORE SetOutputs ----------
+    // Graph::SetInputs "triggers the internal graph build" (graph.h comment):
+    // the order must match the single-op template (inputs first, outputs after).
+    // The reverse order drops the output anchors during the internal rebuild
+    // (observed as zero outputs).
+    if (!data_ops.empty()) {
+        graph.SetInputs(data_ops);
+    }
+    // ---------- graph outputs by refs (order = output frame order) ----------
+    // Uniform (Operator, vector<size_t>) flat-index form (graph.h: the output
+    // index is the node's Nth output; container order = graph output order).
+    // out_idx is precomputed in Python by declaration-order expansion (fixed
+    // port +1, dynamic port + element count); covers fixed and dynamic refs.
+    // Note: the (Operator, AscendString/string) port-name form produced zero
+    // outputs on this CANN 9.x host, so it is not used. Output ports are
+    // updated with declared descs (fixed: DT_UNDEFINED to trigger
+    // InferDataType; dynamic: declared dtype -- same philosophy as single-op).
+    for (size_t oi = 0; oi < outputs_cfg.size(); ++oi) {
+        const JsonValue& out = outputs_cfg.at(oi);
+        const JsonValue& ref = out.at("ref");
+        Operator& out_op = ops[(size_t)ref.at("idx").getInt()];
+        const string ref_port = ref.at("port").getString();
+        vector<int64_t> desc_shape = JsonToIntArray(out.at("desc_shape"));
+        DataType   dt     = StringToDataType(out.at("dtype").getString());
+        Format     fmt    = StringToFormat(out.at("format").getString());
+        Format     ori_fmt = StringToFormat(out.at("ori_format").getString());
+
+        TensorDesc desc(Shape(desc_shape), fmt, dt);
+        desc.SetOriginFormat(ori_fmt);
+        if (out.at("ori_shape").type == JsonValue::Array) {
+            desc.SetOriginShape(Shape(JsonToIntArray(out.at("ori_shape"))));
+        }
+        if (ref.at("elem").type == JsonValue::Int) {
+            out_op.UpdateDynamicOutputDesc(ref_port.c_str(), (uint32_t)ref.at("elem").getInt(), desc);
+        } else {
+            out_op.UpdateOutputDesc(ref_port.c_str(), desc);
+        }
+    }
+    vector<pair<Operator, vector<size_t>>> ttk_out_idx;
+    for (size_t oi = 0; oi < outputs_cfg.size(); ++oi) {
+        const JsonValue& ref = outputs_cfg.at(oi).at("ref");
+        ttk_out_idx.push_back({ops[(size_t)ref.at("idx").getInt()],
+                               {(size_t)ref.at("out_idx").getInt()}});
+    }
+    graph.SetOutputs(ttk_out_idx);
+
+{# eol padding: renders to nothing; preserves the blank line before the base template's
+   session section (see _geir_op_build.j2 for the same keep_trailing_newline contract). #}

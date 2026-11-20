@@ -71,3 +71,11 @@ geir_add_01,add,"((128,1024),(1,1024))","('float32','float32')","((128,-1),(1,10
 python3 -m ttk geir -i cases.csv --validate
 python3 -m ttk list -i cases.csv
 ```
+
+## 图融合Pass
+
+`graph_ops` 列非空即图模式（多算子 DAG 建图），用于验证融合 Pass 触发与数值等价。三列全部可选：`graph_ops`（节点列表，拓扑序）、`graph_edges`（连线）、`graph_outputs`（图输出引用，缺省 = 末节点全部输出）。其余列在图模式下的填写规则：输入列为 **dN 扁平序**（禁 TensorList 嵌套）、`attributes` 为嵌套格式（顶层键 `oN`；值内 proto ATTR 名 = 节点属性、输入口名 = 常量定值烤 Const）、`output_shapes` 必须显式声明。Type/DataType 族属性**值形态即存储形态**：字符串值（`'int32'`/`'DT_INT32'`）→ ge::DataType 存储；整数值（GE 枚举裸数，如 `3`）→ int64 存储，同一部署下不可互换，错配以 E29999/E89999 报错。
+
+边引用格式：`dN`（图输入槽，唯一输出）/ `oN:port`（固定口）/ `oN:port:K`（动态口第 K 元素，从 0 连续）。`graph_edges` 留空仅限单节点图（必选口按声明序接 d0,d1,…），多节点须显式写边。
+
+校验规则速查、`attributes` 嵌套格式与图模式 golden 插件写法见 `docs/reference/geir_graph_mode.md`；示例见 `examples/case_store/geir/graph_cases.csv`。golden 插件按一锚一图硬编码整图语义（同一 `op_name` 不对应不同连线，不同连线各起锚点独立注册）。校验用 `python3 -m ttk geir -i <csv> --validate`（全静态）。

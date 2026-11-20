@@ -1,6 +1,6 @@
 ---
 name: ttk-how-write-case
-description: 编写测试用例。只要用户提到写用例、生成 CSV、构造测试数据，或问"shape 怎么填"、"dtype 怎么写"、"CSV 格式报错"、"用例怎么构造"、"TensorList 怎么表达"，就必须使用此 skill。涵盖 Kernel、GEIR、ACLNN、E2E 四种模式的用例编写。
+description: 编写测试用例。只要用户提到写用例、生成 CSV、构造测试数据，或问"shape 怎么填"、"dtype 怎么写"、"CSV 格式报错"、"用例怎么构造"、"TensorList 怎么表达"、"图模式怎么写"、"graph_ops/graph_edges 怎么填"，就必须使用此 skill。涵盖 Kernel、GEIR（含图融合Pass）、ACLNN、E2E 四种模式的用例编写。
 ---
 
 # 编写 CSV 测试用例

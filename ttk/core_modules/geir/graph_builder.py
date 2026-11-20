@@ -14,6 +14,7 @@ Op-level template: one CPP per operator (cached), per-case data (shapes,
 dtypes, formats, attrs) written as JSON config and read at runtime.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -93,6 +94,7 @@ _FORMAT_TO_GE_ENUM = {
     "NDHWC": "FORMAT_NDHWC",
     "NCDHW": "FORMAT_NCDHW",
     "NDC1HWC0": "FORMAT_NDC1HWC0",
+    "NCL": "FORMAT_NCL",
 }
 
 _PROTO_ATTR_TYPE_TO_CPP = {
@@ -126,7 +128,16 @@ def _render_template(name: str, **ctx) -> str:
     return tpl.render(**ctx)
 
 
+_GE_ENUM_NAMES = frozenset(_DTYPE_TO_GE_ENUM.values()) | {"DT_UNDEFINED"}
+
+
 def _resolve_dtype(dtype_str: str) -> str:
+    """dtype 声明 → GE 枚举名：友好名查表，GE 枚举名（DT_*）直通；未知回落 DT_FLOAT。
+
+    直通校验集合与 C++ 模板 dtype_map 同源（_DTYPE_TO_GE_ENUM.values() 渲染）。
+    """
+    if dtype_str.startswith("DT_") and dtype_str in _GE_ENUM_NAMES:
+        return dtype_str
     return _DTYPE_TO_GE_ENUM.get(dtype_str, "DT_FLOAT")
 
 
@@ -153,7 +164,7 @@ def _attr_value_to_json(v):
 def _core_limit_options(core_limit) -> dict:
     """--core-limit (N|A,V) → GE Option 条目（ge.aicoreNum / ge.vectorcoreNum）。
 
-    空侧出空串条目——C++ 模板按空串跳过（与 compile_dynamic_mode 同协议），
+    空侧出空串条目，C++ 模板按空串跳过（与 compile_dynamic_mode 同协议），
     保持 build_options 键集稳定。
     """
     ai_limit = vec_limit = ""
@@ -367,7 +378,7 @@ def _build_dynamic_output_group(
     dynamic_input_groups,
 ):
     """DYNAMIC_OUTPUT(TensorList)端口：逐元素 desc。dtype 落 CSV 声明的
-    output_dtypes（嵌套/广播解析，与输入组同款）——update_dynamic_output_desc
+    output_dtypes（嵌套/广播解析，与输入组同款）：update_dynamic_output_desc
     对部分算子（如 Split）不接受 DT_UNDEFINED（E39999），且变参口无
     InferDataType 推导路径可言，声明值即权威。"""
     count = len(output_shapes[i])
@@ -532,11 +543,14 @@ def _build_ge_build_options(switches, is_dynamic, is_binary):
         ge_deterministic_level = "1"
     return {
         "ge.jit_compile": jit_compile,
+        # 融合统计落盘开关（FusionStatisticWriter）：fusion_result.json 落 serve CWD，
+        # execute_graph 内快照采集
+        "ge.exportCompileStat": "1",
         "ge.compile_dynamic_mode": compile_dynamic_mode,
         "ge.deterministicLevel": ge_deterministic_level,
         "ge.deterministic": "1" if ge_deterministic_level == "1" else "0",
         # --core-limit 经 GE Option 下发（ai→ge.aicoreNum，vec→ge.vectorcoreNum；
-        # 空串条目由 C++ 模板侧跳过——与 compile_dynamic_mode 同协议）
+        # 空串条目由 C++ 模板侧跳过，与 compile_dynamic_mode 同协议）
         **_core_limit_options(getattr(switches, "core_limit", None)),
     }
 
@@ -557,8 +571,162 @@ def _shape_unknown_indexes(testcase):
     )
 
 
+# ---- 图模式 helper ----
+
+
+_SIG_HASH_LEN = 16
+
+
+def graph_signature(ops) -> str:
+    """节点组合签名 = 编译缓存键（graph__ 前缀做命名空间隔离）。
+
+    长度前缀编码（f"{len(op)}_{op}"）对组合唯一，op 名含 "__" 亦无歧义；
+    签名超过文件名单文件 255 字节预算（255 - ".cpp"）时截断可读前缀并
+    追加组合摘要，不同组合不碰撞（日志中保留完整组合）。
+    """
+    ops = tuple(ops)
+    prefix = GeirGraphBuilder.GRAPH_SIG_PREFIX + "".join(f"{len(op)}_{op}" for op in ops)
+    budget = 255 - len(".cpp")
+    if len(prefix) <= budget:
+        return prefix
+    digest = hashlib.md5(prefix.encode("utf-8")).hexdigest()[:_SIG_HASH_LEN]  # noqa: S324  # 缓存键去歧义，非安全用途
+    return prefix[: budget - (_SIG_HASH_LEN + 1)] + "_" + digest
+
+
+def _flat_port_base(port_names, dynamic_ports, dyn_counts):
+    """端口名 → 平铺序基址（声明序遍历：固定口 +1，动态口 +元素数）。
+
+    输入侧与 create_dynamic_input_byindex 的 index 语义一致（既有单算子模板
+    注释：展平端口起始位置 = 累积前序输入的端口数）；输出侧对称采用。
+    动态口元素 k 的平铺索引 = base[port] + k。
+    """
+    base = {}
+    counter = 0
+    dynamic = set(dynamic_ports or [])
+    for port in port_names:
+        base[port] = counter
+        counter += dyn_counts.get(port, 1) if port in dynamic else 1
+    return base
+
+
+def _serialize_ref(ref, out_idx=None, in_idx=None):
+    """GraphRef → config JSON 结构化四元组（ref 字符串文法只存在于 CSV 层）。"""
+    entry = {"kind": ref.kind, "idx": ref.idx, "port": ref.port, "elem": ref.elem}
+    if out_idx is not None:
+        entry["out_idx"] = out_idx
+    if in_idx is not None:
+        entry["in_idx"] = in_idx
+    return entry
+
+
+def _build_flat_inputs_json(testcase, is_dynamic):
+    """图模式 inputs 段：dN 扁平槽表（无端口名/无 TensorList 组，接线归 edges）。
+
+    ``is_const`` 按图输入名（dN）对 ``spec_tensors`` 同名判断：嵌套 attributes
+    中与节点输入口名同名的定值经校验解析为 dN 键并入 spec_tensors；
+    GEIR_CONST_FEED 进程级全量 Const 调试开关不参与图模式 Const 决策。
+    """
+    input_shapes = testcase.input_shapes or ()
+    input_dtypes = testcase.input_dtypes
+    input_formats = getattr(testcase, "input_formats", None) or ()
+    input_ori_formats = getattr(testcase, "input_ori_formats", None) or ()
+    input_ori_shapes = getattr(testcase, "input_ori_shapes", None) or ()
+    dyn_input_shapes = getattr(testcase, "dyn_input_shapes", None)
+    spec_keys = getattr(testcase, "spec_tensors", None) or {}
+
+    inputs_json = []
+    for i, shape in enumerate(input_shapes):
+        data_shape = list(shape)
+        dtype_str = _dtype_at(input_dtypes, i)
+        fmt_str = _fmt_at(input_formats, i)
+        ori_fmt_str = _fmt_at(input_ori_formats, i)
+        desc_shape = _resolve_desc_shape(data_shape, dyn_input_shapes, i, is_dynamic)
+        ori_shape = (
+            desc_shape
+            if is_dynamic
+            else (
+                list(input_ori_shapes[i])
+                if isinstance(input_ori_shapes, (list, tuple))
+                and i < len(input_ori_shapes)
+                and input_ori_shapes[i] is not None
+                else data_shape
+            )
+        )
+        inputs_json.append(
+            {
+                "data_idx": i,
+                "is_const": f"d{i}" in spec_keys,
+                "data_shape": data_shape,
+                "desc_shape": desc_shape,
+                "dtype": _resolve_dtype(dtype_str),
+                "format": _resolve_format(fmt_str),
+                "ori_format": _resolve_format(ori_fmt_str),
+                "ori_shape": ori_shape,
+            }
+        )
+    return inputs_json
+
+
+def _build_graph_outputs_json(testcase, resolved, protos, is_dynamic):
+    """图模式 outputs 段：仅图级输出，每项带 ref + out_idx。
+
+    desc 哲学与单算子一致：固定口 dtype 置 DT_UNDEFINED（触发算子 InferDataType
+    回调推导）；动态口元素落 CSV 声明 dtype（变参口无 InferDataType 推导路径，
+    声明值即权威，Split E39999 历史教训）。
+    """
+    outputs_json = []
+    for k, ref in enumerate(resolved["outputs"]):
+        proto = protos[ref.idx]
+        is_dyn_port = ref.port in (proto.dynamic_outputs or [])
+        out_base = _flat_port_base(proto.outputs, proto.dynamic_outputs, resolved["dyn_out_counts"].get(ref.idx, {}))
+        out_idx = out_base.get(ref.port, 0) + (ref.elem or 0)
+        shape = testcase.output_shapes[k]
+        out_data_shape = list(shape)
+        out_desc_shape = [-1 for _ in out_data_shape] if is_dynamic else out_data_shape
+        fmt_str = _fmt_at(getattr(testcase, "output_formats", None), k)
+        ori_fmt_str = _fmt_at(getattr(testcase, "output_ori_formats", None), k)
+        ori_shapes = getattr(testcase, "output_ori_shapes", None)
+        ori_shape = (
+            out_desc_shape
+            if is_dynamic
+            else (
+                list(ori_shapes[k])
+                if isinstance(ori_shapes, (list, tuple)) and k < len(ori_shapes) and ori_shapes[k] is not None
+                else out_data_shape
+            )
+        )
+        outputs_json.append(
+            {
+                "ref": _serialize_ref(ref, out_idx=out_idx),
+                "data_shape": out_data_shape,
+                "desc_shape": out_desc_shape,
+                "dtype": _resolve_dtype(_dtype_at(testcase.output_dtypes, k)) if is_dyn_port else "DT_UNDEFINED",
+                "format": _resolve_format(fmt_str),
+                "ori_format": _resolve_format(ori_fmt_str),
+                "ori_shape": ori_shape,
+            }
+        )
+    return outputs_json
+
+
 class GeirGraphBuilder:
-    """Generate op-level C++ source and per-case JSON config for GEIR tests."""
+    """Generate op-level C++ source and per-case JSON config for GEIR tests.
+
+    图模式（融合 Pass 测试）两个并列方法：
+
+    - ``generate_graph_source(ops)``：按节点组合渲染 geir_graph_template.cpp.j2，
+      组合签名作编译缓存键（``graph__{op0__op1}``），同一组合一份二进制，
+      服务不同连线的 N 份 config（拓扑不烘焙，接线归 edges 运行期查表）
+    - ``write_graph_case_config(tc)``：per-case graph JSON（nodes/edges 段 +
+      dN 扁平 inputs 段 + 带 ref 的 outputs 段）
+
+    模块级纯函数（dtype 映射、``_build_attrs_json``、``_build_ge_build_options``
+    等）单算子/图模式直接共享；单算子既有两方法不动。
+    """
+
+    # 图模式源文件/二进制命名前缀：与单算子 op_name 命名空间隔离（防与名字含
+    # "__" 的真实算子撞缓存），签名仍是 ops 的纯函数
+    GRAPH_SIG_PREFIX = "graph__"
 
     def __init__(self, switches):
         self._switches = switches
@@ -598,8 +766,8 @@ class GeirGraphBuilder:
                 continue
             if attr_name[0] in ("!", "#", "@"):
                 continue
-            cpp_type = _PROTO_ATTR_TYPE_TO_CPP.get(proto_type, "")
-            if not cpp_type:
+            cpp_type = _PROTO_ATTR_TYPE_TO_CPP.get(proto_type)
+            if cpp_type is None:
                 raise RuntimeError(
                     f"Unsupported proto attr type '{proto_type}' for attr '{attr_name}' "
                     f"on operator '{proto_info.op_class}'"
@@ -771,4 +939,167 @@ class GeirGraphBuilder:
             json.dump(config, f, indent=2)
 
         logging.info("Generated GEIR case config: %s", config_path)
+        return config_path
+
+    # ══════════════════════════════════════════════════════════════════
+    # 图模式（融合 Pass 测试）：generate_graph_source / write_graph_case_config
+    # ══════════════════════════════════════════════════════════════════
+
+    def _resolve_graph_protos(self, ops):
+        """逐节点重查 proto（worker 进程内 ProtoLoader Singleton；_resolved_graph
+        只存纯数据不随 pickle 携带 OpProtoInfo）。缺失返回 None。"""
+        protos = []
+        for i, op in enumerate(ops):
+            proto = self._proto_loader.get_op_info(op)
+            if proto is None:
+                logging.error(
+                    "No op IR (REG_OP) found for graph node %d operator '%s' in the "
+                    "op_proto headers; GEIR graph cannot be built for it.",
+                    i,
+                    op,
+                )
+                return None
+            protos.append(proto)
+        return protos
+
+    def generate_graph_source(self, ops, mode="const", work_dir: str = None) -> Optional[str]:
+        """图模式 C++ 源码（按节点组合渲染，组合签名缓存）。Returns file path.
+
+        拓扑不烘焙：setter 名按组合烘焙（per-node 由 proto 生成），实参运行期
+        从 config 的 edges 查表选，同一组合签名服务不同连线。
+        """
+        self._compute_dirs(mode, work_dir)
+
+        protos = self._resolve_graph_protos(ops)
+        if protos is None:
+            return None
+
+        nodes_ctx = []
+        proto_files = []
+        for i, proto in enumerate(protos):
+            nodes_ctx.append(
+                {
+                    "idx": i,
+                    "op_class": proto.op_class,
+                    "proto_file": proto.proto_file,
+                    "input_names": proto.inputs[:],
+                    "dynamic_input_names": (proto.dynamic_inputs or []),
+                    "output_names": proto.outputs[:],
+                    "dynamic_output_names": (proto.dynamic_outputs or []),
+                    "attr_entries": self._build_attr_entries(proto),
+                }
+            )
+            if proto.proto_file not in proto_files:
+                proto_files.append(proto.proto_file)
+
+        from .compiler import detect_cann_features
+
+        features = detect_cann_features()
+        ge_enums = features["ge_enums"] if features else None
+        dtype_map = [("DT_UNDEFINED", "DT_UNDEFINED")] + [
+            (v, v) for v in _DTYPE_TO_GE_ENUM.values() if ge_enums is None or v in ge_enums
+        ]
+        dtype_size_cases = [(e, s) for e, s in _DTYPE_SIZE_BY_ENUM.items() if ge_enums is None or e in ge_enums]
+        packed_float4_enums = [e for e in _PACKED_FLOAT4_ENUMS if ge_enums is None or e in ge_enums]
+
+        source = _render_template(
+            "geir_graph_template.cpp.j2",
+            proto_files=proto_files,
+            nodes=nodes_ctx,
+            dtype_map=dtype_map,
+            format_map=[(v, v) for v in _FORMAT_TO_GE_ENUM.values()],
+            dtype_size_cases=dtype_size_cases,
+            packed_float4_enums=packed_float4_enums,
+            ge_prof_ok=(features["ge_prof_ok"] if features else True),
+        )
+
+        sig = graph_signature(ops)
+        source_path = os.path.join(self._op_dir, f"{sig}.cpp")
+        if os.path.isfile(source_path):
+            try:
+                with open(source_path, encoding="utf-8") as f:
+                    if f.read() == source:
+                        logging.info("GEIR graph source unchanged: %s", source_path)
+                        return source_path
+            except OSError:
+                pass
+        with open(source_path, "w", encoding="utf-8") as f:
+            f.write(source)
+        logging.info("Generated GEIR graph source: %s", source_path)
+        return source_path
+
+    def write_graph_case_config(self, testcase, mode="const", work_dir: str = None) -> Optional[str]:
+        """图模式 per-case JSON config（nodes/edges/inputs/outputs 段）。"""
+        resolved = getattr(testcase, "_resolved_graph", None)
+        if not resolved:
+            raise RuntimeError(
+                f"[{testcase.testcase_name}] write_graph_case_config requires a resolved graph "
+                "(graph-mode case must pass validate_graph_case first)"
+            )
+        if work_dir:
+            self._work_dir = work_dir
+        if not self._work_dir:
+            self._compute_dirs(mode)
+
+        protos = self._resolve_graph_protos(resolved["ops"])
+        if protos is None:
+            return None
+
+        is_dynamic = mode.startswith("dynamic")
+        is_binary = "binary" in mode
+
+        # ---- inputs：dN 扁平槽表 ----
+        inputs_json = _build_flat_inputs_json(testcase, is_dynamic)
+
+        # ---- outputs：图级输出（带 ref + out_idx）----
+        outputs_json = _build_graph_outputs_json(testcase, resolved, protos, is_dynamic)
+
+        # ---- nodes：逐节点 attrs（值）+ 动态口元素数 ----
+        nodes_json = []
+        for i, proto in enumerate(protos):
+            node_attrs = resolved["node_attrs"].get(i) or {}
+            nodes_json.append(
+                {
+                    "op_class": proto.op_class,
+                    "attrs": _build_attrs_json(node_attrs, proto, proto.inputs),
+                    "dyn_in_counts": resolved["dyn_in_counts"].get(i, {}),
+                    "dyn_out_counts": resolved["dyn_out_counts"].get(i, {}),
+                }
+            )
+
+        # ---- edges：结构化边表（src 预计算平铺输出序，dst 预计算平铺输入序）----
+        edges_json = []
+        for src, dst in resolved["edges"]:
+            if src.kind == "d":
+                src_entry = _serialize_ref(src, out_idx=0)  # Data/Const 唯一输出
+            else:
+                src_proto = protos[src.idx]
+                src_base = _flat_port_base(
+                    src_proto.outputs, src_proto.dynamic_outputs, resolved["dyn_out_counts"].get(src.idx, {})
+                )
+                src_entry = _serialize_ref(src, out_idx=src_base.get(src.port, 0) + (src.elem or 0))
+            dst_proto = protos[dst.idx]
+            dst_base = _flat_port_base(
+                dst_proto.inputs, dst_proto.dynamic_inputs, resolved["dyn_in_counts"].get(dst.idx, {})
+            )
+            dst_entry = _serialize_ref(dst, in_idx=dst_base.get(dst.port, 0) + (dst.elem or 0))
+            edges_json.append({"src": src_entry, "dst": dst_entry})
+
+        # ---- build options ----
+        build_options = _build_ge_build_options(self._switches, is_dynamic, is_binary)
+
+        config = {
+            "inputs": inputs_json,
+            "outputs": outputs_json,
+            "nodes": nodes_json,
+            "edges": edges_json,
+            "build_options": build_options,
+            "shape_unknown_indexes": _shape_unknown_indexes(testcase),
+        }
+
+        config_path = os.path.join(self._work_dir, f"{testcase.testcase_name}.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
+        logging.info("Generated GEIR graph case config: %s", config_path)
         return config_path

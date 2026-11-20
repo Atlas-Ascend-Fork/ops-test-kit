@@ -249,8 +249,15 @@
     "ttk/core_modules/geir/compare.py": {
       "PLR0913": 1
     },
+    "ttk/core_modules/geir/fusion_parse.py": {
+      "C901": 1
+    },
     "ttk/core_modules/geir/graph_builder.py": {
       "PLR0913": 4
+    },
+    "ttk/core_modules/geir/graph_validate.py": {
+      "C901": 5,
+      "PLR0915": 1
     },
     "ttk/core_modules/geir/proto_loader.py": {
       "PLR0913": 1

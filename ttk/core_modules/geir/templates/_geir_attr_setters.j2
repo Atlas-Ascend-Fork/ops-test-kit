@@ -1,0 +1,79 @@
+{# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+   This program is free software, you can redistribute it and/or modify it under
+   the terms and conditions of CANN Open Software License Agreement Version 2.0
+   (the "License"). Please refer to the License for details. You may not use this
+   file except in compliance with the License. THIS SOFTWARE IS PROVIDED ON AN
+   "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR
+   A PARTICULAR PURPOSE. See LICENSE in the root of the software repository for the
+   full text of the License. #}
+    // ---------- attributes (setter names baked in, values from config) ----------
+{% for attr in attr_entries %}
+{% if attr.cpp_type == "bool" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        {{ attr_recv }}.set_attr_{{ attr.name }}({{ attr_cfg }}.at("{{ attr.name }}").getBool());
+    }
+{% elif attr.cpp_type == "int64_t" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        {{ attr_recv }}.set_attr_{{ attr.name }}({{ attr_cfg }}.at("{{ attr.name }}").getInt());
+    }
+{% elif attr.cpp_type == "ge_dtype" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        const JsonValue& __v = {{ attr_cfg }}.at("{{ attr.name }}");
+        if (__v.type == JsonValue::String) {
+            {{ attr_recv }}.Operator::SetAttr("{{ attr.name }}", StringToDataType(__v.getString()));
+        } else {
+            {{ attr_recv }}.Operator::SetAttr("{{ attr.name }}", __v.getInt());
+        }
+    }
+{% elif attr.cpp_type == "ge_format" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        const JsonValue& __v = {{ attr_cfg }}.at("{{ attr.name }}");
+        {{ attr_recv }}.set_attr_{{ attr.name }}((__v.type == JsonValue::String) ? StringToFormat(__v.getString()) : static_cast<ge::Format>(__v.getInt()));
+    }
+{% elif attr.cpp_type == "float" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        {{ attr_recv }}.set_attr_{{ attr.name }}((float){{ attr_cfg }}.at("{{ attr.name }}").getDouble());
+    }
+{% elif attr.cpp_type == "double" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        {{ attr_recv }}.set_attr_{{ attr.name }}({{ attr_cfg }}.at("{{ attr.name }}").getDouble());
+    }
+{% elif attr.cpp_type == "string" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        {{ attr_recv }}.set_attr_{{ attr.name }}({{ attr_cfg }}.at("{{ attr.name }}").getString());
+    }
+{% elif attr.cpp_type == "vector_bool" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        vector<bool> __av;
+        for (const auto& __e : {{ attr_cfg }}.at("{{ attr.name }}").getArray()) __av.push_back((bool)__e.getInt());
+        {{ attr_recv }}.set_attr_{{ attr.name }}(__av);
+    }
+{% elif attr.cpp_type == "vector_int64" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        vector<int64_t> __av;
+        for (const auto& __e : {{ attr_cfg }}.at("{{ attr.name }}").getArray()) __av.push_back(__e.getInt());
+        {{ attr_recv }}.set_attr_{{ attr.name }}(__av);
+    }
+{% elif attr.cpp_type == "vector_float" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        vector<float> __av;
+        for (const auto& __e : {{ attr_cfg }}.at("{{ attr.name }}").getArray()) __av.push_back((float)__e.getDouble());
+        {{ attr_recv }}.set_attr_{{ attr.name }}(__av);
+    }
+{% elif attr.cpp_type == "vector_double" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        vector<double> __av;
+        for (const auto& __e : {{ attr_cfg }}.at("{{ attr.name }}").getArray()) __av.push_back(__e.getDouble());
+        {{ attr_recv }}.set_attr_{{ attr.name }}(__av);
+    }
+{% elif attr.cpp_type == "vector_string" %}
+    if ({{ attr_cfg }}.has("{{ attr.name }}")) {
+        vector<string> __av;
+        for (const auto& __e : {{ attr_cfg }}.at("{{ attr.name }}").getArray()) __av.push_back(__e.getString());
+        {{ attr_recv }}.set_attr_{{ attr.name }}(__av);
+    }
+{% else %}
+    #error "Unsupported attr type '{{ attr.proto_type }}' for attr '{{ attr.name }}'"
+{% endif %}
+{% endfor %}

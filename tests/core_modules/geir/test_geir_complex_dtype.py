@@ -43,6 +43,14 @@ def test_resolve_dtype_complex():
     assert "complex128" in _DTYPE_TO_GE_ENUM
 
 
+def test_resolve_dtype_ge_enum_name_passthrough():
+    assert _resolve_dtype("DT_INT32") == "DT_INT32"
+    assert _resolve_dtype("DT_FLOAT16") == "DT_FLOAT16"
+    assert _resolve_dtype("DT_UNDEFINED") == "DT_UNDEFINED"
+    # 未知 DT_* 串仍走 DT_FLOAT 回落（与 StringToDataType 兜底一致）
+    assert _resolve_dtype("DT_NOT_EXIST") == "DT_FLOAT"
+
+
 def test_parse_stdout_complex32():
     arr = np.arange(12, dtype=np.float16).reshape(2, 3, 2)
     data = _make_geir_output([arr])

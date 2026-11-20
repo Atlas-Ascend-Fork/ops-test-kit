@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""geir/execute.py —— GEIR 图执行段。
+"""geir/execute.py：GEIR 图执行段。
 
 - 输入 bin 落盘（None 跳过、TensorList 逐元素展开，索引对齐 graph_builder），
   经每 worker 常驻的 serve 子进程逐轮执行（execute_graph）。
@@ -30,7 +30,9 @@ import hashlib
 import logging
 import os
 import select
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -76,11 +78,12 @@ class GraphExecPlan:
 
 @dataclass
 class GraphExecResult:
-    """图执行段产出：最后一轮输出 + 确定性状态 + 设备耗时（µs，跨轮 median）。"""
+    """图执行段产出：最后一轮输出、确定性状态、设备耗时（µs，跨轮 median）、融合计数。"""
 
     outputs: List[np.ndarray] = field(default_factory=list)
     det_status: Optional[str] = None
     device_perf_us: Optional[float] = None
+    fusion_pass_details: Optional[str] = None  # 末轮会话的单图融合计数（无新增为 None）
 
 
 def execute_graph(
@@ -116,6 +119,9 @@ def execute_graph(
                 md5_list.append(_det_round_hash(testcase, result.outputs, testcase.golden_arrays, pre_compare))
     finally:
         _cleanup_bins(plan.input_prefix)
+        # 融合快照唯一出口：成功赋值 result，失败路径仅推进标记（防残留会话泄入下例）
+        with contextlib.suppress(Exception):
+            result.fusion_pass_details = _collect_fusion()
     result.device_perf_us = _collect_round_perf(plan, prof_before, testcase.testcase_name)
     result.det_status = _det_status(md5_list, deterministic, testcase.testcase_name)
     return result
@@ -125,25 +131,34 @@ class _GeirServe:
     """每 worker 一个常驻 GE 子进程（harness argv[5]="-" serve 模式）。
 
     GEInitialize 整批一次；数据管道逐例协议：成功 [8B num_outputs][8B len][data]*；
-    失败 [8B -1][8B len][msg]。以 (binary, mtime) 为键——算子重编译后自动重启常驻进程。
+    失败 [8B -1][8B len][msg]。以 (binary, mtime) 为键，算子重编译后自动重启常驻进程。
+
+    cwd 为 serve 专属目录（build_dir 下 mkdtemp）：fusion_result.json 按 CWD 回退
+    落盘，per-serve 单写者；目录随 serve 关闭清理。
     """
 
     def __init__(self, binary: str, build_dir: str, dev_id: int):
         self.binary = binary
-        data_r, data_w = os.pipe()
-        self._data_r = data_r
-        self.proc = subprocess.Popen(
-            [binary, str(dev_id), "", str(data_w), "", "-"],
-            pass_fds=(data_w,),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=build_dir,
-            preexec_fn=_set_pdeathsig,  # noqa: PLW1509  # 仅 libc prctl 设置，无 Python 对象操作
-        )
+        self.serve_dir = tempfile.mkdtemp(prefix="serve_", dir=build_dir)
+        try:
+            data_r, data_w = os.pipe()
+            self._data_r = data_r
+            self.proc = subprocess.Popen(
+                [binary, str(dev_id), "", str(data_w), "", "-"],
+                pass_fds=(data_w,),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=self.serve_dir,
+                preexec_fn=_set_pdeathsig,  # noqa: PLW1509  # 仅 libc prctl 设置，无 Python 对象操作
+            )
+        except Exception:
+            shutil.rmtree(self.serve_dir, ignore_errors=True)
+            raise
         os.close(data_w)  # 父进程关写端, 子进程 EOF 即收工
         self._stderr_tail = bytearray()
         self._stdout_tail = bytearray()
+        self._seen_fusion_sessions: set = set()
 
         def _drain(stream, sink):
             try:
@@ -223,6 +238,23 @@ class _GeirServe:
                 self.proc.wait(timeout=5)
         with contextlib.suppress(Exception):
             os.close(self._data_r)
+        shutil.rmtree(self.serve_dir, ignore_errors=True)
+
+    def collect_fusion_stats(self):
+        """读本 serve 的 fusion_result.json，返回本例新增会话（各轮图相同，
+        计数一致）中末轮会话的单图计数串；无新增/文件缺失返回 None。
+        快照态随本实例生命周期（serve 重启即清零）。
+        """
+        from .fusion_parse import FUSION_STAT_FILENAME, format_pass_stats, parse_fusion_sessions
+
+        sessions = parse_fusion_sessions(os.path.join(self.serve_dir, FUSION_STAT_FILENAME))
+        if not sessions:
+            return None
+        new_keys = [k for k in sessions if k not in self._seen_fusion_sessions]
+        if not new_keys:
+            return None
+        self._seen_fusion_sessions.update(new_keys)
+        return format_pass_stats(sessions[new_keys[-1]])
 
 
 _SERVE_INST: Optional[_GeirServe] = None
@@ -248,6 +280,17 @@ def _close_geir_serve():
         _SERVE_INST.close()
         _SERVE_INST = None
         _SERVE_KEY = None
+
+
+def _collect_fusion():
+    """当前 serve 的融合快照（无 serve/已死返回 None）。
+
+    唯一调用点在 execute_graph 的 finally：失败路径仅推进快照标记，会话不跨用例泄漏。
+    """
+    serve = _SERVE_INST
+    if serve is None or not serve.alive():
+        return None
+    return serve.collect_fusion_stats()
 
 
 atexit.register(_close_geir_serve)
@@ -346,7 +389,7 @@ def _md5_of(outputs) -> str:
 
 def _det_round_hash(testcase, outputs, goldens, pre_compare) -> str:
     """dl=1 逐轮规范化哈希（双消费点）：pre_compare 双半边签名（outputs +
-    goldens），hash 只用 outputs 半边——轮间一致性只关被测侧，goldens 半边每轮
+    goldens），hash 只用 outputs 半边，轮间一致性只关被测侧，goldens 半边每轮
     重算弃用。浅拷贝隔离：执行段返回的 outputs 保持 raw，比对侧由 compare_case 自行规范化。"""
     if pre_compare is None:
         return _md5_of(outputs)

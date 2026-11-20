@@ -192,6 +192,7 @@ class TestMergeModeResult:
         later.precision_metrics = {"cst": {"a": 1}}
         later.passed = True
         later.precision_status = "PASS"
+        later.dyn_fusion_raw = "MulAddNPass:hit=1,effect=1"
         _absorb_fields(base, later)
         assert base.cst_precision == "97%"
         assert base.cst_perf_us == 5.0
@@ -200,6 +201,10 @@ class TestMergeModeResult:
         assert base.precision_status == "PASS"
         assert base.precision == "97%"
         assert base.dyn_precision == ""  # 未触及字段不覆盖
+        assert base.dyn_fusion_raw == "MulAddNPass:hit=1,effect=1"  # 有计数时吸收
+        assert base.cst_fusion_raw is None  # 另一模式不受影响
+        _absorb_fields(base, _result(precision="50%"))  # None 不覆盖
+        assert base.dyn_fusion_raw == "MulAddNPass:hit=1,effect=1"
 
     def test_absorb_keeps_first_pass_semantics(self):
         base = _result(precision="99%", passed=True, precision_status="PASS")
@@ -469,3 +474,48 @@ class TestReconcileInputs:
                 raise RuntimeError("boom")
 
         geir_worker._reconcile_inputs(_Broken())  # 不抛——对账基础设施不得破坏通路
+
+
+def test_graph_mode_xpu_d_slot_names(monkeypatch):
+    """图模式三方：schema 名取 dN 与图输入槽对齐（远端执行插件 third_party，位置绑定）。"""
+    from types import SimpleNamespace
+
+    import ttk.core_modules.geir.worker as geir_worker
+
+    seen = {}
+
+    def _fake_collect_third_party(**kw):
+        seen.update(kw)
+
+        class R:
+            priority = None
+            third_parties = None
+            xpu_results = {}
+
+        return R.priority, R.third_parties, R.xpu_results
+
+    monkeypatch.setattr(geir_worker, "collect_third_party", _fake_collect_third_party)
+    monkeypatch.setattr(
+        geir_worker,
+        "_proto_input_names",
+        lambda tc: ["x1", "x2"],  # 锚点 proto 名，图模式不应采用
+    )
+    switches = SimpleNamespace(golden_mode="")
+
+    # 3 输入槽的图 → schema 名 = d0/d1/d2（锚点 proto 名与槽数不一致时不采用）
+    tc = SimpleNamespace(
+        testcase_name="g3",
+        op_name="mul",
+        input_arrays=(object(), object(), object()),
+        attributes={},
+        _resolved_graph={"ops": ("mul", "add_n")},
+    )
+    geir_worker._collect_xpu_remote(tc, switches, True)
+    assert seen["input_names"] == ["d0", "d1", "d2"]
+
+    # 单算子照旧用锚点 proto 输入名
+    tc2 = SimpleNamespace(
+        testcase_name="op", op_name="mul", input_arrays=(object(),), attributes={}, _resolved_graph=None
+    )
+    geir_worker._collect_xpu_remote(tc2, switches, True)
+    assert seen["input_names"] == ["x1", "x2"]

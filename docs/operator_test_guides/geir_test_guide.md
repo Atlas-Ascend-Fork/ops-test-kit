@@ -2,7 +2,7 @@
 
 ## 使用须知
 
-`ttk geir` 把算子组装为 GE 计算图后整体编译执行，覆盖 GE 图构建、图编译、算子调度等引擎层通路。用例 CSV 字段与 Kernel 相同、另加 `dyn_input_shapes` 列，写法见 [GEIR 用例编写](./geir_case_writing_guide.md)。
+`ttk geir` 把算子组装为 GE 计算图后整体编译执行，覆盖 GE 图构建、图编译、算子调度等引擎层通路。用例 CSV 字段与 Kernel 相同、另加 `dyn_input_shapes` 列，写法见 [GEIR 用例编写](./geir_case_writing_guide.md)；图融合Pass 见 [常用场景示例](#六常用场景示例)。
 
 > [!TIP]
 > GEIR 复用 Kernel 的 CSV 用例与 TestSpec 插件（注册名同 `op_name`），无需单独编写；需要精确控制图编译动态维度时，追加 `dyn_input_shapes` 列即可。
@@ -139,10 +139,11 @@ python3 -m ttk geir -i add.csv --devices=0,1 # 指定使用卡 0 和卡 1
 ```shell
 python3 -m ttk geir -i add.csv -t add_01        # 单用例（独立日志目录自动生成）
 python3 -m ttk geir -i add.csv --seed 42        # 固定随机种子（可复现）
-python3 -m ttk geir -i add.csv --validate       # 仅校验 CSV 用例格式（不下设备）
+python3 -m ttk geir -i add.csv --validate       # 仅校验 CSV 用例格式（不依赖设备）
 ```
 
 Dump 调试详见[Dump 数据调试](../dump_debug_guide.md)。
+
 
 ## 六、常用场景示例
 
@@ -165,3 +166,17 @@ python3 -m ttk geir -i add.csv --rerun=precision_status
 
 > [!NOTE]
 > 通用参数（用例筛选/设备并行/精度控制/调试/结果输出）见[任务执行](../task_execution_guide.md)
+
+### 图融合Pass
+
+`graph_ops` 列非空即图模式：用例声明**多算子 DAG**，`ttk geir` 将其组装为 GE 计算图整体编译执行，使融合 pass 的源模式在编译期真实出现，用于验证融合触发与数值等价；同一 CSV 可与单算子用例混放。
+
+```shell
+# 校验（不依赖设备）
+python3 -m ttk geir -i examples/case_store/geir/graph_cases.csv --validate
+
+# 端到端执行（golden 插件按整图计算逻辑编写）
+python3 -m ttk geir -i examples/case_store/geir/graph_cases.csv --plugin examples/case_store/geir/golden.py
+```
+
+融合触发情况通过结果列 `fusion_pass_details` 确认，该列按编译模式组装各 pass 的命中与生效计数（如 `cst:NA,dyn:MulAddNPass:hit=1,effect=1`），未执行的模式不出段，无模式执行时为 NA。用例写法见 [GEIR 用例编写 · 图融合Pass](./geir_case_writing_guide.md#四图融合pass)，详细说明见 [GEIR 图融合Pass](../reference/geir_graph_mode.md)。

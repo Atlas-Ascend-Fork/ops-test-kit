@@ -210,7 +210,7 @@ def test_serve_instance_respawns_after_death_and_recompile(monkeypatch):
     assert third.closed
 
 
-def test_close_waits_after_kill():
+def test_close_waits_after_kill(tmp_path):
     class FakeProc:
         def __init__(self):
             self.stdin = types.SimpleNamespace(close=lambda: None)
@@ -228,6 +228,7 @@ def test_close_waits_after_kill():
 
     serve = object.__new__(geir_execute._GeirServe)
     serve.proc = FakeProc()
+    serve.serve_dir = str(tmp_path / "serve_x")
     read_fd, write_fd = os.pipe()
     os.close(write_fd)
     serve._data_r = read_fd

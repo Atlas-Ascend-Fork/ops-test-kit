@@ -62,7 +62,7 @@ from ..common.xpu import (
 from .compare import CompareInputs, compare_case
 from .compiler import GeirCompiler
 from .execute import GraphExecPlan, execute_graph
-from .graph_builder import GeirGraphBuilder
+from .graph_builder import GeirGraphBuilder, graph_signature
 from .proto_loader import ProtoLoader
 from .result import GeirReturnStructure
 from .testcase import GeirTestcase
@@ -99,7 +99,7 @@ def run(
     # --seed 用例级播种先于一切数据生成（逐模式输入/golden），与派发解耦
     reseed_per_testcase(testcase, switches)
 
-    # host 内存闸门：入口位（校验早退之后的首个重负载前）——manual 落盘加载、
+    # host 内存闸门：入口位（校验早退之后的首个重负载前），manual 落盘加载、
     # 输入生成、golden、图执行全在闸门之后
     gate_host_memory(switches.no_memory_check, process_ctx)
 
@@ -148,7 +148,7 @@ def run(
 def _mark_off_modes(result, switches):
     """未启用模式槽位补 OFF 标记（对齐 kernel 屏显/CSV 的 xxx_OFF 口径）。
 
-    以 -c/-d 开关为准——数据面 None/空串区分不了"未启用"与"执行异常"
+    以 -c/-d 开关为准，数据面 None/空串区分不了"未启用"与"执行异常"
     （异常路径 RAN 模式的槽位同为 None/空，其失败经 STATUS 行暴露，
     perf 列保持 None 屏显）。标记后 pick_data 与屏显直接读槽位即可，
     CSV perf 列的 None→CST_OFF 兜底随之退化为双保险。
@@ -184,21 +184,26 @@ def _merge_mode_result(result, mode_result, mode):
     return result
 
 
+_ABSORB_TRUTHY = ("cst_precision", "dyn_precision")  # 空串 = 未设置，不覆盖
+_ABSORB_NOT_NONE = ("cst_perf_us", "dyn_perf_us", "cst_fusion_raw", "dyn_fusion_raw")  # 0 为有效值
+_ABSORB_MERGE = ("xpu_metrics", "precision_metrics")
+
+
 def _absorb_fields(result, mode_result):
     """后继模式结果吸收进累计结果（perf/metrics 覆盖，passed 语义取首个通过模式）。"""
-    if mode_result.cst_precision:
-        result.cst_precision = mode_result.cst_precision
-    if mode_result.dyn_precision:
-        result.dyn_precision = mode_result.dyn_precision
-    if mode_result.cst_perf_us is not None:
-        result.cst_perf_us = mode_result.cst_perf_us
-    if mode_result.dyn_perf_us is not None:
-        result.dyn_perf_us = mode_result.dyn_perf_us
-    if mode_result.xpu_metrics:
-        result.xpu_metrics.update(mode_result.xpu_metrics)
-    if mode_result.precision_metrics:
-        result.precision_metrics.update(mode_result.precision_metrics)
-    # golden-mode NPU：golden 逐模式重生成——非 None 覆盖（末模式值生效，与
+    for name in _ABSORB_TRUTHY:
+        val = getattr(mode_result, name)
+        if val:
+            setattr(result, name, val)
+    for name in _ABSORB_NOT_NONE:
+        val = getattr(mode_result, name)
+        if val is not None:
+            setattr(result, name, val)
+    for name in _ABSORB_MERGE:
+        src = getattr(mode_result, name)
+        if src:
+            getattr(result, name).update(src)
+    # golden-mode NPU：golden 逐模式重生成，非 None 覆盖（末模式值生效，与
     # perf/metrics 的覆盖哲学一致；golden 语义不随模式变化，仅 perf 微差）
     for name in ("golden_device_perf_us", "golden_kernel_count", "golden_kernel_details", "golden_source"):
         if getattr(mode_result, name) is not None:
@@ -229,7 +234,13 @@ def _profiling_end_print(result):
 
 
 def _geir_param_order(testcase) -> list:
-    """def.cpp param order (inputs then attrs) for server-side pool merge."""
+    """def.cpp param order (inputs then attrs) for server-side pool merge.
+
+    图模式跳过：锚点参数序/槽位对账是单算子语义，图模式输入为 dN 扁平槽，
+    锚点恰有 op_info 时反而拿错序。
+    """
+    if getattr(testcase, "_resolved_graph", None):
+        return []
     try:
         from ttk.core_modules.kernel.info_keeper import OpInfoKeeper
 
@@ -263,7 +274,7 @@ def _resolve_manual_stores(testcase, switches, process_ctx):
 
     - dump 方向（--no-prof）：开单目录 store（旧同名用例先失效）；
     - load 方向（--manual-data-dirs 全流程）：命中已存用例则装载输入与
-      golden（golden 缺席时回退现算——no-prof 落盘可仅 --dump in）；
+      golden（golden 缺席时回退现算，no-prof 落盘可仅 --dump in）；
       目录全空且 --dump in 开启 → 首跑落盘 store（生成后写入）。
     """
     if switches.no_prof:
@@ -296,7 +307,7 @@ def _resolve_manual_stores(testcase, switches, process_ctx):
     if manual_case is not None and manual_case.has_goldens:
         try:
             process_ctx.notify_status("OnLoadManualGolden")
-            # 槽位声明经 testcase 协议（manual_data_golden_shapes/dtypes——
+            # 槽位声明经 testcase 协议（manual_data_golden_shapes/dtypes，
             # 含 shape-unknown 元数据槽，GeirTestcase 继承 TestcaseKernel）
             stored_goldens = load_manual_goldens(
                 manual_case,
@@ -324,7 +335,7 @@ def _manual_data_dump(testcase, switches, process_ctx, dump_case) -> GeirReturnS
         tol_state = _resolve_tolerance(testcase, switches)
         write_goldens = switches.dump_config.dump_golden
         if tol_state.golden_is_xpu:
-            # 对齐 kernel：三方 golden 无可落盘——占位后由 dump_manual_dataset
+            # 对齐 kernel：三方 golden 无可落盘，占位后由 dump_manual_dataset
             # 的占位串过滤仅落 input（no-prof + XPU 合法组合）。NPU 不在此路径
             # （no-prof × dump_golden 已被 bridge 拒绝）
             testcase.golden_arrays = ["GOLDEN_FAILURE"]
@@ -446,12 +457,12 @@ def _run_profile(
         third_parties,
         tol_state.pre_compare,
     )
-    # store 已落输入/golden 时跳过常规数据 dump（输出仍落——来自执行，store 表达不了）
+    # store 已落输入/golden 时跳过常规数据 dump（输出仍落，来自执行，store 表达不了）
     compared = compare_case(
         testcase, mode.replace("_binary", ""), inputs, skip_stored_data=dump_case is not None
     )  # 比对 + dump
 
-    # dl=3 batch 一致性：比对后切片哈希——按 batch_axis 切
+    # dl=3 batch 一致性：比对后切片哈希，按 batch_axis 切
     # output 0 逐样本 MD5 → BatchSummary（打包时随 ReturnStructure 回传，主进程
     # cleanup 按 id 分组比对）；不支持切片时记录原因不阻断。
     batch_summary = None
@@ -459,6 +470,12 @@ def _run_profile(
         batch_summary = assemble_batch_summary(list(exec_result.outputs), testcase, testcase.batch_consistency_id)
 
     result = _pack_result(mode, exec_result, compared, xpu_results, testcase)  # 结果打包
+    # 融合计数随执行段返回，按编译模式记原始值；无新增会话/文件缺失也记
+    # NA 段，与未执行该模式区分
+    if mode in ("const", "const_binary"):
+        result.cst_fusion_raw = exec_result.fusion_pass_details if exec_result.fusion_pass_details is not None else "NA"
+    else:
+        result.dyn_fusion_raw = exec_result.fusion_pass_details if exec_result.fusion_pass_details is not None else "NA"
     if tol_state.golden_is_npu:
         from ..common.golden import golden_perf_columns
 
@@ -488,10 +505,10 @@ def _resolve_tolerance(testcase, switches) -> SimpleNamespace:
         input_dtypes=testcase.flat_input_dtypes,
     )
     need_3party = any(s.token == "cross_check" for s in standards)  # noqa: S105  # token 为比对标准名，非口令
-    # golden-mode XPU：三方输出升格为 golden 位——与 Promote 互斥，
+    # golden-mode XPU：三方输出升格为 golden 位，与 Promote 互斥，
     # golden 函数旁路不生成，三方执行后回填；失败整例 FAIL。
     golden_is_xpu = switches.golden_mode == "XPU"
-    # golden-mode NPU：golden 在设备上执行（torch 载体 + 采集窗）——与 Promote 互斥。
+    # golden-mode NPU：golden 在设备上执行（torch 载体 + 采集窗），与 Promote 互斥。
     golden_is_npu = switches.golden_mode == "NPU"
     if should_promote_golden(standards, switches.golden_mode):
         testcase.golden_mode_override = "Promote"
@@ -507,13 +524,19 @@ def _resolve_tolerance(testcase, switches) -> SimpleNamespace:
 def _reconcile_inputs(testcase) -> None:
     """输入段后对账。
 
-    - 结构（fail-fast）：values_match_slots——生成 input_arrays 与声明槽表逐位
+    - 结构（fail-fast）：values_match_slots，生成 input_arrays 与声明槽表逐位
       一致（None 占位 / TensorList 嵌套）。      optional 错位/槽型不匹配若漏到执行段，
       表现为 bin 落盘错位→C++ 读到错位数据→神秘比对失败，此处提前显式暴露。
-    - 字节（advisory）：逐槽声明 nbytes vs 实际数组 nbytes——dtype/shape 漂移
+    - 字节（advisory）：逐槽声明 nbytes vs 实际数组 nbytes，dtype/shape 漂移
       预警（pre_inputs 契约为原地改数据；漂移即契约违例信号，先预警观察）。
     对账基础设施自身不得破坏通路：槽物化失败仅 debugc 记录后跳过。
+
+    图模式跳过：input_tensor_slots 以锚点算子端口为基准（单算子语义），
+    图模式输入为 dN 扁平槽，两调用点（_run_profile/_manual_data_dump）
+    自动随本门控生效。
     """
+    if getattr(testcase, "_resolved_graph", None):
+        return
     try:
         slots = testcase.input_tensor_slots
     except Exception as exc:
@@ -559,7 +582,7 @@ def _reconcile_input_bytes(testcase, slots) -> None:
 
 
 def _iter_flat_slots(slots):
-    """槽表深展平（与 values 结构逐位对齐，None 叶子保留——flat_slots 语义一致）。"""
+    """槽表深展平（与 values 结构逐位对齐，None 叶子保留，flat_slots 语义一致）。"""
     for slot in slots:
         if isinstance(slot, (list, tuple)):
             yield from _iter_flat_slots(slot)
@@ -577,16 +600,16 @@ def _iter_flat_values(values):
 
 
 def _prepare_golden(testcase, golden_is_xpu, stored_goldens=None, golden_is_npu=False, dev_id=0) -> None:
-    """golden 生成（复用 kernel/golden.py；GEIR 逐模式重生成——已扩展过的输出
+    """golden 生成（复用 kernel/golden.py；GEIR 逐模式重生成，已扩展过的输出
     元数据不重复增长，_output_meta_count 判定，66c6491）。
 
     stored_goldens（manual-data 复跑装载）先切齐声明输出槽数再传入：存储集
     含 shape-unknown 元数据槽，而元数据 golden 由 gen_output 依各 data golden
-    的 shape 重算追加——首模式（flat 未扩展）与后续模式（flat 已扩展）切齐后
+    的 shape 重算追加：首模式（flat 未扩展）与后续模式（flat 已扩展）切齐后
     两侧槽数一致，不因逐模式重入而重复追加。
 
     golden_is_npu：GEIR 的 DeviceLock 包裹全程（含本阶段），golden 在锁内
-    直接生成——gen_output 传 dev_id 内联生成（与 kernel 同款单步编排）。"""
+    直接生成，gen_output 传 dev_id 内联生成（与 kernel 同款单步编排）。"""
     if golden_is_xpu:
         # golden 由三方采集产出（本侧参照不生成）；回填在 collect 之后
         testcase.golden_arrays = ["GOLDEN_FAILURE"]
@@ -642,18 +665,33 @@ def _collect_xpu(testcase, switches, xpu, dump_case=None) -> tuple:
     return third_parties, xpu_results
 
 
+def _xpu_schema(testcase, inputs) -> tuple:
+    """远端 schema 的 (input_names, attributes)：单算子取锚点 proto 输入名与
+    平铺 attrs；图模式输入为 dN 扁平槽，schema 名取 dN 与槽序对齐（远端执行
+    插件注册的 third_party，整图语义签名自定义，server 位置绑定），嵌套
+    attributes 按节点属性值平铺（顶层 oN 容器键不是函数参数名）。"""
+    attrs = getattr(testcase, "attributes", {}) or {}
+    if getattr(testcase, "_resolved_graph", None):
+        node_attrs = testcase._resolved_graph.get("node_attrs") or {}
+        return [f"d{i}" for i in range(len(inputs))], {
+            k: v for cfg in node_attrs.values() for k, v in (cfg or {}).items()
+        }
+    return _proto_input_names(testcase), attrs
+
+
 def _collect_xpu_remote(testcase, switches, need_xpu_data, inputs=None, deadline_s=None) -> tuple:
     """geir 远端采集（同步形态 = 现状语义；重叠形态由 _dispatch_xpu 以快照
     inputs/deadline 调起）。经 common.xpu 门面，GEIR 的 input_names 来自
     ProtoLoader，op_type 无概念传 None（服务端靠 op_name 推导）。"""
     if inputs is None:
         inputs = getattr(testcase, "original_input_arrays", None) or testcase.input_arrays
+    input_names, attrs = _xpu_schema(testcase, inputs)
     priority, third_parties, xpu_results = collect_third_party(
         op_name=testcase.op_name,
         inputs=inputs,
-        input_names=_proto_input_names(testcase),
+        input_names=input_names,
         op_type=None,
-        attributes=getattr(testcase, "attributes", {}) or {},
+        attributes=attrs,
         testcase_name=testcase.testcase_name,
         switches=switches,
         need_xpu_data=need_xpu_data,
@@ -686,7 +724,7 @@ def _xpu_promote_golden(testcase, xpu):
 
 
 def _xpu_golden_missing(testcase, third_parties):
-    """golden-mode XPU：三方输出缺失 = golden 位真值源缺失，整例 FAIL——在
+    """golden-mode XPU：三方输出缺失 = golden 位真值源缺失，整例 FAIL，在
     compile/execute 前显式落败（编译执行链没必要跑）。非缺失返回 None。"""
     if third_parties is not None:
         return None
@@ -702,22 +740,39 @@ def _xpu_golden_missing(testcase, third_parties):
 
 
 def _compile_stage(testcase, switches, mode) -> tuple:
-    """图编译：proto 渲染 C++ 源码（op 级缓存）→ per-case 配置 → g++ 编译（stamp 缓存）。"""
+    """图编译：按例路由（_resolved_graph 非空 → 图模式）。
+
+    图模式：组合签名（graph__op0__op1）= 编译缓存键 + serve 键控，同一组合
+    一份二进制服务不同连线的 N 份 config；单算子路径完全不变。
+    """
     builder = GeirGraphBuilder(switches)
-    source_path = builder.generate_op_source(testcase.op_name, mode=mode)
-    if source_path is None:
-        raise RuntimeError(
-            f"GEIR op source generation failed for operator '{testcase.op_name}': "
-            f"its IR (REG_OP) was not found in the op_proto headers, or source rendering failed. "
-            f"See the log for the searched proto paths."
-        )
-    config_path = builder.write_case_config(testcase, mode=mode)
+    resolved = getattr(testcase, "_resolved_graph", None)
+    if resolved:
+        source_path = builder.generate_graph_source(resolved["ops"], mode=mode)
+        if source_path is None:
+            raise RuntimeError(
+                f"GEIR graph source generation failed for combo '{resolved['ops']}': "
+                f"a node's IR (REG_OP) was not found in the op_proto headers. "
+                f"See the log for the searched proto paths."
+            )
+        config_path = builder.write_graph_case_config(testcase, mode=mode)
+        compile_key = graph_signature(resolved["ops"])
+    else:
+        source_path = builder.generate_op_source(testcase.op_name, mode=mode)
+        if source_path is None:
+            raise RuntimeError(
+                f"GEIR op source generation failed for operator '{testcase.op_name}': "
+                f"its IR (REG_OP) was not found in the op_proto headers, or source rendering failed. "
+                f"See the log for the searched proto paths."
+            )
+        config_path = builder.write_case_config(testcase, mode=mode)
+        compile_key = testcase.op_name
     if config_path is None:
         raise RuntimeError("GEIR case config generation failed")
     compiler = GeirCompiler(switches, build_dir=builder.work_dir)
-    binary = compiler.compile_op(source_path, testcase.op_name, op_dir=builder.op_dir)
+    binary = compiler.compile_op(source_path, compile_key, op_dir=builder.op_dir)
     if binary is None:
-        raise RuntimeError("GEIR compilation failed")
+        raise RuntimeError(f"GEIR compilation failed for '{compile_key}'")
     return compiler, binary, config_path
 
 

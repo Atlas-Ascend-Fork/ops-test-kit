@@ -19,7 +19,17 @@ from ttk.utilities import Singleton
 
 
 class OpProtoInfo:
-    __slots__ = ("op_class", "proto_file", "inputs", "outputs", "dynamic_inputs", "dynamic_outputs", "attrs")
+    __slots__ = (
+        "op_class",
+        "proto_file",
+        "inputs",
+        "outputs",
+        "dynamic_inputs",
+        "dynamic_outputs",
+        "attrs",
+        "optional_inputs",
+        "required_attrs",
+    )
 
     def __init__(
         self,
@@ -30,6 +40,8 @@ class OpProtoInfo:
         dynamic_inputs: Optional[List[str]] = None,
         dynamic_outputs: Optional[List[str]] = None,
         attrs: Optional[List[tuple]] = None,
+        optional_inputs: Optional[List[str]] = None,
+        required_attrs: Optional[List[tuple]] = None,
     ):
         self.op_class = op_class
         self.proto_file = proto_file
@@ -38,6 +50,11 @@ class OpProtoInfo:
         self.dynamic_inputs = dynamic_inputs or []
         self.dynamic_outputs = dynamic_outputs or []
         self.attrs = attrs or []
+        # 图模式校验（graph_validate）专用增量字段：不改既有字段形状，存量消费者零感知。
+        # - optional_inputs: 仅 OPTIONAL_INPUT 声明的口名（R2 可选口判定）
+        # - required_attrs:  仅 REQUIRED_ATTR 声明的 (name, type)（图节点必填属性校验）
+        self.optional_inputs = optional_inputs or []
+        self.required_attrs = required_attrs or []
 
 
 class ProtoLoader(metaclass=Singleton):
@@ -51,6 +68,7 @@ class ProtoLoader(metaclass=Singleton):
     # 分两次 findall 拼接会假定"可选总在末尾"，导致输入错位。
     _ANY_INPUT_PATTERN = re.compile(r"\.(?:OPTIONAL_INPUT|DYNAMIC_INPUT|INPUT)\(\s*(\w+),")
     _DYNAMIC_INPUT_PATTERN = re.compile(r"\.DYNAMIC_INPUT\(\s*(\w+),")
+    _OPTIONAL_INPUT_PATTERN = re.compile(r"\.OPTIONAL_INPUT\(\s*(\w+),")
     _ANY_OUTPUT_PATTERN = re.compile(r"\.(?:OUTPUT|DYNAMIC_OUTPUT)\(\s*(\w+),")
     _DYNAMIC_OUTPUT_PATTERN = re.compile(r"\.DYNAMIC_OUTPUT\(\s*(\w+),")
     _ATTR_PATTERN = re.compile(r"\.ATTR\(\s*(\w+)\s*,\s*(\w+)")
@@ -145,9 +163,23 @@ class ProtoLoader(metaclass=Singleton):
 
         inputs = self._ANY_INPUT_PATTERN.findall(body)
         dynamic_inputs = self._DYNAMIC_INPUT_PATTERN.findall(body)
+        optional_inputs = self._OPTIONAL_INPUT_PATTERN.findall(body)
         outputs = self._ANY_OUTPUT_PATTERN.findall(body)
         dynamic_outputs = self._DYNAMIC_OUTPUT_PATTERN.findall(body)
         attrs = self._ATTR_PATTERN.findall(body)
         attrs += self._REQUIRED_ATTR_PATTERN.findall(body)
+        # attrs 维持 ATTR+REQUIRED_ATTR 拼接现状（_build_attr_entries/_build_attrs_json
+        # 消费形状不变）；required_attrs 单独留 REQUIRED 段供图模式必填校验。
+        required_attrs = self._REQUIRED_ATTR_PATTERN.findall(body)
 
-        return OpProtoInfo(canonical, proto_file, inputs, outputs, dynamic_inputs, dynamic_outputs, attrs)
+        return OpProtoInfo(
+            canonical,
+            proto_file,
+            inputs,
+            outputs,
+            dynamic_inputs,
+            dynamic_outputs,
+            attrs,
+            optional_inputs=optional_inputs,
+            required_attrs=required_attrs,
+        )

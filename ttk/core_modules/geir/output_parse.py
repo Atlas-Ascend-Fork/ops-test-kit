@@ -9,7 +9,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 """GEIR pipe 二进制流解析。
 
-协议 = 逐输出 [8B num_outputs][8B byte_count][data]*——chunk 读取/reshape
+协议 = 逐输出 [8B num_outputs][8B byte_count][data]*，chunk 读取/reshape
 （动态维取实际字节数推）/逐输出解析；stdout/stderr 留给 GE 运行时日志。
 """
 

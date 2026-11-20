@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""geir/compare.py —— GEIR 比对调度。
+"""geir/compare.py：GEIR 比对调度。
 
 SpecResolver 钩子解析（直用，无吞错包装）+
 compare_with_hooks + dump 触发（含 dump_on_fail 补漏）。
@@ -45,7 +45,7 @@ class CompareInputs:
 def compare_case(testcase: GeirTestcase, segment: str, inputs: CompareInputs, skip_stored_data: bool = False) -> tuple:
     """比对 + dump。返回 (precision, log_str, passed, metrics)。
 
-    skip_stored_data：manual-data store 已写输入/golden 时置 True——常规
+    skip_stored_data：manual-data store 已写输入/golden 时置 True，常规
     数据 dump 跳过（store 替代，kernel/e2e/aclnn 同惯例），输出 dump 保留。"""
     switches = get_global_storage()
     dump_cfg = switches.dump_config
@@ -54,7 +54,7 @@ def compare_case(testcase: GeirTestcase, segment: str, inputs: CompareInputs, sk
 
     # 走带 TestSpec 钩子的公共比对入口（与 kernel/aclnn/e2e 对齐）。
     # 【为何要做】GEIR 原先直接调 compare()，Spec.compare / Spec.pre_compare 在本通路
-    # 完全不生效——而对某些算子自实现 compare 是刚需：NonZeroWithValue 的三个输出
+    # 完全不生效；而对某些算子自实现 compare 是刚需：NonZeroWithValue 的三个输出
     # 都是静态 max-size buffer，有效长度由 count 给出，尾部预留区在 NPU 上未定义，
     # 默认整块比对会把这段未定义内存算进判定。未声明钩子的算子，
     # compare_with_hooks 内部直接回落到原来的 compare()，行为逐位不变。
@@ -86,7 +86,7 @@ def _dump_case(testcase, switches, segment, inputs, passed, skip_stored_data=Fal
     修正旧两模式同名覆盖；golden 逐模式重生成，每模式独立落盘）。
 
     skip_stored_data：输入/golden 已由 manual-data store 落盘时跳过（输出与
-    dump-on-fail 仍落——输出来自执行，store 表达不了）。"""
+    dump-on-fail 仍落，输出来自执行，store 表达不了）。"""
     dump_cfg = switches.dump_config
     dumper = DataDumper(switches, testcase.testcase_name)
     if not skip_stored_data:

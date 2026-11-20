@@ -15,7 +15,7 @@ GEIR 与 Kernel 共用同一套 TestSpec 插件契约（按位收 numpy.ndarray�
 
     python3 -m ttk geir -i cases.csv --plugin examples/case_store/geir/golden.py
 
-约定：与 Kernel 的 golden.py 相同——统一 *args/**kwargs 书写；ValueDepend
+约定：与 Kernel 的 golden.py 相同，统一 *args/**kwargs 书写；ValueDepend
 张量以输入序混在 args 中（其值由 CSV input_data_ranges 定值生成或经
 attributes 同名项提取为 Const）；可选输入缺省时以 None 占位传入；输出
 dtype 经 kwargs["output_dtypes"] 获取；TensorList 输入/输出为嵌套序列。
@@ -25,13 +25,36 @@ import numpy
 
 __spec__ = {
     "arg_max_v2": "ArgMaxV2TestSpec",
+    "arg_max_with_value": "ArgMaxWithValueTestSpec",
     "smooth_l1_loss": "SmoothL1LossTestSpec",
     "conv2d": "Conv2DTestSpec",
     "split": "SplitTestSpec",
     "foreach_div_list": "ForeachDivListTestSpec",
     "foreach_add_list_inplace": "ForeachAddListInplaceTestSpec",
     "avg_pool_update": "AvgPoolUpdateTestSpec",
+    # ---- 图模式（graph_cases.csv）：一锚一图，golden 按该锚点声明的连线硬编码 ----
+    "fused_mul_add_n": "MulAddNGraphTestSpec",
+    "reduce_mean_with_cast": "ReduceMeanWithCastGraphTestSpec",
 }
+
+
+class MulAddNGraphTestSpec:
+    """mul_addn_fuse_01（fused_mul_add_n）：d0→mul.x1、d2→mul.x2、
+    mul.y→add_n.x[0]、d1→add_n.x[1]，整图语义 (x1·x2) + 第二元素。"""
+
+    def golden(*args, **kwargs):
+        out_dtype = str(kwargs["output_dtypes"][0])
+        return [numpy.add(numpy.multiply(args[0], args[2]), args[1]).astype(out_dtype)]
+
+
+class ReduceMeanWithCastGraphTestSpec:
+    """rmwc_cast_fuse_01（reduce_mean_with_cast）：d0→x、d1→axes（定值 1，
+    args[1] 为定值槽），整图语义 mean(cast(x, float32), axis=1)。"""
+
+    def golden(*args, **kwargs):
+        out_dtype = str(kwargs["output_dtypes"][0])
+        axes = numpy.asarray(args[1]).reshape(-1).astype("int64")
+        return [numpy.mean(args[0].astype("float32"), axis=tuple(int(a) for a in axes)).astype(out_dtype)]
 
 
 class ArgMaxV2TestSpec:
@@ -43,6 +66,24 @@ class ArgMaxV2TestSpec:
         axis = int(numpy.asarray(dimension).reshape(-1)[0])
         out_dtype = str(kwargs.get("output_dtypes", ("int64",))[0])
         return [numpy.argmax(x, axis=axis).astype(out_dtype)]
+
+
+class ArgMaxWithValueTestSpec:
+    """arg_max_with_value_dtype_attr（arg_max_with_value）：x 按 dimension 取
+    argmax，indice（indice_dtype 声明整型）与 values 按 proto 端口序输出。
+    indice_dtype 接受 numpy 拼写（int32）或 GE 枚举名（DT_INT32）。"""
+
+    def golden(*args, **kwargs):
+        x = args[0]
+        dim = int(kwargs.get("dimension", 0))
+        indice_dtype = str(kwargs.get("indice_dtype", "int64"))
+        if indice_dtype.upper().startswith("DT_"):
+            indice_dtype = {"DT_BF16": "bfloat16", "DT_DOUBLE": "float64"}.get(
+                indice_dtype.upper(), indice_dtype[3:].lower()
+            )
+        indice = numpy.argmax(x, axis=dim)
+        values = numpy.max(x, axis=dim)
+        return [indice.astype(indice_dtype), values]
 
 
 class SmoothL1LossTestSpec:

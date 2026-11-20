@@ -7,7 +7,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
-"""geir 包根 —— GeirInstance 宿主（Instance 定义于 `__init__.py`）。
+"""geir 包根：GeirInstance 宿主（Instance 定义于 `__init__.py`）。
 
 GeirInstance 基于 InstanceBase 契约（run() 模板 + hook），承担 GEIR 通路的
 生命周期编排。
@@ -25,6 +25,7 @@ from ttk.utilities import cpu_count
 
 from ..common.golden import has_npu_device
 from ..common.instance import InstanceBase, register_instance
+from .graph_builder import graph_signature
 from .result import GeirReturnStructure
 from .testcase import GeirTestcase
 from .worker import run
@@ -37,6 +38,17 @@ class GeirInstance(InstanceBase):
     name = "geir"
     testcase_class = GeirTestcase
 
+    @staticmethod
+    def _binary_signature_key(tc) -> str:
+        """二进制签名排序键：图模式 = 组合签名（graph__op0__op1），单算子 = op_name。
+
+        serve 子进程按 (binary, mtime) 键控，按此键稳定排序即按"重编译/重启
+        边界"分组，同签名用例相邻派发。"""
+        resolved = getattr(tc, "_resolved_graph", None)
+        if resolved:
+            return graph_signature(resolved["ops"])
+        return tc.op_name or ""
+
     # ═══ Abstract hooks（新契约 8 hook）═══
 
     def prepare_env(self):
@@ -48,7 +60,7 @@ class GeirInstance(InstanceBase):
             opp_path = os.getenv("ASCEND_OPP_PATH", "")
             if not opp_path:
                 raise RuntimeError("Install path of opp or compiler is not found. Please check Ascend installation.")
-        # golden-mode NPU 需要设备能力——无卡环境启动期 fail-fast（豁免 no-prof：
+        # golden-mode NPU 需要设备能力，无卡环境启动期 fail-fast（豁免 no-prof：
         # 不上板、不生成设备 golden）。
         if self.switches.golden_mode == "NPU" and not self.switches.no_prof and not has_npu_device():
             raise ValueError(
@@ -87,6 +99,11 @@ class GeirInstance(InstanceBase):
     def build_tasks(self, testcases: List[GeirTestcase]) -> List[Task]:
         grant_events, granted_indices = SimpleCommandProcess.device_grants()
         # GEIR mode: gen + compile + profile in one task (like E2E)
+        # 无 -t/--ti 圈选序时按二进制签名稳定排序，同签名
+        # 用例相邻派发，把 GEInitialize 次数从"切换次数"压到"组合数"（纯调度层
+        # 改动；有用户显式圈选序时以圈选序优先，不抵消 _selection_order_key）。
+        if getattr(self, "_selection_order_key", None) is None:
+            testcases = sorted(testcases, key=self._binary_signature_key)
         tasks = []
         for testcase in testcases:
             if not testcase.is_valid:
@@ -130,7 +147,7 @@ class GeirInstance(InstanceBase):
 
         kernel 生态 keeper（geir 经 _geir_param_order 消费 def.cpp 参数序）；
         forkserver worker 不继承主进程内存，解析期完成的全量 op_info 扫描经
-        引导载荷随 worker 拉起传递——worker 查询全命中，零重复扫描（与
+        引导载荷随 worker 拉起传递，worker 查询全命中，零重复扫描（与
         kernel/aclnn 同机制，快照通道）。"""
         from ttk.core_modules.kernel.info_keeper import snapshot_keeper
 

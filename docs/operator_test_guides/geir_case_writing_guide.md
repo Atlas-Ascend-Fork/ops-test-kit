@@ -9,8 +9,9 @@
 1. **[用例标识与输入](#一用例标识与输入)**
 2. **[格式与属性](#二格式与属性)**
 3. **[可选字段](#三可选字段)**
-4. **[动态维度](#四动态维度)**
-5. **[参考用例](#五参考用例)**
+4. **[图融合Pass](#四图融合pass)**
+5. **[动态维度](#五动态维度)**
+6. **[参考用例](#六参考用例)**
 
 ## 一、用例标识与输入
 
@@ -48,7 +49,29 @@
 | `manual_golden_binaries` | 否 | `()` | 手动 Golden 二进制文件路径 |
 | `manual_xpu_binaries` | 否 | `()` | 已生成的 XPU 输出文件路径，须与手动输入、手动 Golden 成套配置 |
 
-## 四、动态维度
+## 四、图融合Pass
+
+`graph_ops` 列非空即图模式：用例声明多算子 DAG，`ttk geir` 将其组装为 GE 计算图整体编译执行，用于验证融合 Pass 触发与数值等价；为空时不生效，同一 CSV 可与单算子用例混放。
+
+专属字段：
+
+| 字段 | 是否必填 | 默认值 | 说明 |
+|------|---------|--------|------|
+| `graph_ops` | 否 | `()` | 节点列表，拓扑序声明，如 `"('mul','add_n')"` |
+| `graph_edges` | 否 | `()` | `(src, dst)` 连线序列，如 `"(('d0','o0:x1'),('o0:y','o1:x:0'))"`；留空仅限单节点图 |
+| `graph_outputs` | 否 | `None` | 图输出引用；缺省取末节点全部输出 |
+
+既有字段的写法变化：
+
+| 字段 | 图模式写法 |
+|------|-----------|
+| `input_shapes` 等输入列 | 按图输入槽序（`d0, d1, …`）声明；不支持 TensorList 嵌套与 `None` 占位 |
+| `attributes` | 嵌套格式：顶层键 `oN` 选择节点；值内属性名 = 节点属性，输入口名 = 常量定值，如 `{'o0': {'axes': (1,), 'dtype': 'float32'}}` |
+| `output_shapes` 等输出列 | 必须显式声明，不支持推理字符串 |
+
+边引用格式、校验规则与 golden 插件写法详见 [GEIR 图融合Pass](../reference/geir_graph_mode.md)。
+
+## 五、动态维度
 
 动态编译（`-d`）时，`dyn_input_shapes` 描述图编译使用的 shape：`-1` 表示未知维度，`-2` 表示未知秩。未指定时，所有维度按 `-1` 处理（与 Kernel 仅替换正数维度不同）。
 
@@ -62,7 +85,7 @@
 > [!IMPORTANT]
 > GEIR 默认静态编译（`-c`），`dyn_input_shapes` 仅在 `-d` 下生效，需显式指定 `-d`。
 
-## 五、参考用例
+## 六、参考用例
 
 > [!TIP]
 > 现有 Kernel 用例 CSV 可直接用于 GEIR，无需改动；需要精确控制某输入维度的动态性时，在末尾追加 `dyn_input_shapes` 列即可。
@@ -96,6 +119,16 @@
 | `foreach_add_inplace_tensorlist` | 原地 DYNAMIC_OUTPUT（输出与输入同名，框架自动识别 inplace） | `attributes`、`input_data_ranges` |
 | `scatter_list_perf_only` | var 原地更新 + indice/updates/mask 混合 dtype；无 golden（perf-only） | `attributes`、`--golden-mode Disable` |
 | `avgpool_update_int4` | int4 半字节打包输入 | `input_dtypes` |
+
+### 4. 图融合Pass
+
+`examples/case_store/geir/graph_cases.csv`（配套同目录 `golden.py`，3 例）：
+
+| 用例 | 验证特性 | 关键列 |
+|------|---------|--------|
+| `mul_addn_fuse_01` | 多节点显式边 + 动态口 + REQUIRED_ATTR，验证 MulAddNPass 触发与数值等价 | `graph_edges`、`attributes` |
+| `rmwc_cast_fuse_01` | 单节点源模式，Type 属性字符串写法 + 常量定值烤 Const | `attributes` |
+| `graph_neg_dangling_01` | 负向校验对照：悬空图输入，校验期 `GRAPH_DESC_INVALID` | `graph_edges` |
 
 > [!IMPORTANT]
 > 除 `scatter_list_perf_only`（无 golden）外，其余用例的 golden 均由同目录 `golden.py` 插件提供（`--plugin` 加载）。

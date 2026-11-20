@@ -34,6 +34,7 @@ class GeirReturnStructure(ReturnStructureBase):
         "golden_kernel_count",
         "golden_kernel_details",
         "golden_source",
+        "fusion_pass_details",
     )
 
     def __init__(self):
@@ -49,12 +50,18 @@ class GeirReturnStructure(ReturnStructureBase):
         self.precision_metrics = {}
         self.deterministic_status = None
         self.batch_consistency_id = None
-        # golden-mode NPU：golden 执行侧性能（逐模式生成——末模式值覆盖前值）
+        # golden-mode NPU：golden 执行侧性能（逐模式生成，末模式值覆盖前值）
         self.golden_device_perf_us = None
         self.golden_kernel_count = None
         self.golden_kernel_details = None
         self.golden_source = None
-        # dl=3 batch 一致性：worker 切片哈希摘要（随 pipe 回传主进程，非 CSV 列——
+        # 融合 pass 采集：serve 专属目录 fusion_result.json 的快照 diff 结果串
+        # （"PassA:hit=N,effect=M;..."）。两模式触发可不同，逐模式记
+        # cst/dyn_fusion_raw，pick_data 单列按 "cst:xxx,dyn:xxx" 输出。
+        self.cst_fusion_raw = None
+        self.dyn_fusion_raw = None
+        self.fusion_pass_details = None
+        # dl=3 batch 一致性：worker 切片哈希摘要（随 pipe 回传主进程，非 CSV 列，
         # cleanup 组装比对消费）
         self.batch_summary = None
 
@@ -80,12 +87,13 @@ class GeirReturnStructure(ReturnStructureBase):
             "golden_kernel_count",
             "golden_kernel_details",
             "golden_source",
+            "fusion_pass_details",
             "batch_summary",
             "log",
         )
 
     def construct(self, testcase, compare_result: Any, **kwargs) -> None:
-        """聚合抄写——GEIR 为直赋值式（_run_profile 逐模式写槽），无集中 construct。"""
+        """聚合抄写：GEIR 为直赋值式（_run_profile 逐模式写槽），无集中 construct。"""
 
     @staticmethod
     def get_title_indices():
@@ -122,6 +130,14 @@ class GeirReturnStructure(ReturnStructureBase):
                 "golden_source",
             ):
                 data.append(getattr(self, title))
+            elif title == "fusion_pass_details":
+                # 按模式组装；未执行模式不出段，全空 → NA
+                segments = [
+                    f"{m}:{raw}"
+                    for m, raw in (("cst", self.cst_fusion_raw), ("dyn", self.dyn_fusion_raw))
+                    if raw is not None
+                ]
+                data.append(",".join(segments) if segments else "NA")
             elif title == "log":
                 data.append(self.log)
             else:
