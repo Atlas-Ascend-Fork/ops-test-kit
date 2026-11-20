@@ -122,6 +122,9 @@ stages:
     name: PreSmoke
     jobs:
       PreSmoke_A5:
+        permissions:
+          repository: read
+          id-token: write
         name: PreSmoke_A5
         steps:
           -
