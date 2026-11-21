@@ -461,13 +461,27 @@ def _call_plugin_with_plan(testcase, func, switches=None, backend="cpu", device=
 
     device 非 None 时（NPU）：args/kwargs 中 torch 张量 .to(device) 上板，
     extra 注入 device 字符串（声明 device 形参或 **kwargs 的插件才收到）；
-    返回值经 result_to_numpy 回转。cpu_backend 按本例框架自取（模块级缓存）。"""
+    返回值经 result_to_numpy 回转。cpu_backend 按本例框架自取（模块级缓存）。
+
+    TF 域 CPU 计划（device=None）套 cpu_device_context：npu_device.open 后
+    其 as_default patch 令进程内裸 tf.function 恒路由 NPU，golden 的 CPU
+    图（如 fp64 promote 域）在 NPU 无引擎会被 GE 拒绝；context.device
+    原语不受该 patch 影响（见 cpu_tf_backend），与输入生成路径同法隔离。"""
     plan = testcase.get_param_plan()
     if plan is None:
         raise RuntimeError(f"No param plan for {testcase.api_name}, cannot call golden plugin")
     cpu_backend = _get_cpu_backend(detect_framework(testcase.api_name))
     use_numpy = cpu_backend.needs_numpy_fallback(testcase)
 
+    if device is None and detect_framework(testcase.api_name) == "tf":
+        from ..common.backend.cpu_tf_backend import cpu_device_context
+
+        with cpu_device_context():
+            return _call_plugin_body(testcase, func, switches, backend, device, plan, cpu_backend, use_numpy)
+    return _call_plugin_body(testcase, func, switches, backend, device, plan, cpu_backend, use_numpy)
+
+
+def _call_plugin_body(testcase, func, switches, backend, device, plan, cpu_backend, use_numpy):
     if isinstance(func, type):
         return _call_class_golden(testcase, func, plan, switches, cpu_backend, device=device)
     # Promote 时插件收升精度输入副本，testcase.tensors 原样
