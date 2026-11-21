@@ -135,13 +135,20 @@ stages:
               allow-unsafe-pr-checkout: true
               ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
           -
+            name: oidc_auth
+            uses: huaweicloud-oidc-auth
+            with:
+              audience: ${{ secrets.audience }}
+              agency_urn: ${{ secrets.agency_urn }}
+              provider_urn: ${{ secrets.provider_urn }}
+              region: cn-north-4
+              duration: 3600
+          -
             name: download
             uses: obs-download
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               key: |
                 ${{ env.obs_path }}/pr_filelist.txt
                 ${{ env.obs_path }}/pr_filelist_mod.txt
@@ -153,8 +160,6 @@ stages:
               export repo_name=${{env.repo_name}}
               export pr_id=${{ env.MERGE_ID }}
               export obs_smoke_path=${{env.obs_smoke_path}}
-              export AK=${{secrets.AK}}
-              export SK=${{secrets.SK}}
               export WORKSPACE=${{ steps.process_checkout.outputs.path }}
               # ---- 依赖保障(幂等,镜像已含则秒过):按通路解释器补装缺失依赖 ----
               # python39(kernel/GEIR/ACLNN/onnx 解释器,与 CANN cp39 匹配):tbe 链 + en-dtypes + onnx
@@ -191,8 +196,6 @@ stages:
             with:
               endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
               bucket: "ascend-ci"
-              access-key: ${{ secrets.AK }}
-              secret-key: ${{ secrets.SK }}
               artifact-path: "${{ steps.process_checkout.outputs.path }}/*.tar.gz"
               object-prefix: ${obs_smoke_path}/plog/
         if: env.TARGET_BRANCH == 'master'
