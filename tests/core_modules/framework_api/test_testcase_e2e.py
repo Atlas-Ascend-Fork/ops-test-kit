@@ -855,6 +855,38 @@ class TestOutputConfigurationValidation:
         assert not case.is_valid
         assert case.fail_reason == "MISSING_REQUIRED_OUTPUT"
 
+    def test_functional_overload_not_shadowed_by_out_overload(self, make_testcase):
+        """函数式 + 必选 out 重载并存时，测函数式（未填 output_tensor_indexes）不得被判 MISSING_REQUIRED_OUTPUT。"""
+        info = APIParamInfo(
+            api_name="torch_npu.test_stride_copy",
+            overloads=[
+                [
+                    ParamInfo(name="input", type="Tensor"),
+                    ParamInfo(name="shape", type="tuple of ints"),
+                    ParamInfo(name="stride", type="tuple of ints"),
+                    ParamInfo(name="storage_offset", type="Number"),
+                ],
+                [
+                    ParamInfo(name="input", type="Tensor"),
+                    ParamInfo(name="shape", type="tuple of ints"),
+                    ParamInfo(name="stride", type="tuple of ints"),
+                    ParamInfo(name="storage_offset", type="Number"),
+                    ParamInfo(name="out", type="Tensor", is_keyword_only=True),
+                ],
+            ],
+            _return_counts=[1, 1],
+            source="test",
+        )
+        FrameworkApiInfoKeeper().register("torch_npu.test_stride_copy", info)
+        case = make_testcase(
+            api_name="torch_npu.test_stride_copy",
+            tensor_view_shapes=((7, 13),),
+            tensor_dtypes=("float32",),
+            attributes={"shape": [3, 5], "stride": [13, 2], "storage_offset": 5},
+        )
+        case.validate()
+        assert case.is_valid, case.fail_reason
+
     def test_tensorlist_and_optional_out(self, make_testcase):
         info = APIParamInfo(
             api_name="torch_npu.test_tl_out",

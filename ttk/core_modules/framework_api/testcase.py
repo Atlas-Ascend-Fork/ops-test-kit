@@ -194,15 +194,7 @@ class TestcaseE2e(ApiTestcaseBase):
                 logging.warning(f"[{self.testcase_name}] get_api_info returned None for {self.api_name}")
                 return None
 
-            out_indices = set(self.output_tensor_indexes or ())
-            top_count = len(self.tensor_view_shapes or ())
-            if self._is_inplace_tensor_method(self.api_name):
-                input_count = top_count
-            else:
-                input_count = sum(
-                    1 for i in range(top_count) if self.tensor_view_shapes[i] is not None and i not in out_indices
-                )
-
+            input_count = self._resolve_input_tensor_count()
             dist = self.tensor_list_dist
             tensor_distribution = [d > 0 for d in dist] if dist else None
 
@@ -230,6 +222,30 @@ class TestcaseE2e(ApiTestcaseBase):
             # 此处只剩真实异常——吞掉会让排障只见 PARAM_PLAN_FAILURE
             logging.warning(f"[{self.testcase_name}] get_param_plan raised for {self.api_name}", exc_info=True)
             return None
+
+    def _resolve_input_tensor_count(self):
+        """输入张量位计数：剔除输出位与 None 槽（对齐 match_overload 的 input_tensor_count 口径）。"""
+        out_indices = set(self.output_tensor_indexes or ())
+        top_count = len(self.tensor_view_shapes or ())
+        if self._is_inplace_tensor_method(self.api_name):
+            return top_count
+        return sum(1 for i in range(top_count) if self.tensor_view_shapes[i] is not None and i not in out_indices)
+
+    def _matched_overload(self, info):
+        """精确重载匹配（属性键重叠打分为主）；无候选时返回 None。"""
+        input_count = self._resolve_input_tensor_count()
+        dist = self.tensor_list_dist
+        tensor_distribution = [d > 0 for d in dist] if dist else None
+        _, oidx = match_overload(
+            self.api_name,
+            input_count,
+            attributes=self.attributes,
+            tensor_distribution=tensor_distribution,
+            api_info=info,
+        )
+        if oidx is None or oidx < 0 or oidx >= len(info.overloads):
+            return None
+        return info.overloads[oidx]
 
     # ========== Flat properties ==========
 
@@ -851,23 +867,22 @@ class TestcaseE2e(ApiTestcaseBase):
 
         Checks:
         1. Indexes within top-level range
-        2. If API has a required out parameter, testcase must provide output tensors
+        2. If the matched overload has a required out parameter, testcase must provide output tensors
         3. If API has a Tensor[] out, output count must match out_expected_count
         """
         if not self.is_valid:
             return
         info = self.get_api_info()
         if not self.output_tensor_indexes:
-            if info is not None:
-                any_out_required = any(ov.layout.is_out_required for ov in info.overloads)
-                if any_out_required:
-                    self.is_valid = False
-                    self.fail_reason = "MISSING_REQUIRED_OUTPUT"
-                    logging.error(
-                        f"[{self.testcase_name}] API [{self.api_name}] has overloads "
-                        f"with required 'out' parameter, but testcase provides no "
-                        f"output_tensor_indexes. (source: {info.source})"
-                    )
+            ov = self._matched_overload(info) if info is not None else None
+            if ov is not None and ov.layout.is_out_required:
+                self.is_valid = False
+                self.fail_reason = "MISSING_REQUIRED_OUTPUT"
+                logging.error(
+                    f"[{self.testcase_name}] API [{self.api_name}] matched overload "
+                    f"has required 'out' parameter, but testcase provides no "
+                    f"output_tensor_indexes. (source: {info.source})"
+                )
             return
         top_count = len(self.tensor_view_shapes)
         out_of_range = [i for i in self.output_tensor_indexes if i < 0 or i >= top_count]

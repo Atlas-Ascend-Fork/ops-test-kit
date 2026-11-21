@@ -953,9 +953,8 @@ def dispatch_to_remote(
 
     if deadline_s is None:
         deadline_s = _cfg("dispatch_deadline_s", 300.0, int)
-    else:
-        # 重叠形态：请求横跨 NPU 执行期，socket 读超时同样须覆盖（至少 = deadline）
-        timeout = max(timeout, int(deadline_s))
+    # socket 读超时同样须覆盖 deadline（至少 = deadline），同步/重叠一致。
+    timeout = max(timeout, int(deadline_s))
     plan = _DispatchPlan(
         headers=headers,
         mode_int=meta.mode_int,
