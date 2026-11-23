@@ -12,7 +12,7 @@
 --rerun 多轮逐轮采集三方交叉校验（cross_check）的 mare/mere/rmse 三比值作为
 样本；对每路样本做 Bootstrap 有放回重采样（1000 次）取中位数；95% 置信区间
 取中位数集合的第 25 小 / 第 976 小（顺序统计量）。判定：任一比值 CI 下限
-> 1.0 → FAIL（NPU 系统性精度劣于三方）；否则 PASS（原失败属数值抖动）。
+> 1.0 → FAIL（NPU 系统性精度劣于三方）。单轮已确认的 NaN/Inf 不匹配也保留为 FAIL。
 
 纯 numpy、无 IO / 设备依赖，供 common/instance 统计复检聚合与单测共用。
 """
@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy
+
+from .registry import FAIL_REASONS
 
 __all__ = [
     "BOOTSTRAP_TIMES",
@@ -93,9 +95,7 @@ def _is_metrics_entry(payload) -> bool:
 
 
 def _collect_ratio_samples(samples: list, mode: str, out_idx, metrics) -> None:
-    """单个 metrics 条目 → 三比值样本（非 cross_check / None / NaN 跳过）。"""
-    if not _is_metrics_entry(metrics) or metrics.get("standard") != "cross_check":
-        return
+    """单个 cross_check 条目 → 三比值样本（跳过 None / NaN）。"""
     result = metrics.get("result") or {}
     for ratio in RATIO_KEYS:
         value = result.get(ratio)
@@ -107,23 +107,20 @@ def _collect_ratio_samples(samples: list, mode: str, out_idx, metrics) -> None:
         samples.append((str(mode), int(out_idx), ratio, value))
 
 
-def _extract_ratio_samples(precision_metrics) -> List[Tuple[str, int, str, float]]:
-    """单轮比对 metrics → 三比值样本列表。
+def _iter_output_metrics(precision_metrics):
+    """遍历单轮比对的模式、输出序号和 metrics 条目。
 
     兼容两种嵌套形状（按值是否为 metrics 条目分层判定）：
     - 带模式层（kernel/geir/e2e）：{"dyn": {out_idx: {...}}, "eager": ...}；
     - 无模式层（aclnn 直接落比对层产物）：{out_idx: {...}}——mode 记 ""。
-    非 cross_check 标准的输出条目无三比值，天然跳过。比值可为 None
-    （小值域/三方全无效位不参与比值路径）——None 不产样本。
     """
-    samples = []
     for key, payload in (precision_metrics or {}).items():
         if _is_metrics_entry(payload):
-            _collect_ratio_samples(samples, "", key, payload)
+            yield "", key, payload
         elif isinstance(payload, dict):
             for out_idx, metrics in payload.items():
-                _collect_ratio_samples(samples, str(key), out_idx, metrics)
-    return samples
+                if _is_metrics_entry(metrics):
+                    yield str(key), out_idx, metrics
 
 
 class RecheckCollector:
@@ -136,6 +133,7 @@ class RecheckCollector:
 
     def __init__(self):
         self._samples: Dict[Tuple[str, int, str], List[float]] = {}
+        self._nan_inf_mismatches = set()
         self.total_rounds = 0
         self.valid_rounds = 0
         self.failed_rounds = 0
@@ -143,7 +141,14 @@ class RecheckCollector:
 
     def add_run(self, precision_metrics) -> None:
         self.total_rounds += 1
-        samples = _extract_ratio_samples(precision_metrics)
+        samples = []
+        for mode, out_idx, metrics in _iter_output_metrics(precision_metrics):
+            if metrics["standard"] != "cross_check":
+                continue
+            # 特殊值位不参与比值统计，保留三方校验已确认的不匹配。
+            if metrics.get("reason") == FAIL_REASONS["nan_inf_mismatch"]:
+                self._nan_inf_mismatches.add((mode, int(out_idx)))
+            _collect_ratio_samples(samples, mode, out_idx, metrics)
         if not samples:
             self.failed_rounds += 1
             self._bump_marker("NO_RATIO_SAMPLES")
@@ -161,7 +166,7 @@ class RecheckCollector:
         self.fail_markers[marker] = self.fail_markers.get(marker, 0) + 1
 
     def finish(self, base_seed, testcase_name: str) -> "RecheckVerdict":
-        if not self._samples:
+        if not self._samples and not self._nan_inf_mismatches:
             return RecheckVerdict(
                 "SKIP",
                 reason="no cross_check ratio samples collected (standard is not cross_check / third-party unavailable)",
@@ -201,6 +206,11 @@ class RecheckCollector:
                 if entry["verdict"] == "FAIL"
             ]
             reason = "systematic precision degradation (bootstrap ci_lower>1.0): " + ", ".join(failed_paths)
+        if self._nan_inf_mismatches:
+            status = "FAIL"
+            paths = ", ".join(_path_label(mode, out_idx) for mode, out_idx in sorted(self._nan_inf_mismatches))
+            mismatch_reason = f"{FAIL_REASONS['nan_inf_mismatch']}: {paths}"
+            reason = f"{mismatch_reason}. {reason}" if reason else mismatch_reason
         return RecheckVerdict(
             status,
             reason=reason,

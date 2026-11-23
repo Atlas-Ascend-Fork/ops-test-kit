@@ -17,8 +17,10 @@
 import csv
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
+from ttk.core_modules.common.comparison.cross_check import CrossCheckComparison
 from ttk.core_modules.common.instance import InstanceBase
 from ttk.switches import SWITCHES, get_global_storage, set_global_storage
 
@@ -160,6 +162,45 @@ def test_verdict_fail_gates_exit_code(storage, tmp_path):
     assert row["precision_status"] == "FAIL"
     assert "systematic" in row["reason"]
     assert "dyn/out0/mare=1.5" in row["reason"]  # 失败路明细：mode/输出序/比值与 CI 下限
+
+
+@pytest.mark.parametrize("include_normal_values", [True, False])
+def test_repeated_nan_inf_mismatch_keeps_summary_failed(storage, tmp_path, include_normal_values):
+    inst, written = _stat_inst(storage, 3, tmp_path)
+    reference = np.array([1.0, 0.0] if include_normal_values else [0.0], dtype=np.float32)
+    output = reference.copy()
+    output[-1] = np.nan
+    comparison = CrossCheckComparison(
+        output,
+        reference,
+        0,
+        "float32",
+        {
+            "level": "L1",
+            "mare_ratio": 5.0,
+            "mere_ratio": 1.5,
+            "rmse_ratio": 1.5,
+            "small_value": 2**-14,
+            "small_value_atol": 2**-30,
+        },
+        third_party=reference,
+    )
+    _, _, passed, metrics = comparison.compare()
+    assert not passed
+    assert metrics["reason"] == "NaN/Inf mismatch"
+    assert metrics["result"]["mare"] == (1.0 if include_normal_values else None)
+    for round_idx in range(3):
+        name = f"A__rc{round_idx}"
+        inst._dispatch_result_row(_task(name), _row(name), {"dyn": {0: metrics}})
+
+    assert [row[2] for row in written] == ["FAIL"] * 3
+    summary = _summary_rows(tmp_path)
+    assert summary is not None
+    row = dict(zip(*summary))
+    assert row["precision_status"] == "FAIL"
+    assert "NaN/Inf mismatch" in row["reason"]
+    assert "dyn/out0" in row["reason"]
+    assert inst.fail_count == 1
 
 
 def test_no_samples_no_summary_row(storage, tmp_path):

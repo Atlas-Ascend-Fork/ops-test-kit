@@ -740,8 +740,10 @@ class InstanceBase(metaclass=ABCMeta):
             self._finalize_rerun_group(match.group("base"))
 
     def _finalize_rerun_group(self, base: str) -> None:
-        """全轮到齐 → bootstrap 终判行写 {原始文件名}_rc_summary.csv。无样本
-        （标准不符/三方不可用/全轮失败）判 SKIP：不产终判行，只记 debug 日志。"""
+        """全轮到齐后将复检终判行写入 {原始文件名}_rc_summary.csv。
+
+        缺少比值样本且未确认 NaN/Inf 不匹配时判 SKIP，只记 debug 日志。
+        """
         group = self._rerun_groups.pop(base)
         verdict = group["collector"].finish(getattr(self.switches, "random_seed", None), base)
         if verdict.status == "SKIP":
