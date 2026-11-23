@@ -62,6 +62,10 @@ python3 -m ttk kernel -i cases.csv \
 
 `cross_check` 计算 NPU 输出与三方输出的误差比值（mare/mere/rmse），按 level 预设容差判定，详见 [精度比对方法](../reference/precision_comparison.md)。
 
+判定之外会旁路统计两两 ULP 距离（NPU vs CPU / NPU vs XPU / XPU vs CPU，按输出 dtype 网格），
+写入与结果 CSV 同目录的明细文件（`<结果名>_compare_detail.csv`）——不影响 PASS/FAIL，列含义与读取示例见
+[精度比对方法 · 三方 ULP 明细](../reference/precision_comparison.md#三方-ulp-明细compare_detailcsv)。
+
 ### 2. provider 过滤
 
 多个算子配了不同 provider 时，用 `--provider torch` 缩小范围（不改变 spec 里的声明）。

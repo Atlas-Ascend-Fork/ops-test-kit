@@ -386,6 +386,33 @@ python3 -m ttk kernel -i cases.csv --compare cross_check --config ttk.conf.yaml 
 > [!NOTE]
 > 完整使用方法详见 [三方交叉校验与性能采集](../tips/cross_check_guide.md)。
 
+### 三方 ULP 明细（compare_detail.csv）
+
+cross_check 在判定之外**旁路统计**两两 ULP 距离（观测指标，不影响 PASS/FAIL）：
+以**声明的输出 dtype** 为刻度，三方各自 RNE 折叠到该档（Promote 抬档的 golden、
+异 dtype 的 XPU 同折；NPU 输出恒等），经 IEEE754 位模式单调整调键求整数距离
+`|Δkey|`——两值间隔的可表示值个数。三对结果写入与结果 CSV 同目录的
+`compare_detail.csv`（`xxx_result.csv` → `xxx_result_compare_detail.csv`、`report.csv` →
+`report_compare_detail.csv`——恒用主结果完整文件名派生）——**宽表：一行 =
+一个 (用例, 模式, 输出)**，三对 max_ulp 各作一列，主表 `precision_metrics` 的
+cross_check 参数（standard/level/pass、实测比值、level 上限、small_value）平铺并入同行：
+
+| 列 | 含义 |
+|----|------|
+| `golden_is_third_party` | golden 是否即 third_party 同一份数据（`--golden-mode XPU`）——True 时 npu_cpu/xpu_cpu 两列 N/A |
+| `npu_cpu_max_ulp` / `npu_xpu_max_ulp` / `xpu_cpu_max_ulp` | 三对最大 ULP（非负十进制整数）；该对无有限位置 → `N/A` |
+| `standard` / `level` / `pass` | 判据名 / L0~L2 预设 / 判定结论 |
+| `mare` / `mere` / `rmse` | 实测三比值（值域未参与时为空） |
+| `small_err_cnt_target` / `small_err_cnt_third` / `small_err_ratio` | 小值域误差计数与比值 |
+| `mare_limit` / `mere_limit` / `rmse_limit` / `small_value` / `small_value_atol` | level 预设上限与小值域阈值 |
+| `reason` | 失败原因（PASS 为空） |
+
+- 空输出（shape 含 0 维）与 f64/isclose 路由的用例**不产行**（比对短路 / 无三方语义）；
+- 输出 dtype 不在 fp16/bf16/fp32 支持集 → 三对列 `N/A`、`output_dtype` 如实展示；
+- ±0.0 与 -0.0 记 1 ULP（位级语义）；golden 折叠后的亚 ULP 差异不体现（比值判据互补）；
+- `result.csv` 的 `precision_metrics` 列不含 ULP 数据（明细与判定两产物互斥）；
+- 设计细节见 [ULP 明细设计](./ulp_compare_detail_design.md)。
+
 ## 九、方法选择与容差
 
 ### 1. 自动切换

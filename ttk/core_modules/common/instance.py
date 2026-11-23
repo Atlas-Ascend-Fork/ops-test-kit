@@ -37,6 +37,7 @@ import subprocess
 import time
 from abc import ABCMeta, abstractmethod
 from contextlib import suppress
+from dataclasses import dataclass
 from multiprocessing.context import BaseContext
 from typing import IO, Any, Dict, List, Optional, Tuple, Union
 
@@ -47,6 +48,7 @@ from ttk.switches import get_global_storage
 from ...utilities import VERSION, cpu_count, render_table
 from .comparison import compare_batch_consistency
 from .comparison.recheck import RecheckCollector
+from .comparison.ulp import COMPARE_DETAIL_HEADER, iter_detail_rows, pop_ulp_payloads
 from .device import DSMI_HEALTH_STATE, DSMIInterface
 from .process import ProcessGroup, SimpleCommandProcess, Task, TaskKeeper
 from .testcase import TestcaseBase
@@ -57,6 +59,29 @@ from .testcase.reader import iter_tables
 # ═══ 通路注册表（bridge 经 get_instance_by_name 分发，无 if-else）═══
 
 _INSTANCE_REGISTRY: Dict[str, "InstanceBase"] = {}
+
+
+@dataclass
+class _CompareDetailContext:
+    """三方 ULP 明细（compare_detail.csv）的上下文状态（检视意见：按功能模块封装）。
+
+    按功能模块封装而非平铺在 InstanceBase.__init__（检视意见：避免散弹式扩展），
+    生命周期由 _open_compare_detail_context / _ensure_compare_detail_writer 管理。
+    惰性创建：首个携带 metrics["ulp"] 的结果行才建文件；close 随 cleanup 收尾。
+    """
+
+    path: str = ""  # 明细文件路径（完整 stem 派生 + 冲突守卫）
+    file: Optional[IO[Any]] = None  # 写入句柄（惰性打开）
+    writer: Optional[csv.writer] = None  # CSV writer
+    name_idx: Optional[int] = None  # testcase_name 列定位（表头解析一次）
+    metrics_idx: Optional[int] = None  # precision_metrics 列定位
+
+    def close(self) -> None:
+        """关闭写入句柄（cleanup 收尾调用；未打开时零副作用）。"""
+        if self.file:
+            self.file.close()
+            self.file = None
+            self.writer = None
 
 
 def register_instance(name: str):
@@ -152,6 +177,10 @@ class InstanceBase(metaclass=ABCMeta):
         self.result_csv_writer = None
         self.result_csv_file: Optional[IO[Any]] = None
         self.result_path: str = ""
+        # Compare Detail CSV Storage（三方 ULP 明细，compare_detail.csv）：
+        # 按功能模块封装为 _CompareDetailContext（检视意见：不平铺散弹），
+        # 惰性创建——首个携带 metrics["ulp"] 的结果行才建文件
+        self._detail = _CompareDetailContext()
         # Testcase
         self.case_original_headers: List[str] = []
         self.case_result_titles: Tuple[str] = ()
@@ -480,6 +509,8 @@ class InstanceBase(metaclass=ABCMeta):
             self._recheck_summary_file.close()
         if self.result_csv_file:
             self.result_csv_file.close()
+        if self._detail.file:
+            self._detail.close()
         self._print_final_summary()
 
     def _collect_batch_summary(self, task: Task, result: Any) -> None:
@@ -638,6 +669,7 @@ class InstanceBase(metaclass=ABCMeta):
             logging.info(f"Created output directory: {parent_dir}")
         append_mode = self.switches.append_mode
         file_exists = os.path.exists(self.result_path) and os.path.getsize(self.result_path) > 0
+        main_continued = False  # 主表是否为"续写既有文件"（决定明细上轮数据去留）
         if append_mode and file_exists:
             self._prepare_output_titles()
             existing_header = self._read_existing_header(self.result_path)
@@ -648,6 +680,7 @@ class InstanceBase(metaclass=ABCMeta):
                 self._header_flushed = True
                 self._precision_status_idx = self._resolve_precision_status_idx(self.case_result_titles)
                 logging.info(f"Append mode: appending to existing {self.result_path}")
+                main_continued = True
             else:
                 logging.warning(
                     f"Append mode: existing file header does not match "
@@ -663,9 +696,19 @@ class InstanceBase(metaclass=ABCMeta):
             self.result_csv_writer = csv.writer(self.result_csv_file)
             self._prepare_output_titles()
             self.write_row(self.case_result_titles)
+        # 三方 ULP 明细上下文：路径 + 摘出钩子的列定位 + 生命周期跟随主表
+        # （两分支均已算好 case_result_titles；文件不预创建——首行惰性）
+        self._open_compare_detail_context(main_continued)
 
     def write_row(self, row: tuple) -> None:
-        """写 CSV 行 + 摘要计数（首行为表头只落盘不计数）。"""
+        """写 CSV 行 + 摘要计数（首行为表头只落盘不计数）。
+
+        数据行先经 _emit_compare_detail 摘出 ulp 子树再落盘：precision_metrics
+        单元格保持纯判定指标（result.csv 对既有消费方逐字节等价），摘出载荷
+        写 compare_detail.csv；非 cross_check 行零扰动。
+        """
+        if self._header_flushed:
+            self._emit_compare_detail(row)
         self.result_csv_writer.writerow(row)
         self.result_csv_file.flush()
         if not self._header_flushed:
@@ -771,6 +814,105 @@ class InstanceBase(metaclass=ABCMeta):
                 base,
                 group["count"],
             )
+
+    def _resolve_column_idx(self, name: str) -> Optional[int]:
+        """按结果表头定位列索引（open_output 后 case_result_titles 恒就绪）。"""
+        try:
+            return self.case_result_titles.index(name)
+        except (ValueError, AttributeError):
+            return None
+
+    def _derive_compare_detail_path(self) -> str:
+        """compare_detail 路径：从主结果完整文件名派生专属名，不与输入/主结果撞车。
+
+        恒用主结果完整 stem（含 _result 等后缀部分）：`<完整stem>_compare_detail.csv`。
+        检视意见 P1：不再用同目录固定名 compare_detail.csv——`-i compare_detail.csv
+        -o report.csv` 会覆写输入、`-o compare_detail.csv` 两个 writer 写同一文件。
+        检视意见 P2：不剥 _result 等后缀——`jobs_result.csv` 与 `jobs.csv` 剥后
+        同为 jobs，两份合法主表会共用同一份明细，后写覆盖先写。
+        派生名若仍与主结果或任一输入指向同一文件，追加 _1/_2… 直到独立。
+        """
+        if not self.result_path:
+            return ""
+        # 恒用主结果完整 stem（不剥 _result 后缀——检视意见 P2：jobs_result.csv
+        # 与 jobs.csv 剥后同为 jobs，两份合法主表会共用同一份明细导致先写被覆盖）
+        stem, _ = os.path.splitext(self.result_path)
+        taken = {os.path.abspath(self.result_path)}
+        taken |= {os.path.abspath(f) for f in (getattr(self.switches, "input_files", None) or []) if f}
+        candidate = stem + "_compare_detail.csv"
+        n = 1
+        while os.path.abspath(candidate) in taken:
+            candidate = f"{stem}_compare_detail_{n}.csv"
+            n += 1
+        return candidate
+
+    def _open_compare_detail_context(self, main_continued: bool) -> None:
+        """明细上下文初始化：路径 + 列定位 + 生命周期跟随主表（检视意见 P2）。
+
+        主表续写（--append 且表头一致）→ 明细文件保留待续（惰性追加）；
+        主表重建/新建 → 上一轮遗留的明细一并删除——否则主表只含本轮数据、
+        明细却残留上轮用例，且"本轮无 ULP 行"时旧明细文件仍留在新主表旁。
+        """
+        self._detail.path = self._derive_compare_detail_path()
+        if not main_continued and self._detail.path and os.path.exists(self._detail.path):
+            with suppress(OSError):
+                os.remove(self._detail.path)
+        self._detail.name_idx = self._resolve_column_idx("testcase_name")
+        self._detail.metrics_idx = self._resolve_column_idx("precision_metrics")
+
+    def _emit_compare_detail(self, row: tuple) -> None:
+        """write_row 单点钩子：行内 precision_metrics 摘出 ulp 子树 → 明细文件。
+
+        原地 pop（嵌套 dict 可变，writerow 序列化的即是摘出后内容——行 tuple
+        无需重建）；摘出为空（非 cross_check 判据 / 占位行 / 错误行）零副作用。
+        四通路结果行都经 write_row，通路专属代码零散改。
+        """
+        if self._detail.metrics_idx is None or self._detail.metrics_idx >= len(row):
+            return
+        metrics = row[self._detail.metrics_idx]
+        if not isinstance(metrics, dict):
+            return
+        payloads = pop_ulp_payloads(metrics)
+        if not payloads:
+            return
+        name_idx = self._detail.name_idx
+        name = row[name_idx] if name_idx is not None and name_idx < len(row) else ""
+        self._write_compare_detail_rows(name, payloads)
+
+    def _write_compare_detail_rows(self, testcase_name, payloads: dict) -> None:
+        """逐 (mode, out_idx) 载荷渲染宽表行（三对 max_ulp 作列 + cross_check
+        参数并入）并逐次 flush。payloads 值为 (ulp_payload, leaf_metrics) 二元组。"""
+        self._ensure_compare_detail_writer()
+        if self._detail.writer is None:
+            return
+        for (mode, out_idx), (payload, metrics) in payloads.items():
+            for detail in iter_detail_rows(payload, metrics, testcase_name, mode, out_idx):
+                self._detail.writer.writerow(detail)
+        self._detail.file.flush()
+
+    def _ensure_compare_detail_writer(self):
+        """惰性打开 compare_detail.csv：首个明细行才建文件。
+
+        append 语义与结果 CSV 同款：--append 且文件存在且表头对账一致 → 续写；
+        其余（首建 / 非 append / 表头不一致）→ 覆写并打告警（复用
+        _read_existing_header 的对账逻辑）。
+        """
+        if self._detail.writer is not None or not self._detail.path:
+            return
+        exists = os.path.exists(self._detail.path) and os.path.getsize(self._detail.path) > 0
+        header_match = False
+        if exists:
+            existing = self._read_existing_header(self._detail.path)
+            header_match = existing is not None and tuple(existing) == tuple(COMPARE_DETAIL_HEADER)
+            if not header_match:
+                logging.warning(f"compare_detail.csv header does not match, overwriting {self._detail.path}")
+        append = bool(getattr(self.switches, "append_mode", False)) and exists and header_match
+        self._detail.file = open(  # noqa: SIM115
+            self._detail.path, newline="", mode="a" if append else "w"
+        )
+        self._detail.writer = csv.writer(self._detail.file)
+        if not append:
+            self._detail.writer.writerow(COMPARE_DETAIL_HEADER)
 
     def close_subprocesses(self):
         self._stop_heartbeat_process()

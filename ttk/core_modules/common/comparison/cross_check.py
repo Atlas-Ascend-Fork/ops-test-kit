@@ -21,6 +21,7 @@ import numpy as np
 
 from ....utilities.dtypes import is_float_dtype, resolve_numpy_dtypes
 from .registry import CHUNK_SIZE, FAIL_REASONS, ComparisonBase, EachCompareResult, _TopK, register_comparison
+from .ulp import scan_ulp_triplet
 
 
 def fold_to_output_dtype(a, output_dtype):
@@ -168,11 +169,19 @@ class CrossCheckComparison(ComparisonBase):
         large_result = self._assemble_large(state, sv, limits)
         small_result = self._assemble_small(state)
 
+        # 三方 ULP 明细（观测指标，不参与判定）：按输出 dtype 网格计算两两
+        # 整数 ULP 距离，挂 metrics["ulp"] 过 pipe 回传——主进程 write_row
+        # 摘出写 compare_detail.csv（口径与生命周期详见 comparison/ulp.py）。
+        # golden_is_third_party：--golden-mode XPU 时 golden≡third_party（同一
+        # 份数据），据此宽表对无 CPU 参与的两列渲染 N/A（检视意见 P2）。
+        ulp_payload = scan_ulp_triplet(t, g, b, self.output_dtype, golden_is_third_party=np.shares_memory(g, b))
+
         passed = large_result.ratio_ok and state.special_ok and small_result.ok
         diff_idx = large_result.diff_idx + small_result.diff_idx
 
         reason = self._build_reason(passed, state.special_ok, small_result, large_result)
         metrics = self._build_metrics(limits, sv, large_result, small_result, passed, reason)
+        metrics["ulp"] = ulp_payload
 
         _diff_arr = np.array(diff_idx, dtype=int) if diff_idx else None
         return EachCompareResult(
