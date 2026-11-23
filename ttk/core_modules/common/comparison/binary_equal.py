@@ -17,6 +17,7 @@ _log_diff_output 消费）；差异元素计数为精确值（precision 不变�
 
 # Standard Packages
 import hashlib
+from typing import Optional
 
 import numpy as np
 
@@ -90,21 +91,17 @@ class BinaryComparison(ComparisonBase):
         )
 
     @staticmethod
-    def _bytes_equal(output: np.ndarray, golden: np.ndarray) -> bool:
-        """逐字节相等判定（与 SHA256 字节哈希同语义，但走 SIMD 且首块不等即短路）。
-
-        仅对可 .data 直读的常规 dtype 成立（调用方以 _HASH_COPY_DTYPES 闸门）；
-        判"两块内存是否逐字节相同"不需要密码学哈希，实测 2GiB 一对：
-        SHA256 x2 = 1.97s，本法 = 0.09s。浮点 ±0 / NaN 的字节级差异同样判不等。"""
+    def _first_differing_byte_chunk(output: np.ndarray, golden: np.ndarray) -> Optional[int]:
+        """返回首个字节不同的块的起点，完全相同时返回 None。"""
         if output.nbytes != golden.nbytes:
-            return False
+            return 0
         ou = output.view(np.uint8).reshape(-1)
         gu = golden.view(np.uint8).reshape(-1)
         for start in range(0, ou.size, CHUNK_SIZE):
             end = min(start + CHUNK_SIZE, ou.size)
             if not np.array_equal(ou[start:end], gu[start:end]):
-                return False
-        return True
+                return start
+        return None
 
     @staticmethod
     def _numpy_binary_compare(output: np.ndarray, golden: np.ndarray):
@@ -118,11 +115,12 @@ class BinaryComparison(ComparisonBase):
         if "float4" in str(output.dtype):
             output = output.view(np.int8)
             golden = golden.view(np.int8)
-        # 逐字节快路径（SIMD + 首块不等即短路）替代整对 SHA256——语义与字节哈希
-        # 完全一致。view(uint8) 对无 .data 直读的自定义窄 dtype（bfloat16/int4/
-        # fp8 等）不成立，那几类仍走分块哈希。
+        # 常规 dtype 逐块比较字节。找到差异后，从该块开始定位元素。
+        # 需要复制字节的自定义 dtype 仍走分块哈希。
+        start = 0
         if output.dtype.name not in _HASH_COPY_DTYPES:
-            if BinaryComparison._bytes_equal(output, golden):
+            start = BinaryComparison._first_differing_byte_chunk(output, golden)
+            if start is None:
                 return None, golden.size, 0
         elif _hash_array(output) == _hash_array(golden):
             return None, golden.size, 0
@@ -131,13 +129,14 @@ class BinaryComparison(ComparisonBase):
             output,
             golden,
             output.dtype.itemsize,  # view 后为 1（e8m0/float4 字节位即元素位）
+            start=start,
         )
         if not diff_count:
             return None, golden.size, 0
         return np.asarray(first_k, dtype=np.int64), golden.size, diff_count
 
     @staticmethod
-    def _scan_byte_diff(output, golden, itemsize):
+    def _scan_byte_diff(output, golden, itemsize, *, start):
         """字节级分块差异定位 → (前 K 个差异元素位升序, 差异元素总数)。
 
         CHUNK_SIZE 为 2^20，被任意 2 的幂 itemsize 整除——字节块边界不切断元素，
@@ -146,7 +145,7 @@ class BinaryComparison(ComparisonBase):
         golden_int = golden.view(np.uint8)
         first_k = _FirstK(BinaryComparison.MAX_DIFF_OUTPUT)
         diff_count = 0
-        for s in range(0, output_int.size, CHUNK_SIZE):
+        for s in range(start, output_int.size, CHUNK_SIZE):
             same = output_int[s : s + CHUNK_SIZE] == golden_int[s : s + CHUNK_SIZE]
             if same.all():
                 continue

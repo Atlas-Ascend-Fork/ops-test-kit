@@ -12,8 +12,6 @@
 分块比对快速路径回归测试；分块驱动方式
 按分支 API（CloseComparison._isclose / registry.CHUNK_SIZE）适配。"""
 
-import hashlib
-
 import numpy as np
 import pytest
 
@@ -68,8 +66,8 @@ def test_close_chunked_matches_single_shot_across_boundary():
 
 
 @pytest.mark.parametrize("dtype", ["int8", "uint8", "int32", "int64", "float16", "float32"])
-def test_bytes_equal_matches_sha256(dtype):
-    """逐字节判定必须与原 SHA256 字节哈希同结论（浮点 ±0 / NaN 一并覆盖）。"""
+def test_first_differing_byte_chunk_matches_raw_bytes(dtype):
+    """首块偏移与逐字节相等判定一致，覆盖浮点 ±0 和 NaN。"""
     rng = np.random.default_rng(3)
     n = 20000
     for ndiff in (0, 1, 7):
@@ -85,16 +83,31 @@ def test_bytes_equal_matches_sha256(dtype):
             pos = rng.choice(np.arange(2, n), ndiff, replace=False)
             b[pos] = (b[pos] + 1).astype(dtype)
         a, b = np.ascontiguousarray(a), np.ascontiguousarray(b)
-        ref = hashlib.sha256(a.data).hexdigest() == hashlib.sha256(b.data).hexdigest()
-        assert BinaryComparison._bytes_equal(a, b) is ref
+        assert b.nbytes < CHUNK_SIZE
+        expected = None if a.tobytes() == b.tobytes() else 0
+        assert BinaryComparison._first_differing_byte_chunk(a, b) == expected
 
 
-def test_bytes_equal_detects_diff_across_chunk_boundary():
+def test_first_differing_byte_chunk_across_boundary():
     """跨块边界的单字节差异不能被漏判。"""
     step = CHUNK_SIZE
     a = np.zeros(2 * step + 100, dtype=np.int8)
     for pos in (step - 1, step, 2 * step + 50):
         b = a.copy()
         b[pos] = 1
-        assert BinaryComparison._bytes_equal(a, b) is False
-    assert BinaryComparison._bytes_equal(a, a.copy()) is True
+        assert BinaryComparison._first_differing_byte_chunk(a, b) == (pos // step) * step
+    assert BinaryComparison._first_differing_byte_chunk(a, a.copy()) is None
+
+
+def test_binary_compare_preserves_indices_after_matching_prefix():
+    step = CHUNK_SIZE // np.dtype("float32").itemsize
+    a = np.zeros(4 * step + 23, dtype=np.float32)
+    b = a.copy()
+    differences = [2 * step, 3 * step - 1, a.size - 1]
+    b[differences] = 7
+
+    indices, total, count = BinaryComparison._numpy_binary_compare(a, b)
+
+    assert total == a.size
+    assert count == len(differences)
+    assert indices.tolist() == differences
