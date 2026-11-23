@@ -261,7 +261,7 @@ def resolve_function(api_name: str):
             if len(parts) >= 4:
                 namespace = parts[2]
                 op_name = parts[3]
-                packet = getattr(torch.ops, namespace).__getattr__(op_name)
+                packet = getattr(getattr(torch.ops, namespace), op_name)
                 # api_name 钉死了具名重载(如 ...._foreach_addcdiv.Tensor)时取该重载:
                 # OpOverloadPacket 只在存在 default 重载时才有 _schema, 全具名重载的
                 # 算子(Scalar/ScalarList/Tensor)取不到, 会导致形参解析为空。

@@ -418,6 +418,17 @@ class TestMatchOverload:
 # == Tensor 方法 self 注入 ==================================================
 
 
+def test_resolve_torch_op_preserves_cached_overload():
+    torch = pytest.importorskip("torch")
+    from ttk.core_modules.framework_api.api_model import resolve_function
+
+    packet = torch.ops.aten.add
+    overload = packet.Tensor
+    assert resolve_function("torch.ops.aten.add") is packet
+    assert resolve_function("torch.ops.aten.add.Tensor") is overload
+    assert torch.ops.aten.add.Tensor is overload
+
+
 class TestTensorMethodSelf:
     def test_resolve_and_inject_self(self):
         """torch.Tensor.add_ 解析成功；get_api_params 注入 self 参数。"""
