@@ -139,8 +139,11 @@ class Phase1ParamBuilder:
                     # int32
                     case_params.append(ctypes.c_int32(val))
                 elif acl_type == "char*":
-                    val_bytes = val.encode("UTF-8")
-                    case_params.append(ctypes.c_char_p(val_bytes))
+                    if val is None:
+                        case_params.append(ctypes.c_char_p(None))
+                    else:
+                        val_bytes = val.encode("UTF-8")
+                        case_params.append(ctypes.c_char_p(val_bytes))
                 else:
                     # Base c types:
                     # bool / int8_t / int / int32_t / uint32_t / float

@@ -12,9 +12,15 @@
 Tests for AclnnApiParamResolver and TestcaseAclnn.get_param_plan().
 """
 
+import ctypes
 from collections import OrderedDict
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 from ttk.core_modules.aclnn.api_param import AclnnApiParamResolver
+from ttk.core_modules.aclnn.execute import Phase1ParamBuilder
 from ttk.core_modules.aclnn.info_keeper import OpApiInfo
 
 
@@ -267,3 +273,28 @@ class TestGetParamPlan:
         case._param_plan_cache = plan
         args, extra = plan.build_args(["T_X"], [], {"alpha": 3.0})
         assert args == ["T_X", 3.0]
+
+
+class TestPhase1CharPointerAttr:
+    """Phase1ParamBuilder 可选 char* 属性装配：None → C NULL。"""
+
+    @pytest.mark.parametrize(
+        ("attributes", "expected"),
+        [
+            pytest.param({"adamModeOptional": None}, None, id="explicit-none"),
+            pytest.param({}, None, id="default-none"),
+            pytest.param({"adamModeOptional": "adam"}, b"adam", id="plain-string"),
+            pytest.param({"adamModeOptional": ""}, b"", id="empty-string"),
+        ],
+    )
+    def test_char_pointer_assembly(self, attributes, expected):
+        """显式 None/缺省 default=None → c_char_p NULL；字符串走 UTF-8，空串保持非 NULL。"""
+        plan = SimpleNamespace(param_layout=[("other", "adamModeOptional", "char*", None)])
+        ctx = SimpleNamespace(attributes=attributes, get_param_plan=lambda: plan)
+        builder = Phase1ParamBuilder(ctx, None)
+        with patch.object(builder, "_create_acl_tensor", return_value=[]), patch.object(
+            builder, "_create_acl_scalar", return_value=[]
+        ):
+            param = builder.build()[0]
+        assert isinstance(param, ctypes.c_char_p)
+        assert param.value == expected
