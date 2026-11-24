@@ -12,7 +12,7 @@ python3 -m ttk kernel -i cases.csv --compile-opts KEY1=VALUE1 --compile-opts KEY
 
 文档导览：
 
-1. **[编译宏 macros](#一编译宏macros)**
+1. **[编译宏 macros](#一编译宏-macros)**
 2. **[调试选项](#二调试选项)**
 3. **[编译产物](#三编译产物)**
 4. **[构建开关](#四构建开关)**

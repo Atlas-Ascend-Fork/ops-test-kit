@@ -455,6 +455,29 @@ class _GraphModel(NamedTuple):
     mutable_kwargs: dict
 
 
+def _custom_mutable_kwargs(inplace_input_indexes, is_inplace, args, fwd_kwargs):
+    """custom 模块被写位 → forward kwargs 键映射（按张量身份对齐）。
+
+    方法式 API 的 overload 名（self）与自定义 forward 形参名（如 input）
+    不一致，按名字查 fwd_kwargs 会落空；按 ``args[idx] is kwargs[key]``
+    的身份对齐可覆盖任意形参命名。in-place 未声明时缺省覆盖槽 0（与
+    通用分支 self_mutable 的口径一致）。映射为空时返回 None，不抢占
+    by_kwargs 分支。
+    """
+    slots = set(inplace_input_indexes or ())
+    if is_inplace and args and args[0] is not None:
+        slots.add(0)
+    mutable_kwargs = {}
+    for idx in sorted(slots):
+        if idx >= len(args) or args[idx] is None:
+            continue
+        for key, val in fwd_kwargs.items():
+            if val is args[idx]:
+                mutable_kwargs[idx] = key
+                break
+    return mutable_kwargs or None
+
+
 def _build_graph_model(testcase, backend, switches, plan, resolved, args, kwargs, is_tensor_method, is_inplace):
     """custom torch_graph 模块（TestSpec 注册）优先，缺省回落通用 GraphNetwork。"""
     inplace_input_indexes = getattr(testcase, "inplace_input_indexes", None) or ()
@@ -462,13 +485,7 @@ def _build_graph_model(testcase, backend, switches, plan, resolved, args, kwargs
     if custom_cls:
         logging.info(f"Using custom graph module: {custom_cls.__name__}")
         init_kwargs, fwd_kwargs = _split_params(custom_cls, plan.overload_params, args, kwargs)
-        mutable_kwargs = None
-        if inplace_input_indexes:
-            positional_param_names = [p.name for p in plan.overload_params if not p.is_keyword_only]
-            mutable_kwargs = {}
-            for idx in inplace_input_indexes:
-                if idx < len(positional_param_names) and positional_param_names[idx] in fwd_kwargs:
-                    mutable_kwargs[idx] = positional_param_names[idx]
+        mutable_kwargs = _custom_mutable_kwargs(inplace_input_indexes, is_inplace, args, fwd_kwargs)
         return _GraphModel(custom_cls(**init_kwargs), [], fwd_kwargs, True, None, mutable_kwargs)
 
     if is_tensor_method:
@@ -567,8 +584,11 @@ def execute_graph(
     testcase.absorb_preprocess(result, plan, args, kwargs)
 
     inplace_input_indexes = getattr(testcase, "inplace_input_indexes", None) or ()
-    inplace_backups = _snapshot_inplace_backups(args, backend, inplace_input_indexes)
     bundle = _build_graph_model(testcase, backend, switches, plan, resolved, args, kwargs, is_tensor_method, is_inplace)
+    # 备份槽位 = 声明位 ∪ 映射结果键：custom 分支合成的槽 0 由映射层唯一决定，
+    # 不在调用侧复述 is_inplace/args 守卫，避免两处口径漂移
+    backup_slots = tuple(sorted(set(inplace_input_indexes) | set(bundle.mutable_kwargs or ())))
+    inplace_backups = _snapshot_inplace_backups(args, backend, backup_slots)
 
     try:
         npu_backend = _get_npu_backend_aclgraph() if is_aclgraph else _get_npu_backend()
@@ -592,7 +612,7 @@ def execute_graph(
                 bundle.self_mutable if is_inplace else None,
                 testcase.api_name,
                 testcase_name=testcase.testcase_name,
-                inplace_backups=inplace_backups if inplace_input_indexes else None,
+                inplace_backups=inplace_backups if inplace_backups else None,
                 mutable_kwargs=bundle.mutable_kwargs,
                 deterministic_level=deterministic_level,
                 is_aclgraph=is_aclgraph,

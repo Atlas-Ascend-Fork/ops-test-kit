@@ -32,7 +32,7 @@ class AbsTestSpec:
 
 1. **[字段一览](#一字段一览)**
 2. **[describe](#二describe)**
-3. **[golden 与 third_party](#三golden与third_party)**
+3. **[golden 与 third_party](#三golden-与-third_party)**
 4. **[自定义输入与比对](#四自定义输入与比对)**
 5. **[tolerance](#五tolerance)**
 6. **[其他字段](#六其他字段)**
