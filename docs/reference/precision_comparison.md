@@ -411,7 +411,7 @@ cross_check 参数（standard/level/pass、实测比值、level 上限、small_v
 - 输出 dtype 不在 fp16/bf16/fp32 支持集 → 三对列 `N/A`、`output_dtype` 如实展示；
 - ±0.0 与 -0.0 记 1 ULP（位级语义）；golden 折叠后的亚 ULP 差异不体现（比值判据互补）；
 - `result.csv` 的 `precision_metrics` 列不含 ULP 数据（明细与判定两产物互斥）；
-- 设计细节见 [ULP 明细设计](./ulp_compare_detail_design.md)。
+- 用法和输出示例见[三方交叉校验使用指南](../tips/cross_check_guide.md)。
 
 ## 九、方法选择与容差
 
