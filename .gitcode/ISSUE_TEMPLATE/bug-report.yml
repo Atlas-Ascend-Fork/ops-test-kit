@@ -16,14 +16,23 @@ body:
       required: true
   - type: textarea
     attributes:
-      label: Environment / 环境信息 (Mandatory / 必填)
-      description: 请提供昇腾硬件型号与软件环境信息
+      label: Environment Information / 环境信息 (Mandatory / 必填)
+      description: 请提供昇腾硬件型号与软件环境信息，其中昇腾硬件型号可以通过npu-smi info查看，CANN版本可以通过安装目录下的ascend_toolkit_install.info查看，软件版本（代码commit id）可以通过git log -1 --format=%H查看。
+      placeholder: |
+        - 昇腾硬件型号：如 Ascend 910B 等
+        - CANN 版本：如 8.0.0、8.5.0 等
+        - Python 版本：如 3.9.0
+        - 软件版本：代码 commit id，如 0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b
     validations:
       required: true
   - type: textarea
     attributes:
       label: Steps to reproduce the issue / 重现步骤 (Mandatory / 必填)
-      description: 提供尽可能多的信息描述如何重现该缺陷
+      description: 提供尽可能多的信息描述如何重现该缺陷，并提供用于复现的测试用例及算子golden
+      placeholder: |
+        - 重现步骤：
+        - 测试用例：如 cases.csv
+        - 算子golden：如 golden 数据文件或 golden.py 脚本
     validations:
       required: true
   - type: textarea
