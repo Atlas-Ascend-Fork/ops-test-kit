@@ -82,15 +82,31 @@ python3 -m ttk kernel --backend npusim -i examples/case_store/kernel/cases.csv -
 └── <case_name>/                       # 每个用例一个目录
     ├── record_out/
     │   └── {cannsim,npusim}_<时间戳>_<用例>/
-    │       ├── instr.bin              # 指令流（流水图输入）
-    │       └── cannsim.log            # record 日志
+    │       ├── record/                # cannsim ≥ 0.7（CANN 9.3.0+）
+    │       │   ├── chip0.db           # SQLite 契约库（report 数据源，TTK 自动开 per-chip 模式）
+    │       │   └── cannsim_helper.log # 采集日志
+    │       ├── instr.bin              # 旧版 cannsim（≤ v0.1.0，CANN 9.1/9.2）：指令流
+    │       └── npusim.log             # record 主日志
     └── report/                        # 仅 --sim-report 时生成
-        └── trace_core0.json           # 指令流水图（Chrome tracing）
+        └── results/<launch>_<kernel>_reports/
+            ├── core_0/trace_core0.json(.gz)  # 指令流水图（Chrome tracing / Perfetto）
+            ├── summary.json                  # 性能汇总（流水线利用率、瓶颈诊断等）
+            ├── aicore_utilization.json       # AI Core 利用率
+            └── chip0.npu-rep                 # 单 kernel 归档（供外部工具消费）
 ```
+
+> [!NOTE]
+> cannsim ≥ 0.7 的 `report` 依赖 SQLite ≥ 3.25（窗口函数）；执行 python 的 `sqlite3.sqlite_version` 过低时会报错，需升级解释器解析到的 libsqlite3 后重跑。
+
+> [!NOTE]
+> 上表 `record/`（契约 DB）与 `report/` 产物仅适用于 **Kernel / ACLNN** 通路。
+> torch E2E 的 `--sim-report` 走单独的 `instr.bin` 采集流程——worker 只认
+> 根目录下的 `instr.bin`，遇到仅含契约 DB 的归档会直接跳过报告；E2E 用户
+> 请勿按上表在 `record/`、`report/` 下查找流水图。
 
 **结果 CSV**：由 `-o` 指定（默认 `<输入名>_result.csv`），含 `precision_status`、`dyn_precision`、`memory_oob_status`、`soc` 等列。仿真模式不输出单次周期数：kernel 通路的 `dyn/cst/bin_perf_us` 为 `UNKNOWN`，aclnn 通路的 `api_perf_us`/`op_perf_us` 为空。
 
-**查看流水图**：将 `trace_core0.json` 拖入 Chrome `chrome://tracing` 或 [Perfetto](https://ui.perfetto.dev)。
+**查看流水图**：将 `trace_core0.json`（新版为 `.json.gz`，可先解压）拖入 Chrome `chrome://tracing` 或 [Perfetto](https://ui.perfetto.dev)。
 
 ## 五、精度比对
 

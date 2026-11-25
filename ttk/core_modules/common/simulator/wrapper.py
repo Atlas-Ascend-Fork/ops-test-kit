@@ -37,6 +37,17 @@ from pathlib import Path
 RESULT_FILE = "result.json"
 
 
+def _flush_cannsim_helper():
+    # os._exit skips the exit path where cannsim_helper finalizes its SQLite
+    # DB; flush it here or report has no input. Missing symbol (old CANN) is fine.
+    try:
+        import ctypes
+
+        ctypes.CDLL(None).cannsim_helper_flush()
+    except Exception:
+        pass
+
+
 def _write_result(mdir, ok, **fields):
     payload = dict(fields)
     payload["ok"] = ok
@@ -92,6 +103,7 @@ def main():
         (case_dir / "wrapper_error.json").write_text(traceback.format_exc(), encoding="utf-8")
     finally:
         # Bypass atexit/camodel teardown that may SIGSEGV the process.
+        _flush_cannsim_helper()
         os._exit(0)
 
 
@@ -109,6 +121,16 @@ import pickle
 import sys
 import traceback
 from pathlib import Path
+
+
+def _flush_cannsim_helper():
+    # See the kernel wrapper: flush the cannsim_helper DB before os._exit.
+    try:
+        import ctypes
+
+        ctypes.CDLL(None).cannsim_helper_flush()
+    except Exception:
+        pass
 
 
 def main():
@@ -151,6 +173,7 @@ def main():
         (case_dir / "wrapper_error.json").write_text(traceback.format_exc(), encoding="utf-8")
     finally:
         # Bypass atexit/camodel teardown that may SIGSEGV the process.
+        _flush_cannsim_helper()
         os._exit(0)
 
 

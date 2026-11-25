@@ -147,6 +147,7 @@ class TestWrapperGeneration:
         # camodel teardown (rtCtxDestroy/rtDeviceReset) busy-spins on some cases;
         # the wrapper skips it and lets os._exit reclaim the process.
         assert "skip_teardown=True" in text
+        # flush-before-exit order is asserted behaviorally in TestWrapperFlushOrder.
 
     def test_aclnn_wrapper_generated(self, sw):
         from ttk.core_modules.common.simulator import case_writer
@@ -160,6 +161,254 @@ class TestWrapperGeneration:
         assert "AclOpExecutor" in text
         assert "os._exit(0)" in text
         assert "skip_teardown=True" in text
+
+
+class _WrapperSW:
+    """switches.pkl stand-in（模块级以便 pickle by reference）。"""
+
+    short_soc_version = "Ascend950"
+
+    class mode:
+        @staticmethod
+        def is_model():
+            return True
+
+    def activate(self):
+        pass
+
+
+def _run_wrapper_script(wrapper_path, case_dir, monkeypatch, *, stub_modules, flush_error=None):
+    """加载生成的 wrapper 文件并以替身运行，返回 flush/_exit 的调用顺序记录。
+
+    - 经 importlib 加载 write_*_wrapper 落盘的真实生成物（非内嵌字符串）
+    - ctypes.CDLL 替身记录 ``cannsim_helper_flush`` 调用（可注入符号缺失）
+    - os._exit 替身记录退出码并以 SystemExit 阻止真实退出
+    - stub_modules 注入 wrapper 运行期 import 的替身模块（sys.modules 临时替换）
+    """
+    import ctypes
+    import importlib.util
+    import types
+
+    calls = []
+
+    class _FakeCDLL:
+        def __init__(self, name=None, mode=None):
+            pass
+
+        def __getattr__(self, item):
+            if item == "cannsim_helper_flush":
+
+                def _flush():
+                    calls.append("flush")
+                    if flush_error is not None:
+                        raise flush_error
+
+                return _flush
+            raise AttributeError(item)
+
+    def _fake_exit(code):
+        calls.append(("exit", code))
+        raise SystemExit(code)
+
+    injected = {}
+    for mod_name, attrs in stub_modules.items():
+        mod = types.ModuleType(mod_name)
+        for key, value in attrs.items():
+            setattr(mod, key, value)
+        injected[mod_name] = mod
+    saved = {name: sys.modules.get(name) for name in injected}
+    sys.modules.update(injected)
+
+    monkeypatch.setattr(ctypes, "CDLL", _FakeCDLL)
+    monkeypatch.setattr(os, "_exit", _fake_exit)
+
+    spec = importlib.util.spec_from_file_location("generated_wrapper_test", wrapper_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["generated_wrapper_test"] = module
+    spec.loader.exec_module(module)
+    old_argv = sys.argv
+    sys.argv = ["wrapper.py", str(case_dir)]
+    try:
+        module.main()
+    except SystemExit:
+        pass
+    finally:
+        sys.argv = old_argv
+        for name, old in saved.items():
+            if old is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = old
+    return calls
+
+
+class TestWrapperFlushOrder:
+    """行为级验证 wrapper 收尾顺序：flush 先于 os._exit，覆盖成功/异常/旧 helper 缺符号。
+
+    字符串位置断言（如 index("cannsim_helper_flush()") < index("os._exit(0)")）会
+    匹配到函数定义中的符号名，无法证明运行期顺序——这里直接运行生成脚本。
+    """
+
+    # ---- kernel wrapper ----
+
+    @pytest.fixture
+    def kernel_case_dir(self, tmp_path):
+        case_dir = tmp_path / "kernel_case"
+        (case_dir / "dyn").mkdir(parents=True)
+        with (case_dir / "switches.pkl").open("wb") as f:
+            pickle.dump(_WrapperSW(), f)
+        with (case_dir / "dyn" / "param.pkl").open("wb") as f:
+            pickle.dump(_DummyRTSProfilingParam(), f)
+        return case_dir
+
+    @staticmethod
+    def _kernel_stubs(execute):
+        class FakeRTSInterface:
+            def __init__(self, **kwargs):
+                pass
+
+            def set_device(self, device_id):
+                pass
+
+        class FakeKernelExecutor:
+            def __init__(self, dev, param):
+                pass
+
+            def execute(self):
+                return execute()
+
+        return {
+            "ttk.core_modules.kernel.runtime.rts_interface": {"RTSInterface": FakeRTSInterface},
+            "ttk.core_modules.kernel.execute": {"KernelExecutor": FakeKernelExecutor},
+        }
+
+    @staticmethod
+    def _write_kernel_wrapper(tmp_path):
+        from ttk.core_modules.common.simulator.wrapper import write_kernel_wrapper
+
+        sw = SimpleNamespace(sim_output_dir=str(tmp_path))
+        return write_kernel_wrapper(sw, tmp_path / "case")
+
+    def test_kernel_wrapper_flushes_then_exits_on_success(self, kernel_case_dir, monkeypatch):
+        res = SimpleNamespace(output_bytes=[b"\x01"], cycle="0", oob="OK")
+        calls = _run_wrapper_script(
+            self._write_kernel_wrapper(kernel_case_dir),
+            kernel_case_dir,
+            monkeypatch,
+            stub_modules=self._kernel_stubs(lambda: res),
+        )
+        assert calls == ["flush", ("exit", 0)]
+        assert json.loads((kernel_case_dir / "final_result.json").read_text()) == {"ok": True}
+
+    def test_kernel_wrapper_flushes_then_exits_on_error(self, kernel_case_dir, monkeypatch):
+        def boom():
+            raise RuntimeError("kernel boom")
+
+        calls = _run_wrapper_script(
+            self._write_kernel_wrapper(kernel_case_dir),
+            kernel_case_dir,
+            monkeypatch,
+            stub_modules=self._kernel_stubs(boom),
+        )
+        assert calls == ["flush", ("exit", 0)]
+        assert json.loads((kernel_case_dir / "dyn" / "result.json").read_text())["ok"] is False
+        assert json.loads((kernel_case_dir / "final_result.json").read_text()) == {"ok": False}
+
+    def test_kernel_wrapper_exits_when_helper_lacks_flush_symbol(self, kernel_case_dir, monkeypatch):
+        res = SimpleNamespace(output_bytes=[b"\x01"], cycle="0", oob="OK")
+        calls = _run_wrapper_script(
+            self._write_kernel_wrapper(kernel_case_dir),
+            kernel_case_dir,
+            monkeypatch,
+            stub_modules=self._kernel_stubs(lambda: res),
+            flush_error=AttributeError("missing cannsim_helper_flush (old CANN)"),
+        )
+        assert calls == ["flush", ("exit", 0)]
+
+    # ---- aclnn wrapper ----
+
+    @pytest.fixture
+    def aclnn_case_dir(self, tmp_path):
+        case_dir = tmp_path / "aclnn_case"
+        case_dir.mkdir()
+        with (case_dir / "switches.pkl").open("wb") as f:
+            pickle.dump(_WrapperSW(), f)
+        with (case_dir / "context.pkl").open("wb") as f:
+            pickle.dump({"case": "ctx"}, f)
+        return case_dir
+
+    @staticmethod
+    def _aclnn_stubs(do_result):
+        class FakeAclInterface:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def set_device(self, device_id):
+                pass
+
+        class FakeAclOpExecutor:
+            def __init__(self, context, dev):
+                pass
+
+            def do(self):
+                if isinstance(do_result, Exception):
+                    raise do_result
+                return do_result
+
+        return {
+            "ttk.core_modules.aclnn": {"AclInterface": FakeAclInterface},
+            "ttk.core_modules.aclnn.execute": {"AclOpExecutor": FakeAclOpExecutor},
+        }
+
+    @staticmethod
+    def _write_aclnn_wrapper(tmp_path):
+        from ttk.core_modules.common.simulator.wrapper import write_aclnn_wrapper
+
+        sw = SimpleNamespace(sim_output_dir=str(tmp_path))
+        return write_aclnn_wrapper(sw, tmp_path / "case")
+
+    @staticmethod
+    def _aclnn_result(success=True):
+        return SimpleNamespace(
+            success=success,
+            api_prof="1" if success else "ERR",
+            op_prof="1",
+            oob="OK",
+            deterministic_status=None,
+            output_bytes=(b"\x01",) if success else (),
+            output_view_shapes=[(8,)] if success else [],
+        )
+
+    def test_aclnn_wrapper_flushes_then_exits_on_success(self, aclnn_case_dir, monkeypatch):
+        calls = _run_wrapper_script(
+            self._write_aclnn_wrapper(aclnn_case_dir),
+            aclnn_case_dir,
+            monkeypatch,
+            stub_modules=self._aclnn_stubs(self._aclnn_result(success=True)),
+        )
+        assert calls == ["flush", ("exit", 0)]
+        payload = json.loads((aclnn_case_dir / "final_result.json").read_text())
+        assert payload["ok"] is True
+
+    def test_aclnn_wrapper_flushes_then_exits_on_error(self, aclnn_case_dir, monkeypatch):
+        calls = _run_wrapper_script(
+            self._write_aclnn_wrapper(aclnn_case_dir),
+            aclnn_case_dir,
+            monkeypatch,
+            stub_modules=self._aclnn_stubs(RuntimeError("aclnn boom")),
+        )
+        assert calls == ["flush", ("exit", 0)]
+        assert (aclnn_case_dir / "wrapper_error.json").is_file()
+
+    def test_aclnn_wrapper_exits_when_helper_lacks_flush_symbol(self, aclnn_case_dir, monkeypatch):
+        calls = _run_wrapper_script(
+            self._write_aclnn_wrapper(aclnn_case_dir),
+            aclnn_case_dir,
+            monkeypatch,
+            stub_modules=self._aclnn_stubs(self._aclnn_result(success=True)),
+            flush_error=AttributeError("missing cannsim_helper_flush (old CANN)"),
+        )
+        assert calls == ["flush", ("exit", 0)]
 
 
 class TestResultLoading:
@@ -412,26 +661,61 @@ class TestCannsimBackend:
 
     @pytest.mark.parametrize(
         "scenario",
-        ["prefers_toolkit_home", "rejects_non_python", "raises_when_missing"],
+        [
+            "prefers_toolkit_home",
+            "prefers_npusim",
+            "rejects_non_python",
+            "path_bogus_npusim_prefers_cannsim",
+            "path_only_real_npusim",
+            "raises_when_missing",
+        ],
     )
     def test_locate_cannsim_executable(self, tmp_path, monkeypatch, scenario):
-        """locate_cannsim_executable 优先 toolkit_home 的 python 脚本；非 python/缺失时报错。"""
+        """locate_cannsim_executable 优先 toolkit_home 的 python 脚本；非 python/缺失时报错。
+
+        PATH 上无关的 python ``npusim`` 不得抢占有效的 CANN ``cannsim``
+        —— 候选校验须匹配 CANN 发布入口的 import 特征。
+        """
         from ttk.core_modules.common.simulator.npusim_runner import locate_cannsim_executable
 
         cand = tmp_path / "ascend" / "bin" / "cannsim"
-        if scenario != "raises_when_missing":
+        if scenario not in ("raises_when_missing", "path_bogus_npusim_prefers_cannsim", "path_only_real_npusim"):
             cand.parent.mkdir(parents=True)
-            if scenario == "prefers_toolkit_home":
+            if scenario in ("prefers_toolkit_home", "prefers_npusim"):
                 cand.write_text("#!/usr/bin/env python3\nfrom cannsim.main import main\n")
             else:
                 cand.write_bytes(b"\x7fELF\x02\x01")  # an unrelated binary on PATH
+            if scenario == "prefers_npusim":
+                npusim = cand.with_name("npusim")
+                npusim.write_text("#!/usr/bin/env python3\nfrom npusim.main import main\n")
+                npusim.chmod(0o755)
             cand.chmod(0o755)
             monkeypatch.setenv("ASCEND_TOOLKIT_HOME", str(tmp_path / "ascend"))
         else:
             monkeypatch.delenv("ASCEND_TOOLKIT_HOME", raising=False)
-        monkeypatch.setenv("PATH", str(tmp_path))  # no cannsim on PATH
+        if scenario == "path_bogus_npusim_prefers_cannsim":
+            bogus = tmp_path / "npusim"
+            bogus.write_text("#!/usr/bin/env python3\nprint('unrelated python program')\n")
+            bogus.chmod(0o755)
+            real = tmp_path / "cannsim"
+            real.write_text("#!/usr/bin/env python3\nfrom cannsim.main import main\n")
+            real.chmod(0o755)
+        elif scenario == "path_only_real_npusim":
+            bogus_cannsim = tmp_path / "cannsim"
+            bogus_cannsim.write_text("#!/usr/bin/env python3\nprint('unrelated python program')\n")
+            bogus_cannsim.chmod(0o755)
+            real_npusim = tmp_path / "npusim"
+            real_npusim.write_text("#!/usr/bin/env python3\nfrom npusim.main import main\n")
+            real_npusim.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
         if scenario == "prefers_toolkit_home":
             assert locate_cannsim_executable() == cand.resolve()
+        elif scenario == "prefers_npusim":
+            assert locate_cannsim_executable() == (tmp_path / "ascend" / "bin" / "npusim").resolve()
+        elif scenario == "path_bogus_npusim_prefers_cannsim":
+            assert locate_cannsim_executable() == (tmp_path / "cannsim").resolve()
+        elif scenario == "path_only_real_npusim":
+            assert locate_cannsim_executable() == (tmp_path / "npusim").resolve()
         else:
             with pytest.raises(RuntimeError, match="CANN cannsim not found"):
                 locate_cannsim_executable()
@@ -440,6 +724,7 @@ class TestCannsimBackend:
         from ttk.core_modules.common.simulator.npusim_runner import build_sim_env
 
         monkeypatch.delenv("PYTHONPATH", raising=False)
+        monkeypatch.delenv("CANNSIM_HELPER_PER_CHIP_DB", raising=False)
         sw = SWITCHES()
         sw.root_path = str(tmp_path)
         env = build_sim_env(sw)
@@ -448,6 +733,128 @@ class TestCannsimBackend:
         assert not any("npu-simulator" in p for p in parts)
         assert env.get("CANNSIM_NO_DELAY") == "1"
         assert env.get("NPUSIM_NO_DELAY") == "1"
+        # wrapper 的 dlopen 直取 rt* 符号，绕过 helper 的 aclrt* 拦截，
+        # per-chip DB 是唯一能落 DB 的采集路径（ktest 同款）。
+        assert env.get("CANNSIM_HELPER_PER_CHIP_DB") == "1"
+
+    def test_build_sim_env_per_chip_db_explicit_wins(self, monkeypatch):
+        from ttk.core_modules.common.simulator.npusim_runner import build_sim_env
+
+        monkeypatch.setenv("CANNSIM_HELPER_PER_CHIP_DB", "0")
+        sw = SWITCHES()
+        env = build_sim_env(sw)
+        assert env["CANNSIM_HELPER_PER_CHIP_DB"] == "0"
+
+    @pytest.mark.parametrize(
+        "scenario",
+        [
+            "legacy_instr_root",
+            "legacy_instr_nested",
+            "db_flat_record",
+            "db_plain_record",
+            "db_archive_root",
+            "db_helper_dbs_root",
+            "db_helper_dbs_nested",
+            "db_chip_dir",
+            "mixed_instr_and_chip_db",
+            "mixed_instr_and_flat_db",
+            "empty_none",
+        ],
+    )
+    def test_report_export_dir(self, tmp_path, scenario):
+        """_report_export_dir 兼容 v0.1.0 instr.bin 与 >=0.7 helper db 布局。
+
+        契约 DB 优先于 instr.bin：>=0.7 报告器不认 instr.bin，混合归档中
+        instr.bin 一票通过会让已完成采集的用例丢流水图（beta.1 平铺报告器
+        不会从 record/ 向下找 chip0/，也读不到目录外的根平铺 DB）。
+        """
+        from ttk.core_modules.common.simulator.npusim_runner import _report_export_dir
+
+        export = tmp_path / "npusim_20260810_case"
+        export.mkdir()
+        if scenario == "legacy_instr_root":
+            (export / "instr.bin").write_bytes(b"x")
+            assert _report_export_dir(export) == export
+        elif scenario == "legacy_instr_nested":
+            (export / "record").mkdir()
+            (export / "record" / "instr.bin").write_bytes(b"x")
+            assert _report_export_dir(export) == export / "record"
+        elif scenario == "db_flat_record":
+            (export / "record").mkdir()
+            (export / "record" / "chip0.db").write_bytes(b"x")
+            assert _report_export_dir(export) == export
+        elif scenario == "db_plain_record":
+            (export / "record").mkdir()
+            (export / "record" / "launch_0000.db").write_bytes(b"x")
+            assert _report_export_dir(export) == export
+        elif scenario == "db_archive_root":
+            (export / "chip0.db").write_bytes(b"x")
+            assert _report_export_dir(export) == export
+        elif scenario == "db_helper_dbs_root":
+            (export / "cannsim_helper_dbs").mkdir()
+            (export / "cannsim_helper_dbs" / "launch_0000.db").write_bytes(b"x")
+            assert _report_export_dir(export) == export
+        elif scenario == "db_helper_dbs_nested":
+            (export / "record" / "cannsim_helper_dbs").mkdir(parents=True)
+            (export / "record" / "cannsim_helper_dbs" / "launch_0000.db").write_bytes(b"x")
+            assert _report_export_dir(export) == export
+        elif scenario == "db_chip_dir":
+            # 单 chip 目录：直接传 chip 目录（平铺-only 报告器可发现，
+            # 按芯片路由的报告器同样接受直接含 *.db 的目录）
+            chip = export / "record" / "chip0"
+            chip.mkdir(parents=True)
+            (chip / "kernel.db").write_bytes(b"x")
+            assert _report_export_dir(export) == chip
+        elif scenario == "mixed_instr_and_chip_db":
+            # 混合归档中 instr.bin 不得遮住 chip DB —— 传 chip 目录而非 record/
+            chip = export / "record" / "chip0"
+            chip.mkdir(parents=True)
+            (chip / "kernel.db").write_bytes(b"x")
+            (export / "record" / "instr.bin").write_bytes(b"x")
+            assert _report_export_dir(export) == chip
+        elif scenario == "mixed_instr_and_flat_db":
+            # 根平铺 DB 与 record/instr.bin 并存：传归档根（报告器从根见 DB）
+            (export / "record").mkdir()
+            (export / "record" / "instr.bin").write_bytes(b"x")
+            (export / "chip0.db").write_bytes(b"x")
+            assert _report_export_dir(export) == export
+        else:
+            (export / "record").mkdir()
+            assert _report_export_dir(export) is None
+
+    def test_report_multi_chip_runs_one_report_per_chip(self, tmp_path, monkeypatch):
+        """平铺-only 报告器从归档根找不到 chip DB，多芯片逐颗报告。
+
+        每颗 chip 一次 report，输出进独立子目录，第二次调用不覆盖第一次。
+        """
+        from ttk.core_modules.common.simulator import npusim_runner
+
+        export = tmp_path / "npusim_multi_chip"
+        for n in (0, 1):
+            chip = export / "record" / f"chip{n}"
+            chip.mkdir(parents=True)
+            (chip / "kernel.db").write_bytes(b"x")
+        cmds = []
+
+        def fake_run(cmd, env, timeout=None):
+            cmds.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(npusim_runner, "_cannsim_cmd", lambda: ["cannsim"])
+        monkeypatch.setattr(npusim_runner, "_run_with_cleanup", fake_run)
+        sw = SimpleNamespace(root_path=str(tmp_path), sim_cores="0", sim_object_file=None, proc_timeout=10)
+        out = npusim_runner.run_report(sw, export, tmp_path / "report")
+        assert out is not None
+        assert len(cmds) == 2
+        inputs = [cmd[cmd.index("-e") + 1] for cmd in cmds]
+        outputs = [cmd[cmd.index("-o") + 1] for cmd in cmds]
+        assert inputs[0] != inputs[1]
+        assert Path(inputs[0]).name == "chip0"
+        assert Path(inputs[1]).name == "chip1"
+        # 独立输出目录：第二次调用不得覆盖第一次
+        assert outputs[0] != outputs[1]
+        assert Path(outputs[0]).name == "chip0"
+        assert Path(outputs[1]).name == "chip1"
 
     def test_cannsim_cmd_uses_sys_executable_and_script(self, monkeypatch):
         from ttk.core_modules.common.simulator import npusim_runner
@@ -456,6 +863,59 @@ class TestCannsimBackend:
         monkeypatch.setattr(npusim_runner, "locate_cannsim_executable", lambda: fake_script)
         cmd = npusim_runner._cannsim_cmd()
         assert cmd == [sys.executable, str(fake_script)]
+
+    def test_sim_obj_record_report_command_routing(self, tmp_path, monkeypatch):
+        """同一用例分别核对 record 与 report 两条命令。
+
+        --sim-obj 不进 record（>= 0.7 拒绝 -f）；由 report --object-file 消费。
+        只测 run_report 断言不到 run_record 的参数，故两条命令都捕获。
+        """
+        from ttk.core_modules.common.simulator import npusim_runner
+
+        case_dir = tmp_path / "case"
+        case_dir.mkdir()
+        wrapper = case_dir / "wrapper_kernel.py"
+        wrapper.write_text("#!/usr/bin/env python3\n")
+        obj = case_dir / "kernel.o"
+        obj.write_bytes(b"\x7fELF")
+        cmds = []
+
+        def fake_run(cmd, env, timeout=None):
+            cmds.append(cmd)
+            # run_record 之后 _latest_record_dir 找新建归档；伪造一个让流程走通
+            if "record" in cmd and "-s" in cmd:
+                (case_dir / "record_out" / "npusim_fake_archive").mkdir(parents=True, exist_ok=True)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(npusim_runner, "_cannsim_cmd", lambda: ["cannsim"])
+        monkeypatch.setattr(npusim_runner, "_run_with_cleanup", fake_run)
+        sw = SimpleNamespace(
+            root_path=str(tmp_path),
+            sim_soc_version="Ascend950",
+            sim_cores="0",
+            sim_object_file=str(obj),
+            proc_timeout=10,
+        )
+        # ① record：不得携带 -f / sim_object_file
+        npusim_runner.run_record(sw, wrapper, case_dir, extra_argv=("-u", str(case_dir)))
+        record_cmd = cmds[-1]
+        assert record_cmd[:2] == ["cannsim", "record"]
+        assert "-f" not in record_cmd
+        assert str(obj) not in record_cmd
+        # ② report：归档含平铺 DB 时 --object-file 路由（绝对路径）
+        export = case_dir / "record_out" / "npusim_fake_archive"
+        (export / "record").mkdir(exist_ok=True)
+        (export / "record" / "launch_0000.db").write_bytes(b"x")
+        out = npusim_runner.run_report(sw, export, case_dir / "report")
+        report_cmd = cmds[-1]
+        assert out is not None
+        assert report_cmd[:3] == ["cannsim", "report", "-e"]
+        assert "--object-file" in report_cmd
+        assert str(obj.resolve()) in report_cmd
+        # ③ sim_object_file 缺省时两条命令都不携带目标文件
+        sw.sim_object_file = None
+        npusim_runner.run_report(sw, export, case_dir / "report")
+        assert "--object-file" not in cmds[-1]
 
     @staticmethod
     def _write_fake_npusim(tmp_path, pid_file):

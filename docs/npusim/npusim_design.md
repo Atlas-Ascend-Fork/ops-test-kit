@@ -34,6 +34,7 @@ TTK（`ops-test-kit`）目前只能在真实 Ascend 芯片上执行算子。NPUS
 | 环境依赖 | `ASCEND_TOOLKIT_HOME`（需 source setenv）、camodel 库（toolkit 自带，record 注入 `LD_LIBRARY_PATH`） |
 | SoC 映射 | `Ascend950 → Ascend950PR_9589`；`SOC_INFO` max_cores=32 |
 | **版本兼容** | CANN 9.1.0-beta.3 之前自带的 `cannsim` instr.bin 记录格式不兼容（424→432 字节）；9.1.0-beta.3 / 9.2.0 自带 cannsim（v0.1.0）与 camodel 配套、行为一致（record/report 全参数、`cannsim_` 产物前缀），record/report 均直接走 `$ASCEND_TOOLKIT_HOME/bin/cannsim`，无需 npu-simulator 仓库源码 |
+| **CANN 9.3.0（cannsim ≥ 0.7）适配** | 契约 SQLite DB 取代 `instr.bin`（report 仅接受 DB 输入）：① `build_sim_env` 注入 `CANNSIM_HELPER_PER_CHIP_DB=1`（ktest 同款 per-chip 采集，不依赖被 wrapper dlopen 绕过的 aclrt\* launch 拦截）+ `CANNSIM_HELPER_REGISTER_DELAY_MS=100`（默认 10s 晚于多数 kernel，注册竞态致 DB 空写、report 除零）；② wrapper 双模板在 `os._exit(0)` 前 `ctypes` 显式调 `cannsim_helper_flush()` 补落盘（旧 helper 缺符号时静默跳过）；③ `_report_export_dir` 兼容 instr.bin / 平铺 `*.db`（根、`record/`、`cannsim_helper_dbs/`、`record/cannsim_helper_dbs/`）/ `record/chip{N}/`——单 chip 传 chip 目录（平铺-only 报告器可用），多 chip 传归档根；④ `--sim-obj` 改由 `report --object-file` 消费（record 不再接受 `-f`）；⑤ 工具入口 `npusim` 优先、`cannsim` 兜底 |
 
 ### TTK 侧
 

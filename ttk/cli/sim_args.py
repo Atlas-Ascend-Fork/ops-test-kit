@@ -60,7 +60,7 @@ def add_sim_args(parser, *, backends=("npu", "npusim")):
         "--sim-obj",
         dest="sim_object_file",
         default=None,
-        help="Device object file for richer report content (passed to record -f)",
+        help="Device object file for richer report content (passed to report --object-file)",
     )
     group.add_argument(
         "--sim-output",
