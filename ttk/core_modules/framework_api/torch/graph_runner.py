@@ -37,6 +37,7 @@ from ..utils import (
     WARMUP_COUNT,
     compute_output_md5,
     finalize_det_status,
+    inplace_nps,
     prepare_device_args,
     resolve_npu_preprocess_hook,
 )
@@ -281,11 +282,10 @@ def _round_md5(args, kwargs, backend, r, inplace_backups, mutable_kwargs):
     if mutable_kwargs is not None:
         for key in mutable_kwargs.values():
             if kwargs.get(key) is not None:
-                run_nps.append(backend.to_numpy(kwargs[key], safe=True))
+                val = backend.to_numpy(kwargs[key], safe=True)
+                run_nps.extend(val if isinstance(val, list) else [val])
     else:
-        for idx in sorted(inplace_backups or ()):
-            if idx < len(args) and args[idx] is not None:
-                run_nps.append(backend.to_numpy(args[idx], safe=True))
+        run_nps.extend(inplace_nps(backend, args, inplace_backups or ()))
     return compute_output_md5(run_nps)
 
 
@@ -624,9 +624,7 @@ def execute_graph(
         return [], None, None, f"Graph {mode_str} execution failed: {e}"
 
     if result_nps and inplace_input_indexes and not bundle.is_custom:
-        for idx in sorted(inplace_input_indexes):
-            if idx < len(args) and args[idx] is not None:
-                result_nps.append(backend.to_numpy(args[idx].detach().clone()))
+        result_nps.extend(inplace_nps(backend, args, inplace_input_indexes))
 
     return result_nps, perf, det_status, None
 

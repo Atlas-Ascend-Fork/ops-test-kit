@@ -149,6 +149,8 @@ class TorchBackend(Backend):
         return numpy_to_torch_tensor(arr)
 
     def to_numpy(self, tensor, safe: bool = False):
+        if isinstance(tensor, (list, tuple)):
+            return [self.to_numpy(x, safe=safe) for x in tensor]
         tensor = tensor.detach()
         if safe:
             tensor = tensor.clone()
@@ -202,9 +204,14 @@ class TorchBackend(Backend):
         view into a contiguous tensor, this clones the full underlying storage
         (so stride-gap data is identical to the original) and rebuilds the
         non-contiguous view via ``as_strided``.
+
+        TensorList（list/tuple[Tensor]，如 ``_foreach_add_`` 的 mutable 槽
+        ``Tensor(a!)[] self``）逐元素递归克隆，容器类型保持不变。
         """
         if tensor is None:
             return None
+        if isinstance(tensor, (list, tuple)):
+            return type(tensor)(self.clone(x) for x in tensor)
         if tensor.is_contiguous():
             return tensor.clone()
         return self._clone_full_storage(tensor)

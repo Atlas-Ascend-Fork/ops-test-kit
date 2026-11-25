@@ -169,6 +169,20 @@ def prepare_device_args(testcase, backend, dev_id, plan, raw_inputs, adapter=Non
     return args, kwargs
 
 
+def inplace_nps(backend, args, inplace_input_indexes):
+    """声明被写位回读为 numpy 列表。
+
+    TensorList 槽位（如 ``_foreach_add_`` 的 args[0]）经 backend.to_numpy
+    返回 list[ndarray]，逐元素展平以保证与 golden 的对位比较。
+    """
+    nps = []
+    for idx in sorted(inplace_input_indexes):
+        if idx < len(args) and args[idx] is not None:
+            val = backend.to_numpy(args[idx], safe=True)
+            nps.extend(val if isinstance(val, list) else [val])
+    return nps
+
+
 def round_nps(
     backend, r, args, inplace_input_indexes, *, api_name=None, kwargs=None, adapter=None, backward_mode=False
 ):
@@ -184,9 +198,7 @@ def round_nps(
             adapter = adapter_for_api_name(api_name)
         run_nps.extend(adapter.mutable_readback(api_name, args, kwargs))
     if inplace_input_indexes:
-        for idx in sorted(inplace_input_indexes):
-            if idx < len(args) and args[idx] is not None:
-                run_nps.append(backend.to_numpy(args[idx], safe=True))
+        run_nps.extend(inplace_nps(backend, args, inplace_input_indexes))
     return run_nps
 
 
@@ -227,9 +239,7 @@ def output_nps(
     if inplace_input_indexes:
         if result_nps is None:
             result_nps = []
-        for idx in sorted(inplace_input_indexes):
-            if idx < len(args) and args[idx] is not None:
-                result_nps.append(backend.to_numpy(args[idx], safe=True))
+        result_nps.extend(inplace_nps(backend, args, inplace_input_indexes))
     return result_nps
 
 
