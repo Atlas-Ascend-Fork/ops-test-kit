@@ -81,6 +81,7 @@ build_py = "ttk._version.BuildPyWithBuild"
     "user_defined_modules/**/*.cce",
     "core_modules/**/*.json",
     "core_modules/geir/templates/*.j2",
+    "core_modules/kernel/compile/ascendc_kernels/*.cpp",
     "config/*.yaml",
     "remote/server/*.yaml",
 ]
