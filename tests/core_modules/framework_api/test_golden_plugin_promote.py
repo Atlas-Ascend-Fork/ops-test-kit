@@ -11,11 +11,35 @@
 test_golden_generation 的集成用例覆盖）。
 """
 
+import importlib.util
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from ttk.core_modules.framework_api.golden import _promoted_golden_inputs
+
+# tf 载体用例环境门禁（两段探针）：find_spec 只验"包存在"，不验"可导入"——
+# CI 常见形态是 wheel 在位但 import 崩溃（protobuf 版本不兼容 / C 扩展缺 so），
+# 仅 find_spec 门禁会放行、测试体 import tensorflow 处 FAIL/ERROR 而非 SKIP。
+# 故取 test_tf_graph_runner.py importorskip 的"不可导入也 skip"语义，但保留
+# 包缺席时 find_spec 短路的零开销（importorskip 缺席同样快速失败、在位即真实
+# 导入）；存在时 try-import 一次，经 sys.modules 缓存供测试体复用。仅作用于
+# tf 载体类，numpy 载体用例保持恒跑；tf 可用时用例原样全保真执行。
+
+
+def _tf_importable() -> bool:
+    """包存在（find_spec）+ 可导入（try-import 实探）的联合判定。"""
+    if importlib.util.find_spec("tensorflow") is None:
+        return False
+    try:
+        import tensorflow  # noqa: F401  实探即缓存：测试体的 import 复用同一份
+    except Exception:  # noqa: BLE001  # 崩溃形态不定（ImportError/AttributeError/...），一律按不可用落 SKIP
+        return False
+    return True
+
+
+_TF_AVAILABLE = _tf_importable()
 
 
 def _make_testcase(tensors, dtypes, shapes=None, pure_output_indexes=(), dist=None, override=None):
@@ -94,6 +118,7 @@ class TestPromotedGoldenInputs:
         assert _promoted_golden_inputs(case, SimpleNamespace(golden_mode="Promote")) is None
 
 
+@pytest.mark.skipif(not _TF_AVAILABLE, reason="tensorflow not installed（tf 载体 promote 用例仅在 tf 环境运行）")
 class TestTfTensorPromote:
     """tf EagerTensor 载体：tf.cast 升精度、失败原样回落。"""
 
