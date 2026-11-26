@@ -39,7 +39,9 @@ def _build_probes(params: List[ParamInfo]) -> Optional[list]:
     probes = []
     for p in params:
         if p.is_tensor_like:
-            probes.append(dummy)
+            # TensorList 槽仅收序列：传裸张量会被 C++ arg parser 拒收
+            # （invalid combination），位置边界探测随之失效
+            probes.append([dummy] if p.is_tensor_list else dummy)
         else:
             val = _PROBE_MAP.get(p.type)
             if val is None:
