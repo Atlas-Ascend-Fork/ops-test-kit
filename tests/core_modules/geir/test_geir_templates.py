@@ -252,3 +252,14 @@ class TestGraphTemplateRender:
         src = _render_template("geir_graph_template.cpp.j2", **ctx)
         assert 'op_0.Operator::SetAttr("dtype", StringToDataType(__v.getString()));' in src
         assert 'op_0.Operator::SetAttr("dtype", __v.getInt());' in src
+
+    def test_format_map_conv3d_dhwcn(self):
+        """conv3d filter 的 DHWCN 映射到 FORMAT_DHWCN，并渲染进 StringToFormat。"""
+        from ttk.core_modules.geir.graph_builder import _FORMAT_TO_GE_ENUM, _resolve_format
+
+        assert _FORMAT_TO_GE_ENUM["DHWCN"] == "FORMAT_DHWCN"
+        assert _resolve_format("DHWCN") == "FORMAT_DHWCN"
+        ctx = dict(_op_ctx("cast"))
+        ctx["format_map"] = [(v, v) for v in _FORMAT_TO_GE_ENUM.values()]
+        out = _render_template("geir_op_template.cpp.j2", **ctx)
+        assert 'if (s == "FORMAT_DHWCN") return FORMAT_DHWCN;' in out

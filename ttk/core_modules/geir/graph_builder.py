@@ -93,6 +93,7 @@ _FORMAT_TO_GE_ENUM = {
     "C1HWNCoC0": "FORMAT_C1HWNCoC0",
     "NDHWC": "FORMAT_NDHWC",
     "NCDHW": "FORMAT_NCDHW",
+    "DHWCN": "FORMAT_DHWCN",
     "NDC1HWC0": "FORMAT_NDC1HWC0",
     "NCL": "FORMAT_NCL",
 }
@@ -142,7 +143,16 @@ def _resolve_dtype(dtype_str: str) -> str:
 
 
 def _resolve_format(fmt_str: str) -> str:
-    return _FORMAT_TO_GE_ENUM.get(fmt_str, "FORMAT_ND")
+    """格式名 → GE 枚举名：未登记格式回落 FORMAT_ND 并告警。
+
+    静默回落会把"格式没映射"伪装成 infershape 推导失败（如 conv3d 的
+    NDHWC/DHWCN 组合），故未知格式必须留下证据。
+    """
+    if fmt_str in _FORMAT_TO_GE_ENUM:
+        return _FORMAT_TO_GE_ENUM[fmt_str]
+    if fmt_str:
+        logging.warning("Unknown tensor format %r, fallback to FORMAT_ND", fmt_str)
+    return "FORMAT_ND"
 
 
 def _nested_or_broadcast(field, idx, default, count):
