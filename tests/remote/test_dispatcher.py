@@ -295,6 +295,7 @@ class _FakeResp:
 class _ScriptedConn:
     script = []
     sent_modes = []
+    sent_headers = []
 
     def __init__(self, host, port, timeout=None):
         self.timeout = timeout
@@ -305,6 +306,7 @@ class _ScriptedConn:
     def putheader(self, k, v):
         if k == "X-Mode":
             _ScriptedConn.sent_modes.append(v)
+        _ScriptedConn.sent_headers.append((k, v))
 
     def endheaders(self):
         pass
@@ -323,6 +325,7 @@ class _ScriptedConn:
 def scripted(monkeypatch):
     _ScriptedConn.script = []
     _ScriptedConn.sent_modes = []
+    _ScriptedConn.sent_headers = []
     monkeypatch.setattr("ttk.remote.dispatcher.http.client.HTTPConnection", _ScriptedConn)
     monkeypatch.setattr("ttk.remote.dispatcher.time.sleep", lambda *a, **k: None)
     return _ScriptedConn
@@ -363,6 +366,38 @@ class TestDispatchBackoff:
                 op_name="add", inputs=[np.array([1.0])], input_names=["x"], mode=DATA, endpoint_port=9, tenant_id="t"
             )
         assert len(scripted.script) == 0  # only one attempt; no retry
+
+
+class TestOutputDtypesHeader:
+    """X-Output-Dtypes 头：output_dtypes 随 /v1/run 下发；缺省不发（协议兼容）。"""
+
+    def test_header_sent_when_provided(self, scripted):
+        from ttk.remote import DATA
+        from ttk.remote.dispatcher import dispatch_to_remote
+
+        scripted.script = [_FakeResp(200, {"X-Output-Count": "0"})]
+        out = dispatch_to_remote(
+            op_name="add",
+            inputs=[np.array([1.0])],
+            input_names=["x"],
+            output_dtypes=["float16", "float16", "float32"],
+            mode=DATA,
+            endpoint_port=9,
+            tenant_id="t",
+        )
+        assert out == []
+        hdrs = dict(scripted.sent_headers)
+        assert hdrs["X-Output-Dtypes"] == json.dumps(["float16", "float16", "float32"])
+
+    def test_header_absent_when_omitted(self, scripted):
+        from ttk.remote import DATA
+        from ttk.remote.dispatcher import dispatch_to_remote
+
+        scripted.script = [_FakeResp(200, {"X-Output-Count": "0"})]
+        dispatch_to_remote(
+            op_name="add", inputs=[np.array([1.0])], input_names=["x"], mode=DATA, endpoint_port=9, tenant_id="t"
+        )
+        assert all(k != "X-Output-Dtypes" for k, _ in scripted.sent_headers)
 
 
 class TestRoundTrip:

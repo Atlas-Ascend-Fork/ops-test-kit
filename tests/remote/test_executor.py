@@ -804,3 +804,40 @@ class TestBackpressure:
 
         t.join(timeout=15)
         assert holder.get("s") == 200
+
+
+class TestComposeKwargsOutputDtypes:
+    """output_dtypes 仅类形态 compose 注入（与 input_formats 同守卫）。"""
+
+    def test_class_compose_gets_output_dtypes(self):
+        from ttk.remote.server.executor import _compose_kwargs
+
+        class Compose:
+            def __init__(self, **kwargs):
+                pass
+
+            def __call__(self, x, output_dtypes=None):
+                return x
+
+        kw = _compose_kwargs({"axis": 1}, [], Compose, ["float16", "float32"])
+        assert kw["axis"] == 1
+        assert kw["output_dtypes"] == ["float16", "float32"]
+
+    def test_function_form_not_injected(self):
+        from ttk.remote.server.executor import _compose_kwargs
+
+        def api_fn(x, axis=0):
+            return x
+
+        kw = _compose_kwargs({"axis": 1}, [], api_fn, ["float16"])
+        assert kw == {"axis": 1}
+
+    def test_none_not_injected(self):
+        from ttk.remote.server.executor import _compose_kwargs
+
+        class Compose:
+            def __call__(self, x):
+                return x
+
+        kw = _compose_kwargs({}, [], Compose, None)
+        assert "output_dtypes" not in kw

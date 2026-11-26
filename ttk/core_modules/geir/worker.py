@@ -698,6 +698,7 @@ def _collect_xpu_remote(testcase, switches, need_xpu_data, inputs=None, deadline
         param_order=_geir_param_order(testcase),
         input_formats=getattr(testcase, "input_formats", None),
         input_dtypes=getattr(testcase, "input_dtypes", None),
+        output_dtypes=getattr(testcase, "output_dtypes", None),
         deadline_s=deadline_s,
     )
     return third_parties, xpu_results, (priority or "xpu")

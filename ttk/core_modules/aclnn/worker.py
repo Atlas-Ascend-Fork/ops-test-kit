@@ -222,6 +222,11 @@ def _aclnn_xpu_input_dtypes(context: TestcaseAclnn) -> list:
     return dtypes
 
 
+def _aclnn_xpu_output_dtypes(context: TestcaseAclnn) -> list:
+    """逐输出槽 dtype（CSV 声明值，TensorList 输出保持嵌套）。"""
+    return list(context.output_dtypes or ())
+
+
 def _aclnn_xpu_input_names(context: TestcaseAclnn) -> list:
     """Input tensor param names (pure outputs filtered) for XPU schema."""
     op_api_info = OpApiInfoKeeper().info_of(context.api_name)
@@ -666,6 +671,7 @@ def _manual_data_dump(
 
 def _aclnn_xpu_derived(context, inputs=None, need_3party=False):
     """aclnn XPU 采集参数派生（同步/重叠共用；重叠路径传快照 inputs）。
+
     need_3party 驱动 cross_check 无三方输出的告警。"""
     return {
         "inputs": inputs if inputs is not None else _aclnn_xpu_inputs(context),
@@ -673,6 +679,7 @@ def _aclnn_xpu_derived(context, inputs=None, need_3party=False):
         "attrs": dict(context.xpu_attrs or {}),
         "param_order": _aclnn_param_order(context),
         "input_dtypes": _aclnn_xpu_input_dtypes(context),
+        "output_dtypes": _aclnn_xpu_output_dtypes(context),
         "need_3party": need_3party,
     }
 
@@ -738,7 +745,7 @@ def _collect_xpu(context, switches, xpu, dump_case=None) -> tuple:
 def _collect_xpu_remote(context, switches, need_xpu_data, derived=None, deadline_s=None):
     """aclnn 远端采集（同步形态 = 现状语义；重叠形态由 _dispatch_xpu 以快照
     derived 参数调起——inputs/input_names/attrs/param_order/input_dtypes/
-    need_3party 均经 derived 携带，5 参内聚）。"""
+    output_dtypes/need_3party 均经 derived 携带，5 参内聚）。"""
     from ..common.xpu import collect_third_party
 
     if derived is None:
@@ -754,6 +761,7 @@ def _collect_xpu_remote(context, switches, need_xpu_data, derived=None, deadline
         need_xpu_data=need_xpu_data,
         param_order=derived["param_order"],
         input_dtypes=derived["input_dtypes"],
+        output_dtypes=derived["output_dtypes"],
         deadline_s=deadline_s,
     )
     if derived["need_3party"] and third_parties is None:

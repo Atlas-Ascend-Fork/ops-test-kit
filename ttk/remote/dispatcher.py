@@ -674,6 +674,7 @@ class _RequestMeta:
     param_order: Optional[list]
     mode_int: int
     runtime: int
+    output_dtypes: Optional[list] = None
 
 
 def _build_headers(meta: _RequestMeta, schema: list, leaf_count: int) -> dict:
@@ -691,6 +692,8 @@ def _build_headers(meta: _RequestMeta, schema: list, leaf_count: int) -> dict:
     }
     if meta.param_order:
         headers["X-Param-Order"] = json.dumps(meta.param_order)
+    if meta.output_dtypes:
+        headers["X-Output-Dtypes"] = json.dumps(meta.output_dtypes)
     if meta.execution_type == "api":
         if meta.api:
             headers["X-API"] = meta.api
@@ -900,6 +903,7 @@ def dispatch_to_remote(
     attrs: Optional[dict] = None,
     input_formats: Optional[list] = None,
     input_dtypes: Optional[list] = None,
+    output_dtypes: Optional[list] = None,
     endpoint_host: str = "127.0.0.1",
     endpoint_port: int = 9090,
     tenant_id: str = "unknown",
@@ -948,6 +952,7 @@ def dispatch_to_remote(
         param_order=param_order,
         mode_int=_parse_client_mode(mode),
         runtime=runtime,
+        output_dtypes=list(output_dtypes) if output_dtypes else None,
     )
     headers = _build_headers(meta, schema, _schema_leaf_count(schema))
 

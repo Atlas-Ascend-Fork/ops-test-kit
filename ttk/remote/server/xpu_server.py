@@ -668,6 +668,13 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
                 param_order = json.loads(param_order_raw)
             except json.JSONDecodeError:
                 param_order = None
+        output_dtypes_raw = self._get_header("X-Output-Dtypes", "")
+        output_dtypes = None
+        if output_dtypes_raw:
+            try:
+                output_dtypes = json.loads(output_dtypes_raw)
+            except json.JSONDecodeError:
+                output_dtypes = None
         return {
             "tenant_id": tenant_id,
             "mode": mode,
@@ -677,6 +684,7 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
             "input_count": input_count,
             "attrs": attrs,
             "param_order": param_order,
+            "output_dtypes": output_dtypes,
         }
 
     def _dispatch_run(self, req_dir, req_api, parsed):
@@ -742,6 +750,7 @@ class XpuRequestHandler(BaseHTTPRequestHandler):
             "output_dir": req_dir,
             "runtime": parsed["runtime"],
             "param_order": parsed["param_order"],
+            "output_dtypes": parsed["output_dtypes"],
         }
         if "env" in opts:
             kwargs["env"] = opts["env"]

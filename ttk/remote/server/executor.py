@@ -1030,8 +1030,9 @@ def _load_named_inputs(input_schema, tmp_in_path, input_count, provider, device_
     return {k: _to_vendor_tensor(v, provider, device_str, dtypes.get(k), logical.get(k)) for k, v in named.items()}
 
 
-def _compose_kwargs(attrs, input_schema, callable_fn):
-    """三方执行入参：attrs 原样；仅类形态实现（compose）注入 input_formats。
+def _compose_kwargs(attrs, input_schema, callable_fn, output_dtypes=None):
+    """三方执行入参：attrs 原样；仅类形态实现（compose）注入 input_formats /
+    output_dtypes。
 
     format 已内嵌在 X-Input-Schema 每个条目——api 模式函数（如 torch.asinh）
     的形参与框架合成 kwargs 无关，注入会让 phase-2 变成
@@ -1041,6 +1042,8 @@ def _compose_kwargs(attrs, input_schema, callable_fn):
     schema_formats = [e.get("format") for e in (input_schema or []) if e.get("format")]
     if schema_formats and inspect.isclass(callable_fn):
         compose_kwargs["input_formats"] = schema_formats
+    if output_dtypes and inspect.isclass(callable_fn):
+        compose_kwargs["output_dtypes"] = output_dtypes
     return compose_kwargs
 
 
@@ -1065,6 +1068,7 @@ def execute_request(
     op_type=None,
     runtime=3,
     param_order=None,
+    output_dtypes=None,
     **_extra,
 ):
     """Run one request. Returns an envelope dict (never raises for 4xx/5xx)."""
@@ -1083,7 +1087,7 @@ def execute_request(
             named.pop(phantom)
 
         callable_fn, api_label = _resolve_callable(exec_type, provider, api, op_name, op_type, spec_module, spec_class)
-        compose_kwargs = _compose_kwargs(attrs, input_schema, callable_fn)
+        compose_kwargs = _compose_kwargs(attrs, input_schema, callable_fn, output_dtypes)
         if has_perf(mode):
             raw_outputs, perf = _run_perf(
                 callable_fn,

@@ -244,6 +244,7 @@ def _mx_case(path):
         flat_manual_xpu_binaries=(str(path),) if path else None,
         flat_output_view_shapes=((8,),),
         flat_output_dtypes=("float32",),
+        output_dtypes=("float32",),
         xpu_attrs={},
     )
 

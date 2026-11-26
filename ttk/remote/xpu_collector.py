@@ -60,6 +60,7 @@ def collect_xpu_results(
     attrs=None,
     input_formats=None,
     input_dtypes=None,
+    output_dtypes=None,
     spec_search_roots=None,
     tmp_root=None,
     runtime: int = 3,
@@ -80,6 +81,7 @@ def collect_xpu_results(
         op_type: operator type (for dispatch)
         attrs: operator attributes dict
         input_dtypes: 逐输入逻辑 dtype（CSV 声明值，如 complex32），顶层对齐
+        output_dtypes: 逐输出槽 dtype（CSV 声明值，TensorList 输出嵌套）
         spec_search_roots: spec search paths (for 424 retry)
 
     Returns:
@@ -117,6 +119,7 @@ def collect_xpu_results(
                 attrs=attrs or {},
                 input_formats=input_formats,
                 input_dtypes=input_dtypes,
+                output_dtypes=output_dtypes,
                 endpoint_host=ep.host,
                 endpoint_port=ep.port,
                 tenant_id=tenant_id,

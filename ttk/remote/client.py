@@ -179,6 +179,7 @@ def dispatch_xpu(
     switches,
     need_xpu_data: bool,
     param_order: Optional[list] = None,
+    output_dtypes: Optional[list] = None,
     deadline_s: Optional[float] = None,
 ):
     """Run XPU dispatch，返回 (xpu_results, priority_provider)。
@@ -235,6 +236,7 @@ def dispatch_xpu(
         attrs=attributes or {},
         input_formats=input_formats,
         input_dtypes=input_dtypes,
+        output_dtypes=output_dtypes,
         tmp_root=_tmp_root,
         runtime=getattr(switches, "run_time", 3),
         param_order=param_order,
@@ -276,6 +278,7 @@ def collect_third_party(
     param_order: Optional[list] = None,
     input_formats: Optional[list] = None,
     input_dtypes: Optional[list] = None,
+    output_dtypes: Optional[list] = None,
     deadline_s: Optional[float] = None,
 ) -> Tuple[Optional[str], Optional[list], Optional[dict]]:
     """门面：采集第三方输出，返回 (priority_provider, flat_third_parties, xpu_results)。
@@ -289,6 +292,9 @@ def collect_third_party(
     input_dtypes：逐输入**逻辑** dtype（与 input_names 位置对齐，可为空），即
     CSV 声明值（如 complex32）——嵌入 X-Input-Schema 的 logical_dtype 字段，
     供服务端把 complex32 的 float16+尾维[2] 存储布局还原成 torch.complex32。
+
+    output_dtypes：逐输出槽 dtype（CSV 声明值，TensorList 输出嵌套）——经
+    X-Output-Dtypes 头下发，服务端以同名 kwarg 注入 compose。
 
     - 远端不可用 / 无 provider / 执行失败 → (None, None, None)
       （调用方传 None 给 compare → cross_check 返回 GOLDEN_FAILURE）
@@ -313,6 +319,7 @@ def collect_third_party(
         param_order=param_order,
         input_formats=input_formats,
         input_dtypes=input_dtypes,
+        output_dtypes=output_dtypes,
         deadline_s=deadline_s,
     )
 
