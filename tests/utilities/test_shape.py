@@ -69,5 +69,5 @@ def test_is_shape(candidate, expected):
 
 def test_promote_scalar_shapes():
     """空 shape () → (1,)（标量升一维），None 原样保留。"""
-    assert promote_scalar_shapes(((), (2, 3), None)) == ((1,), (2, 3), None)
+    assert promote_scalar_shapes(((), (2, 3), None)) == ((), (2, 3), None)
     assert promote_scalar_shapes(None) == ()

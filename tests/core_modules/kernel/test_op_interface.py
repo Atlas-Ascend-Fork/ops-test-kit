@@ -514,16 +514,27 @@ class TestPrepareOperatorParametersConst:
         assert ipt[1]["shape"] == (5, 6)
         assert opt == ()
 
-    def test_normal_inputs_with_output(self, mock_singleton):
+    @pytest.mark.parametrize(
+        ("in_shape", "expected"),
+        [
+            ((3, 4), (3, 4)),
+            ((), ()),  # rank-0 标量原样透传：输入输出描述一致，tiling 真实覆盖标量场景
+            ((1,), (1,)),
+            ((0,), (0,)),  # 空张量不受影响
+        ],
+    )
+    def test_normal_inputs_with_output(self, mock_singleton, in_shape, expected):
         oi = mock_singleton
         case = _make_testcase(
-            input_shapes=((3, 4), (5, 6)),
-            output_shapes=((3, 6),),
+            input_shapes=(in_shape, in_shape),
+            output_shapes=(in_shape,),
         )
         ipt, opt = self._run(oi, case, op_output_defined=True)
         assert len(ipt) == 2
         assert len(opt) == 1
-        assert opt[0]["shape"] == (3, 6)
+        assert ipt[0]["shape"] == expected
+        assert opt[0]["shape"] == expected
+        assert opt[0]["ori_shape"] == expected
         assert opt[0]["dtype"] == "float16"
 
     def test_none_input(self, mock_singleton):
@@ -567,14 +578,14 @@ class TestPrepareOperatorParametersConst:
         case = _make_testcase(
             input_shapes=((3, 4),),
             input_dtypes=("float16",),
-            output_shapes=(((2, 3), (4, 5)),),
+            output_shapes=(((2, 3), ()),),
             output_dtypes=(("float16", "float16"),),
         )
         ipt, opt = self._run(oi, case, op_output_defined=True, func_params=("x",))
         assert isinstance(opt[0], tuple)
         assert len(opt[0]) == 2
         assert opt[0][0]["shape"] == (2, 3)
-        assert opt[0][1]["shape"] == (4, 5)
+        assert opt[0][1]["shape"] == ()  # TensorList 嵌套 rank-0 原样保留
 
     def test_const_plus_tl_mixed(self, mock_singleton):
         oi = mock_singleton

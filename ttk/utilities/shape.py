@@ -49,10 +49,12 @@ def is_shape(candidate, allowed_type: tuple = (int,)) -> bool:
 
 
 def promote_scalar_shapes(shapes) -> tuple:
-    """Lift empty shape declarations () to (1,) — a 0-d scalar occupies one element.
+    """Normalize shape declarations to a tuple; None entries are preserved.
 
-    None entries are preserved; already-shaped entries pass through unchanged.
+    Rank-0 scalar declarations () pass through unchanged: tiling and launch
+    descriptors must carry the same shapes real frameworks feed, so a scalar
+    occupies one element without being lifted to (1,).
     """
     if shapes is None:
         return ()
-    return tuple(None if s is None else s if len(s) > 0 else (1,) for s in shapes)
+    return tuple(shapes)

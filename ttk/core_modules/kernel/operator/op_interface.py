@@ -312,7 +312,7 @@ class OperatorInterface(metaclass=Singleton):
         # outputs
         opt = []
         if OpInfoKeeper().op_output_defined(testcase.op_name):
-            stc_out_shapes = testcase.output_shapes
+            stc_out_shapes = _elim(testcase.output_shapes)
             stc_out_ori_shapes = _elim(testcase.output_ori_shapes)
             output_dist = testcase.output_distribution
             for op_n, shape in enumerate(stc_out_shapes):

@@ -248,19 +248,19 @@ class TestDynTensorDictNested:
         td2 = case.dyn_tensor_dict
         assert td1 is td2
 
-    def test_dyn_tensor_dict_scalar_shape_eliminated(self):
-        """Scalar shapes () should be converted to (1,) via promote_scalar_shapes."""
+    def test_dyn_tensor_dict_scalar_shape_passthrough(self):
+        """Scalar shapes () pass through unchanged for real rank-0 coverage."""
         case = _make_testcase(input_shapes=((), (8,)), input_dtypes=("float16", "float16"))
         _validate(case)
         inputs, _ = case.dyn_tensor_dict
-        # () is dynamicized to () then promote_scalar_shapes → (1,)
-        assert inputs[0]["shape"] == (1,)
+        # () is dynamicized to () and kept rank-0
+        assert inputs[0]["shape"] == ()
 
     def test_promote_scalar_shapes_nested_static(self):
-        """_promote_scalar_shapes_nested 处理 TensorList 嵌套：() → (1,)。"""
+        """_promote_scalar_shapes_nested 处理 TensorList 嵌套：() 原样保留。"""
         shapes = (((), (8,)), ((),))
         result = TestcaseKernel._promote_scalar_shapes_nested(shapes)
-        assert result == (((1,), (8,)), ((1,),))
+        assert result == (((), (8,)), ((),))
 
     def test_promote_scalar_shapes_nested_none(self):
         """_promote_scalar_shapes_nested: None 元素保持 None。"""
