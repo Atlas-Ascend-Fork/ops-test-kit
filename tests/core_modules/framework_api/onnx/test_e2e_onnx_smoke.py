@@ -103,12 +103,18 @@ def _assert_all_pass(result, label):
 
 
 def test_smoke_dual_mode_single_execution():
-    """--eager -c 双开：单次执行（无 OnGraphCst 阶段推进）+ 两列同值（镜像）。"""
+    """--eager -c 双开：单次执行（onnx 无真 eager，不走 run_eager）+ 两列同值（镜像）。"""
     result = _run_e2e("--eager", "-c")
     assert result.returncode == 0, result.stdout[-3000:]
     _assert_all_pass(result, "dual")
     combined = result.stdout + result.stderr
-    assert "OnGraphCst" not in combined  # cst 通道不再二次执行
+    # 回归绊线：onnx 的 eager ≡ 静态图（om 恒为静态图，无真 eager 路径），双开由
+    # alias 分支单次静态执行承载、EAGER 列同源镜像。OnEagerProfiling 仅在非 alias
+    # 的 elif 分支 notify（onnx 不可达）——出现即意味着 alias 失效或出现了真 eager
+    # 实现。注意不可改回断言 OnGraphCst 缺席：那是共享单次执行自身的状态名，阶段内
+    # 任何日志行（threadName 字段）或周期状态表都会带出该串，属显示层正常泄漏，
+    # 慢环境（阶段长、日志密）下稳定误报（910C + CANN 9.2.1 真机实录）。
+    assert "OnEagerProfiling" not in combined
     # EAGER 与 GRAPH CST 两列同值（同一份执行镜像；每用例两行相邻打印，序一致）
     eager_perf = re.findall(r"\|\s*EAGER\s*\|\s*([\d.]+)\s*\|", combined)
     cst_perf = re.findall(r"\|\s*GRAPH CST\s*\|\s*([\d.]+)\s*\|", combined)
