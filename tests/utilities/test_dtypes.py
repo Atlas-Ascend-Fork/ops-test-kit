@@ -531,7 +531,9 @@ def test_onnx_dtype_map_integrity():
 
 def test_onnx_map_agrees_with_installed_onnx():
     """装机 onnx（1–16 段存在的版本）TensorProto 枚举逐项对表锚定。"""
-    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnx.defs")
+    import onnx
+
     enum_attrs = {
         "float32": "FLOAT",
         "uint8": "UINT8",
