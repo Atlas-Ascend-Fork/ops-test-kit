@@ -90,3 +90,44 @@ assert device_us >= 0.0
         check=False,
     )
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr[-2000:]}"
+
+
+@pytest.mark.parametrize(
+    ("available", "expected_calls"),
+    [
+        ("tensorflow.core.profiler.protobuf", ["tensorflow.core.profiler.protobuf"]),
+        (
+            "tensorflow.tsl.profiler.protobuf",
+            ["tensorflow.core.profiler.protobuf", "tensorflow.tsl.profiler.protobuf"],
+        ),
+        (None, ["tensorflow.core.profiler.protobuf", "tensorflow.tsl.profiler.protobuf"]),
+    ],
+    ids=["legacy", "tf221_tsl_fallback", "both_missing"],
+)
+def test_load_xplane_pb2_import_layouts(monkeypatch, available, expected_calls):
+    """旧路径优先；TF 2.21 的 TSL 路径兜底；两者均缺失时保留 NA 语义。"""
+    import builtins
+
+    from ttk.remote.server import xpu_profiler
+
+    expected = object()
+    real_import = builtins.__import__
+    paths = {"tensorflow.core.profiler.protobuf", "tensorflow.tsl.profiler.protobuf"}
+    calls = []
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in paths:
+            calls.append(name)
+            if name == available:
+                return SimpleNamespace(xplane_pb2=expected)
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    actual = xpu_profiler._load_xplane_pb2()
+
+    assert calls == expected_calls
+    if available is None:
+        assert actual is None
+    else:
+        assert actual is expected

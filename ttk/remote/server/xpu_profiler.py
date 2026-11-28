@@ -191,15 +191,27 @@ def _sum_xplane_device_us(pb_path, xplane_pb2) -> float:
     return total
 
 
+def _load_xplane_pb2():
+    """Import xplane_pb2 from the legacy or TSL profiler protobuf layout."""
+    try:
+        from tensorflow.core.profiler.protobuf import xplane_pb2
+
+        return xplane_pb2
+    except ImportError:
+        try:
+            from tensorflow.tsl.profiler.protobuf import xplane_pb2
+
+            return xplane_pb2
+        except ImportError:
+            return None
+
+
 def tf_xpu_profiler_pass(invoke, runtime: int):
     """tf.profiler.experimental + xplane.pb. Returns (outputs, device_us).
 
     device_us = per-iteration average（device plane events duration_ps/1e6 总和
     / runtime）。两次 warmup 先于 profiled runtime invokes；logdir finally 清理。"""
-    try:
-        from tensorflow.core.profiler.protobuf import xplane_pb2
-    except ImportError:
-        xplane_pb2 = None
+    xplane_pb2 = _load_xplane_pb2()
 
     device_us = 0.0
     logdir = tempfile.mkdtemp(prefix="tfprof_")
@@ -212,7 +224,8 @@ def tf_xpu_profiler_pass(invoke, runtime: int):
             logging.warning("TF profiler wrote no xplane.pb under %s; device_us=NA", logdir)
         elif xplane_pb2 is None:
             logging.warning(
-                "tensorflow.core.profiler.protobuf.xplane_pb2 not importable; cannot parse %s; device_us=NA",
+                "xplane_pb2 not importable from tensorflow.core.profiler.protobuf or "
+                "tensorflow.tsl.profiler.protobuf; cannot parse %s; device_us=NA",
                 pb_path,
             )
         if pb_path and xplane_pb2:
